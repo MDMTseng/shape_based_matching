@@ -2,3 +2,13 @@ build/
 .idea/
 .vscode/
 CMakeLists.txt.user
+*.make
+*.cmake
+*.yaml
+CMakeFiles
+CMakeCache.txt
+Makefile
+shape_based_matching_test
+shape_based_matching_test_fusion
+libline2Dup.a
+libshape_based_matching.a

@@ -6,7 +6,7 @@
 using namespace std;
 using namespace cv;
 
-static std::string prefix = "/home/meiqua/shape_based_matching/test/";
+static std::string prefix = "test/";
 
 // NMS, got from cv::dnn so we don't need opencv contrib
 // just collapse it
@@ -163,7 +163,7 @@ void scale_test(string mode = "test"){
         // no need stride now
         Mat img = test_img.clone();
 
-        if(test_img.channels() == 1) cvtColor(test_img, test_img, CV_GRAY2BGR);
+        if(test_img.channels() == 1) cvtColor(test_img, test_img, COLOR_GRAY2BGR);
 
         Timer timer;
         // match, img, min socre, ids
@@ -277,7 +277,7 @@ void angle_test(string mode = "test"){
         cv::imshow("canny edge", canny_edge);
         // cv::waitKey();
 
-        if(img.channels() == 1) cvtColor(img, img, CV_GRAY2BGR);
+        if(img.channels() == 1) cvtColor(img, img, cv::COLOR_GRAY2BGR);
 
         std::cout << "matches.size(): " << matches.size() << std::endl;
         size_t top5 = 1;
@@ -348,16 +348,22 @@ void noise_test(string mode = "test"){
         shapes.produce_infos();
         std::vector<shape_based_matching::shapeInfo_producer::Info> infos_have_templ;
         string class_id = "test";
+        
+        detector.addTemplate_rotate(class_id, shapes);
+
+        
+        // addTemplate_rotate(class_id, int zero_id, float theta, cv::Point2f center);
         for(auto& info: shapes.infos){
-            imshow("train", shapes.src_of(info));
-            waitKey(1);
+            // auto mat = shapes.src_of(info);
+            // imshow("train", mat);
+            // waitKey(1);
 
             std::cout << "\ninfo.angle: " << info.angle << std::endl;
-            int templ_id = detector.addTemplate(shapes.src_of(info), class_id, shapes.mask_of(info));
-            std::cout << "templ_id: " << templ_id << std::endl;
-            if(templ_id != -1){
+            // int templ_id = detector.addTemplate(mat, class_id, shapes.mask_of(info));
+            // std::cout << "templ_id: " << templ_id << std::endl;
+            // if(templ_id != -1)
                 infos_have_templ.push_back(info);
-            }
+            
         }
         detector.writeClasses(prefix+"case2/%s_templ.yaml");
         shapes.save_infos(infos_have_templ, prefix + "case2/test_info.yaml");
@@ -374,7 +380,7 @@ void noise_test(string mode = "test"){
         auto matches = detector.match(test_img, 80, ids);
         timer.out();
 
-        if(test_img.channels() == 1) cvtColor(test_img, test_img, CV_GRAY2BGR);
+        if(test_img.channels() == 1) cvtColor(test_img, test_img, COLOR_GRAY2BGR);
 
         std::cout << "matches.size(): " << matches.size() << std::endl;
         size_t top5 = 500;
@@ -466,7 +472,7 @@ void view_angle(){
     assert(!img.empty() && "check your img path");
     imshow("img", img);
     cv::Mat gray;
-    cv::cvtColor(img, gray, CV_BGR2GRAY);
+    cv::cvtColor(img, gray, COLOR_GRAY2BGR);
 
     GaussianBlur(gray, gray, {5, 5}, 0);
 

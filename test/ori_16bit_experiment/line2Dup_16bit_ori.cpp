@@ -1469,6 +1469,11 @@ void Detector::readClasses(const std::vector<std::string> &class_ids,
     }
 }
 
+void Detector::setClasses(TemplatesMap &classTemMap)
+{
+  class_templates.reset();
+  class_templates=classTemMap;
+}
 void Detector::writeClasses(const std::string &format) const
 {
     TemplatesMap::const_iterator it = class_templates.begin(), it_end = class_templates.end();

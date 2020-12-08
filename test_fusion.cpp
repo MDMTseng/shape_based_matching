@@ -10,7 +10,7 @@ using namespace cv;
 
 #include "fusion.h"
 
-static std::string prefix = "/home/rfjiang/shape_based_matching/test/";
+static std::string prefix = "test/";
 void gauss_test()
 {
     // only support gray img now

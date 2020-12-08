@@ -1544,4 +1544,68 @@ void Detector::writeClasses(const std::string &format) const
     }
 }
 
+
+int Detector::addTemplate_rotate(const std::string &class_id, shape_based_matching::shapeInfo_producer& shapes)
+{
+	if (shapes.infos.size() < 1) return -1;
+	shapes.produce_infos();
+
+	auto& firstInfo = shapes.infos[0];
+	auto m1 = shapes.src_of(firstInfo);
+	auto m2 = shapes.mask_of(firstInfo);
+	auto templ_id = addTemplate(m1, class_id, m2);
+	if(templ_id<0) return -1;
+	
+	auto& infos = shapes.infos;
+	auto firstAngle = firstInfo.angle;
+	auto center = cv::Point2f(shapes.src.cols/2.0,shapes.src.rows/2.0);
+	std::vector<TemplatePyramid> &template_pyramids = class_templates[class_id];
+	auto to_rotate_tp = template_pyramids[templ_id];
+#pragma omp parallel for
+	for (int i = 1; i < shapes.infos.size(); i++)
+	{
+		float theta = infos[i].angle- firstAngle;
+		int template_id = static_cast<int>(template_pyramids.size());
+
+
+		TemplatePyramid tp;
+		tp.resize(pyramid_levels);
+
+		for (int l = 0; l < pyramid_levels; ++l)
+		{
+			if (l > 0) center /= 2;
+
+			for (auto& f : to_rotate_tp[l].features) {
+				Point2f p;
+				p.x = f.x + to_rotate_tp[l].tl_x;
+				p.y = f.y + to_rotate_tp[l].tl_y;
+				Point2f p_rot = rotatePoint(p, center, -theta / 180 * CV_PI);
+
+				Feature f_new;
+				f_new.x = int(p_rot.x + 0.5f);
+				f_new.y = int(p_rot.y + 0.5f);
+
+				f_new.theta = f.theta - theta;
+				while (f_new.theta > 360) f_new.theta -= 360;
+				while (f_new.theta < 0) f_new.theta += 360;
+
+				f_new.label = int(f_new.theta * 16 / 360 + 0.5f);
+				f_new.label &= 7;
+
+
+				tp[l].features.push_back(f_new);
+				tp[l].angle = theta;
+			}
+			tp[l].pyramid_level = l;
+		}
+
+		cropTemplates(tp);
+#pragma omp critical
+		{
+			template_pyramids.push_back(tp);
+		}
+	}
+   
+    return templ_id;
+}
 } // namespace line2Dup

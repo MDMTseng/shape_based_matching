@@ -67,6 +67,9 @@ class ScopeTimer: public Timer{
     ~ScopeTimer(){out(out_str);}
     std::string out_str;
 };
+namespace shape_based_matching {
+  class shapeInfo_producer;
+}
 
 namespace line2Dup
 {
@@ -92,6 +95,7 @@ struct Template
     int height;
     int tl_x;
     int tl_y;
+    float angle;
     int pyramid_level;
     std::vector<Feature> features;
 
@@ -99,6 +103,8 @@ struct Template
     void write(cv::FileStorage &fs) const;
 };
 
+typedef std::vector<Template> TemplatePyramid;
+typedef std::map<std::string, std::vector<TemplatePyramid>> TemplatesMap;
 class ColorGradientPyramid
 {
 public:
@@ -274,6 +280,7 @@ public:
 
     int addTemplate_rotate(const std::string &class_id, int zero_id, float theta, cv::Point2f center);
 
+    int addTemplate_rotate(const std::string &class_id, shape_based_matching::shapeInfo_producer& shapes);
     const cv::Ptr<ColorGradient> &getModalities() const { return modality; }
 
     int getT(int pyramid_level) const { return T_at_level[pyramid_level]; }
@@ -294,6 +301,7 @@ public:
     std::string readClass(const cv::FileNode &fn, const std::string &class_id_override = "");
     void writeClass(const std::string &class_id, cv::FileStorage &fs) const;
 
+    void setClasses(TemplatesMap &classTemMap);
     void readClasses(const std::vector<std::string> &class_ids,
                                      const std::string &format = "templates_%s.yml.gz");
     void writeClasses(const std::string &format = "templates_%s.yml.gz") const;
@@ -307,8 +315,6 @@ protected:
 
     float res_map_mag_thresh = 60.0f;
 
-    typedef std::vector<Template> TemplatePyramid;
-    typedef std::map<std::string, std::vector<TemplatePyramid>> TemplatesMap;
     TemplatesMap class_templates;
 
     typedef std::vector<cv::Mat> LinearMemories;

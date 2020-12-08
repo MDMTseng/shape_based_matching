@@ -18,21 +18,25 @@ ELSE()
 #    SET(PLATFORM_COMPILE_FLAGS "-msse ")  # SSE only -msse2 -msse3 -msse4 -mssse3
 ENDIF()
 
-SET(COMMON_COMPILE_FLAGS "-fopenmp") # -fno-strict-aliasing
+SET(COMMON_COMPILE_FLAGS "-Wall -Wno-sign-compare")
 SET(CMAKE_CXX_FLAGS "${PLATFORM_COMPILE_FLAGS} ${COMMON_COMPILE_FLAGS} $ENV{CXXFLAGS}")
-SET(CMAKE_CXX_FLAGS_DEBUG "-O0 -g2 -ggdb")
+SET(CMAKE_CXX_FLAGS_DEBUG "-O3")
 SET(CMAKE_CXX_FLAGS_RELEASE "-O3")
 
 
 # opencv
 set(CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH} /opt/ros/kinetic)
-find_package(OpenCV 3 REQUIRED)
+find_package(OpenCV 4 REQUIRED)
 include_directories(${OpenCV_INCLUDE_DIRS})
 
 
 # include MIPP headers
 include_directories (${INCLUDE_DIRECTORIES} "${CMAKE_CURRENT_SOURCE_DIR}/MIPP/")
 
+
+
+
+include_directories ("${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 # test exe
 add_executable(${PROJECT_NAME}_test line2Dup.cpp test.cpp)
@@ -42,3 +46,5 @@ target_link_libraries(${PROJECT_NAME}_test ${OpenCV_LIBS})
 add_executable(${PROJECT_NAME}_test_fusion line2Dup.cpp test_fusion.cpp)
 target_link_libraries(${PROJECT_NAME}_test_fusion ${OpenCV_LIBS})
 
+add_library(${PROJECT_NAME} line2Dup.cpp SBM_if.cpp)
+target_link_libraries(${PROJECT_NAME} ${OpenCV_LIBS})

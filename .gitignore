@@ -2,3 +2,9 @@ build/
 .idea/
 .vscode/
 CMakeLists.txt.user
+*.make
+*.cmake
+CMakeFiles
+CMakeCache.txt
+Makefile
+shape_based_matching_test

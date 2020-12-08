@@ -35,7 +35,14 @@ include_directories(${OpenCV_INCLUDE_DIRS})
 include_directories (${INCLUDE_DIRECTORIES} "${CMAKE_CURRENT_SOURCE_DIR}/MIPP/")
 
 
+
+
+include_directories ("${CMAKE_CURRENT_SOURCE_DIR}/include")
+
 # test exe
-add_executable(${PROJECT_NAME}_test line2Dup.cpp test.cpp)
-target_link_libraries(${PROJECT_NAME}_test ${OpenCV_LIBS})
+#add_executable(${PROJECT_NAME}_test line2Dup.cpp test.cpp)
+#target_link_libraries(${PROJECT_NAME}_test ${OpenCV_LIBS})
+
+add_library(line2Dup line2Dup.cpp SBM_if.cpp)
+target_link_libraries(line2Dup ${OpenCV_LIBS})
 

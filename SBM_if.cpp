@@ -7,7 +7,7 @@
 using namespace std;
 using namespace cv;
  
-SBM_if::SBM_if(): detector(6, {4, 8})
+SBM_if::SBM_if(): detector(60, {4,8},30,80)
 {
 
 }
@@ -16,22 +16,55 @@ void SBM_if::train(Mat &img)
 {
   Mat mask = Mat(img.size(), CV_8UC1, {255});
 
-  Timer train_timer;
-  shape_based_matching::shapeInfo_producer shapes(img, mask);
-  shapes.angle_range = {0, 360};
-  shapes.angle_step = 1;
-  shapes.produce_infos();
-  
-  detector.addTemplate_rotate(class_id, shapes);
+  line2Dup::TemplatePyramid tp;
+  detector.TemplateFeatureExtraction (img, mask, 128,tp);
 
+
+
+
+
+
+  auto center = cv::Point2f(img.cols/2.0,img.rows/2.0);
+  detector.addTemplate_rotate(class_id,tp,center);
+
+  for(int i=0;i<tp.size();i++)
+  {
+    // printf("pyLevel[%d]: xy:%d %d wh:%d  %d\n",i,tp[i].tl_x,tp[i].tl_y,tp[i].width,tp[i].height);
+    
+    int minY=999;
+    int maxY=0;
+    
+    for (auto& f : tp[i].features)
+    {
+      int trueY=tp[i].tl_y+f.y;
+      if(minY>trueY)
+      {
+        minY=trueY;
+      }
+      if(maxY>trueY)
+      {
+        maxY=trueY;
+      }
+      f.y=trueY;
+    }
+
+    for (auto& f : tp[i].features)
+    {
+      f.y=maxY-f.y;
+      f.theta*=-1;
+    }
+
+
+    // printf("pyLevel[%d]: xy:%d %d wh:%d  %d\n",i,tp[i].tl_x,tp[i].tl_y,tp[i].width,tp[i].height);
+    
+  }
+
+  detector.addTemplate_rotate(class_id+"_f",tp,center);
 }
 // only support gray img now
 std::vector<line2Dup::Match> SBM_if::test(Mat &img)
 {
-  std::vector<std::string> ids;
-  string class_id = "test";
-  ids.push_back(class_id);
-  return detector.match(img, 80, ids);
+  return detector.match(img, 60,180, {class_id,class_id+"_f"});
 }
 
 void MIPP_test(){

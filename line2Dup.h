@@ -275,12 +275,21 @@ public:
     std::vector<Match> match(cv::Mat sources, float threshold,
                                                      const std::vector<std::string> &class_ids = std::vector<std::string>(),
                                                      const cv::Mat masks = cv::Mat());
+    std::vector<Match> match(cv::Mat source, float threshold,float mag_thres, 
+                                                     const std::vector<std::string> &class_ids = std::vector<std::string>(),
+                                                     const cv::Mat masks = cv::Mat());
+
     int addTemplate(const cv::Mat sources, const std::string &class_id,
                                     const cv::Mat &object_mask, int num_features = 0);
 
+    int TemplateFeatureExtraction (const cv::Mat source,
+                                    const cv::Mat &object_mask, int num_features,TemplatePyramid &ret_tp);
     int addTemplate_rotate(const std::string &class_id, int zero_id, float theta, cv::Point2f center);
 
     int addTemplate_rotate(const std::string &class_id, shape_based_matching::shapeInfo_producer& shapes);
+    
+    int addTemplate_rotate(const std::string &class_id, TemplatePyramid tp, cv::Point2f center);
+
     const cv::Ptr<ColorGradient> &getModalities() const { return modality; }
 
     int getT(int pyramid_level) const { return T_at_level[pyramid_level]; }

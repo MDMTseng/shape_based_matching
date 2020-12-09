@@ -1048,6 +1048,10 @@ static int least_mul_of_Ts(const std::vector<int>& T_at_level){
 
 std::vector<Match> Detector::match(Mat source, float threshold, const std::vector<string> &class_ids, const Mat mask)
 {
+  return match(source,  threshold, res_map_mag_thresh, class_ids, mask);
+}
+std::vector<Match> Detector::match(Mat source, float threshold,float mag_thres, const std::vector<string> &class_ids, const Mat mask)
+{
     dx_ = cv::Mat();
     dy_ = cv::Mat();
 
@@ -1071,7 +1075,7 @@ std::vector<Match> Detector::match(Mat source, float threshold, const std::vecto
     const int tileCols = 256;
     const int num_threads_ = 4;
 
-    const int32_t mag_thresh_l2 = int32_t(res_map_mag_thresh*res_map_mag_thresh);
+    const int32_t mag_thresh_l2 = int32_t(mag_thres*mag_thres);
 
     cv::Mat pyrdown_src;
     for(int cur_l = 0; cur_l<T_at_level.size(); cur_l++){
@@ -1303,42 +1307,6 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
     }
 }
 
-int Detector::addTemplate(const Mat source, const std::string &class_id,
-                          const Mat &object_mask, int num_features)
-{
-    std::vector<TemplatePyramid> &template_pyramids = class_templates[class_id];
-    int template_id = static_cast<int>(template_pyramids.size());
-
-    TemplatePyramid tp;
-    tp.resize(pyramid_levels);
-
-    {
-        // Extract a template at each pyramid level
-        Ptr<ColorGradientPyramid> qp = modality->process(source, object_mask);
-
-        if(num_features > 0)
-            qp->num_features = num_features;
-
-        for (int l = 0; l < pyramid_levels; ++l)
-        {
-            /// @todo Could do mask subsampling here instead of in pyrDown()
-            if (l > 0)
-                qp->pyrDown();
-
-            bool success = qp->extractTemplate(tp[l]);
-            if (!success)
-                return -1;
-        }
-    }
-
-    //    Rect bb =
-    cropTemplates(tp);
-
-    /// @todo Can probably avoid a copy of tp here with swap
-    template_pyramids.push_back(tp);
-    return template_id;
-}
-
 static cv::Point2f rotate2d(const cv::Point2f inPoint, const double angRad)
 {
     cv::Point2f outPoint;
@@ -1545,26 +1513,66 @@ void Detector::writeClasses(const std::string &format) const
 }
 
 
-int Detector::addTemplate_rotate(const std::string &class_id, shape_based_matching::shapeInfo_producer& shapes)
-{
-	if (shapes.infos.size() < 1) return -1;
-	shapes.produce_infos();
 
-	auto& firstInfo = shapes.infos[0];
-	auto m1 = shapes.src_of(firstInfo);
-	auto m2 = shapes.mask_of(firstInfo);
-	auto templ_id = addTemplate(m1, class_id, m2);
-	if(templ_id<0) return -1;
-	
-	auto& infos = shapes.infos;
-	auto firstAngle = firstInfo.angle;
-	auto center = cv::Point2f(shapes.src.cols/2.0,shapes.src.rows/2.0);
+int Detector::TemplateFeatureExtraction (const Mat source,
+                          const Mat &object_mask, int num_features,TemplatePyramid &ret_tp)
+{
+
+    ret_tp.resize(pyramid_levels);
+
+    {
+        // Extract a template at each pyramid level
+        Ptr<ColorGradientPyramid> qp = modality->process(source, object_mask);
+
+        if(num_features > 0)
+            qp->num_features = num_features;
+
+        for (int l = 0; l < pyramid_levels; ++l)
+        {
+            // ret_tp[l].resize(0);
+            /// @todo Could do mask subsampling here instead of in pyrDown()
+            if (l > 0)
+                qp->pyrDown();
+
+            bool success = qp->extractTemplate(ret_tp[l]);
+            if (!success)
+                return -1; 
+        }
+    }
+
+    cropTemplates(ret_tp);
+
+    return 0;
+}
+
+
+
+
+int Detector::addTemplate(const Mat source, const std::string &class_id,
+                          const Mat &object_mask, int num_features)
+{
+    TemplatePyramid tp;
+
+    TemplateFeatureExtraction (source,object_mask, num_features,tp);
+
+    std::vector<TemplatePyramid> &template_pyramids = class_templates[class_id];
+    int template_id = static_cast<int>(template_pyramids.size());
+
+    /// @todo Can probably avoid a copy of tp here with swap
+    template_pyramids.push_back(tp);
+    return template_id;
+}
+
+
+int Detector::addTemplate_rotate(const std::string &class_id, TemplatePyramid ref_tp, cv::Point2f center)
+{
 	std::vector<TemplatePyramid> &template_pyramids = class_templates[class_id];
-	auto to_rotate_tp = template_pyramids[templ_id];
+	auto to_rotate_tp = ref_tp;
+  float firstAngle=0;
 #pragma omp parallel for
-	for (int i = 1; i < shapes.infos.size(); i++)
+	for (int i = 0; i < 360; i+=1)
 	{
-		float theta = infos[i].angle- firstAngle;
+		float theta = i- firstAngle;
 		int template_id = static_cast<int>(template_pyramids.size());
 
 
@@ -1605,7 +1613,27 @@ int Detector::addTemplate_rotate(const std::string &class_id, shape_based_matchi
 			template_pyramids.push_back(tp);
 		}
 	}
-   
+   int templ_id=0;
     return templ_id;
 }
+
+
+
+
+int Detector::addTemplate_rotate(const std::string &class_id, shape_based_matching::shapeInfo_producer& shapes)
+{
+	if (shapes.infos.size() < 1) return -1;
+	shapes.produce_infos();
+  TemplatePyramid tp;
+  TemplateFeatureExtraction (shapes.src,shapes.mask, 0,tp);
+
+	auto center = cv::Point2f(shapes.src.cols/2.0,shapes.src.rows/2.0);
+
+  return addTemplate_rotate(class_id,tp,center);
+}
+
+
+
+
+
 } // namespace line2Dup

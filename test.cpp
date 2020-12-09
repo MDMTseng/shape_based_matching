@@ -348,56 +348,27 @@ void noise_test(string mode = "test"){
     }
     else if(mode=="traintest")
     {
-        std::vector<std::string> ids;
-        string class_id = "test";
-        ids.push_back(class_id);
+        // std::vector<std::string> ids;
+        // string class_id = "test";
+        // ids.push_back(class_id);
 
         SBM_if sbmif;
         {
             Mat img = imread(prefix+"case2/train.png");
             assert(!img.empty() && "check your img path");
-
-            Mat mask = Mat(img.size(), CV_8UC1, {255});
-
-            // padding to avoid rotating out
-            int padding = 0;
-            cv::Mat padded_img = img;
-
-            cv::Mat padded_mask = cv::Mat(mask.rows + 2*padding, mask.cols + 2*padding, mask.type(), cv::Scalar::all(0));
-            mask.copyTo(padded_mask(Rect(padding, padding, img.cols, img.rows)));
-
-
-
-            Timer train_timer;
-            shape_based_matching::shapeInfo_producer shapes(padded_img, padded_mask);
-            shapes.angle_range = {0, 360};
-            shapes.angle_step = 1;
-            shapes.produce_infos();
-
-            
-            detector.addTemplate_rotate(class_id, shapes);
-
-            train_timer.out("Training OK!!");
-
-
-
-
-
+            sbmif.train(img);
         }
 
-
-
-
-
-
-
-
-        Mat test_img = imread(prefix+"case2/test.png", cv::IMREAD_GRAYSCALE);
+        Mat test_img = imread(prefix+"case2/test_half.png", cv::IMREAD_GRAYSCALE);
         assert(!test_img.empty() && "check your img path");
  
         Timer timer;
-        auto matches = detector.match(test_img, 80, ids);
-        timer.out();
+        auto matches = sbmif.test(test_img);
+        for(int i=1;i<1;i++)
+        {
+          auto matches_ = sbmif.test(test_img);
+        }
+        timer.out("MATCH::====================");
 
         if(test_img.channels() == 1) cvtColor(test_img, test_img, COLOR_GRAY2BGR);
 
@@ -412,8 +383,9 @@ void noise_test(string mode = "test"){
             Rect box;
             box.x = match.x;
             box.y = match.y;
-
-            auto templ = detector.getTemplates("test",
+            
+            // printf("template_id:%d\n",match.template_id);
+            auto templ = sbmif.detector.getTemplates(match.class_id,
                                                match.template_id);
 
             box.width = templ[0].width;
@@ -424,9 +396,10 @@ void noise_test(string mode = "test"){
         cv_dnn::NMSBoxes(boxes, scores, 0, 0.5f, idxs);
 
         for(auto idx: idxs){
+        //for(int idx=0;idx<matches.size(); idx++){
             auto match = matches[idx];
 
-            auto templ = detector.getTemplates("test",
+            auto templ = sbmif.detector.getTemplates(match.class_id,
                                             match.template_id);
             int x =  templ[0].width + match.x;
             int y = templ[0].height + match.y;
@@ -434,9 +407,9 @@ void noise_test(string mode = "test"){
 
 
             cv::Vec3b randColor;
-            randColor[0] = rand()%155 + 100;
-            randColor[1] = rand()%155 + 100; 
-            randColor[2] = rand()%155 + 100;
+            randColor[0] = rand()%(255/3) + 255/3;
+            randColor[1] = rand()%(255/3) + 255/3; 
+            randColor[2] = rand()%(255/3) + 255/3;
 
             for(int i=0; i<templ[0].features.size(); i++){
                 auto feat = templ[0].features[i];

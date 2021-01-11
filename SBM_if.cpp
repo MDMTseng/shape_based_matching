@@ -20,6 +20,22 @@ void SBM_if::train(Mat &img)
   detector.TemplateFeatureExtraction (img, mask, 128,tp);
 
 
+  for(int i=0;i<tp.size();i++)
+  {
+    int minY=999;
+    int maxY=0;
+    tp[i].tl_y/=2;
+    tp[i].tl_x/=2;
+    tp[i].width/=2;
+    tp[i].height/=2;
+
+
+    for (auto& f : tp[i].features)
+    {
+      f.x/=2;
+      f.y/=2;
+    }
+  }
 
 
 

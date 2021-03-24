@@ -8,7 +8,7 @@
 using namespace std;
 using namespace cv;
 
-static std::string prefix = "test/";
+static std::string prefix = "./";
 
 void circle_gen(){
     Mat bg = Mat(800, 800, CV_8UC3, {0, 0, 0});
@@ -354,12 +354,12 @@ void noise_test(string mode = "test"){
 
         SBM_if sbmif;
         {
-            Mat img = imread(prefix+"case2/train.png");
+            Mat img = imread(prefix+"case1/train.png");
             assert(!img.empty() && "check your img path");
-            sbmif.train(img);
+            sbmif.train(img,1);
         }
 
-        Mat test_img = imread(prefix+"case2/test_half.png", cv::IMREAD_GRAYSCALE);
+        Mat test_img = imread(prefix+"case1/test.png", cv::IMREAD_GRAYSCALE);
         assert(!test_img.empty() && "check your img path");
  
         Timer timer;

@@ -9,7 +9,7 @@ class SBM_if{
   line2Dup::Detector detector;
   SBM_if();
 
-  void train(Mat &img);
+  void train(Mat &img,float scaleN=1);
   std::vector<line2Dup::Match> test(Mat &img);
 
 };

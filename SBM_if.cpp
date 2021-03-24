@@ -12,35 +12,34 @@ SBM_if::SBM_if(): detector(60, {4,8},30,80)
 
 }
 
-void SBM_if::train(Mat &img)
+void SBM_if::train(Mat &img,float scaleN)
 {
   Mat mask = Mat(img.size(), CV_8UC1, {255});
 
   line2Dup::TemplatePyramid tp;
   detector.TemplateFeatureExtraction (img, mask, 128,tp);
 
-
   for(int i=0;i<tp.size();i++)
   {
     int minY=999;
     int maxY=0;
-    tp[i].tl_y/=2;
-    tp[i].tl_x/=2;
-    tp[i].width/=2;
-    tp[i].height/=2;
+    tp[i].tl_y*=scaleN;
+    tp[i].tl_x*=scaleN;
+    tp[i].width*=scaleN;
+    tp[i].height*=scaleN;
 
 
     for (auto& f : tp[i].features)
     {
-      f.x/=2;
-      f.y/=2;
+      f.x*=scaleN;
+      f.y*=scaleN;
     }
   }
 
 
 
 
-  auto center = cv::Point2f(img.cols/2.0,img.rows/2.0);
+  auto center = cv::Point2f(img.cols*scaleN,img.rows*scaleN);
   detector.addTemplate_rotate(class_id,tp,center);
 
   for(int i=0;i<tp.size();i++)

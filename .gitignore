@@ -12,3 +12,6 @@ shape_based_matching_test
 shape_based_matching_test_fusion
 libline2Dup.a
 libshape_based_matching.a
+shape_based_matching_test.exe
+shape_based_matching_test_fusion.exe
+test/

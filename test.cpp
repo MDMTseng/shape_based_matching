@@ -364,7 +364,7 @@ void noise_test(string mode = "test"){
  
         Timer timer;
         auto matches = sbmif.test(test_img);
-        for(int i=1;i<1;i++)
+        for(int i=1;i<10;i++)
         {
           auto matches_ = sbmif.test(test_img);
         }
@@ -485,7 +485,10 @@ void view_angle(){
 }
 
 int main(){
-
+    
+#ifdef _OPENMP
+    printf("OPEN MP is here\n");
+#endif
     MIPP_test();
     noise_test("traintest"); // test or train
     return 0;

@@ -15,7 +15,7 @@ ELSE()
 
     # some places of the algorithm are designed for 128 SIMD
     # so 128 SSE may slightly faster than 256 AVX, you may want this
-#    SET(PLATFORM_COMPILE_FLAGS "-msse ")  # SSE only -msse2 -msse3 -msse4 -mssse3
+    #SET(PLATFORM_COMPILE_FLAGS "-msse ")  # SSE only -msse2 -msse3 -msse4 -mssse3
 ENDIF()
 
 SET(COMMON_COMPILE_FLAGS "-Wall -Wno-sign-compare")
@@ -29,6 +29,12 @@ set(CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH} /opt/ros/kinetic)
 find_package(OpenCV 4 REQUIRED)
 include_directories(${OpenCV_INCLUDE_DIRS})
 
+find_package(OpenMP)
+if (OPENMP_FOUND)
+    set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
+    set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+    set (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
+endif()
 
 # include MIPP headers
 include_directories (${INCLUDE_DIRECTORIES} "${CMAKE_CURRENT_SOURCE_DIR}/MIPP/")

@@ -1086,6 +1086,7 @@ std::vector<Match> Detector::match(Mat source, float threshold,float mag_thres, 
         const int imgCols = biggest_imgCols >> cur_l;
 
         const int cur_T = T_at_level[cur_l];
+        printf(">>>imgRows:%d,imgCols:%d,cur_T:%d\n",imgRows,imgCols,cur_T);
         assert(cur_T % 2 == 0);
 
         // use old linear function will create those for us
@@ -1246,7 +1247,11 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
                 Match &match2 = candidates[m];
                 int x = match2.x * 2 + 1; /// @todo Support other pyramid distance
                 int y = match2.y * 2 + 1;
-
+                // if(1)//skip refine
+                // {
+                //   match2.x = x;
+                //   match2.y = y;
+                // }
                 // Require 8 (reduced) row/cols to the up/left
                 x = std::max(x, border);
                 y = std::max(y, border);

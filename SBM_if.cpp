@@ -7,7 +7,7 @@
 using namespace std;
 using namespace cv;
  
-SBM_if::SBM_if(): detector(60, {4,8},30,80)
+SBM_if::SBM_if(): detector(60, {4,6},30,80)
 {
 
 }
@@ -17,7 +17,7 @@ void SBM_if::train(Mat &img,float scaleN)
   Mat mask = Mat(img.size(), CV_8UC1, {255});
 
   line2Dup::TemplatePyramid tp;
-  detector.TemplateFeatureExtraction (img, mask, 128,tp);
+  detector.TemplateFeatureExtraction (img, mask, 62,tp);
 
   for(int i=0;i<tp.size();i++)
   {

@@ -245,7 +245,7 @@ void angle_test(string mode = "test"){
 }
 
 void noise_test(string mode = "test"){
-    line2Dup::Detector detector(64, {4,8});
+    line2Dup::Detector detector(64, {16});
 
 //    mode = "test";
     if(mode == "train"){
@@ -352,21 +352,35 @@ void noise_test(string mode = "test"){
         // string class_id = "test";
         // ids.push_back(class_id);
 
+        float downScale=0.3;
         SBM_if sbmif;
         {
             Mat img = imread(prefix+"case1/train.png");
+            
             assert(!img.empty() && "check your img path");
-            sbmif.train(img,1);
+            // blur( img, img, Size(3, 3));
+            sbmif.train(img,downScale);
         }
 
-        Mat test_img = imread(prefix+"case1/test.png", cv::IMREAD_GRAYSCALE);
-        assert(!test_img.empty() && "check your img path");
+        Mat test_img_ = imread(prefix+"case1/test.png", cv::IMREAD_GRAYSCALE);
+        Mat test_img;
+        assert(!test_img_.empty() && "check your img path");
  
         Timer timer;
-        auto matches = sbmif.test(test_img);
-        for(int i=1;i<10;i++)
+        std::vector<line2Dup::Match> matches;// = sbmif.test(test_img);
+        int loopN=10;
+        for(int i=0;i<loopN;i++)
         {
-          auto matches_ = sbmif.test(test_img);
+          cv::Size size1 = test_img_.size();
+          size1.width=((int)(size1.width*downScale))/8*8;
+          size1.height=((int)(size1.height*downScale))/8*8;
+
+          
+          // cv::resize(inImg, outImg, cv::Size(), 0.75, 0.75);
+          resize(test_img_,test_img,size1,cv::INTER_AREA);//resize image
+
+          // blur( test_img, test_img, Size(3, 3));
+          matches = sbmif.test(test_img);
         }
         timer.out("MATCH::====================");
 

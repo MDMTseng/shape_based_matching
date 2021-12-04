@@ -352,29 +352,36 @@ void noise_test(string mode = "test"){
         // string class_id = "test";
         // ids.push_back(class_id);
 
-        float downScale=0.3;
-        SBM_if sbmif;
+        float downScale=0.2;
+        string test_folder="case1";
+        SBM_if sbmif(60, {4,8},130,220);
         {
-            Mat img = imread(prefix+"case1/train.png");
+            Mat img = imread(prefix+test_folder+"/train.png");
             
             assert(!img.empty() && "check your img path");
             // blur( img, img, Size(3, 3));
             sbmif.train(img,downScale);
         }
+        
+        std::cout << "Train done" << std::endl;
 
-        Mat test_img_ = imread(prefix+"case1/test.png", cv::IMREAD_GRAYSCALE);
+
+
+        Mat test_img_ = imread(prefix+test_folder+"/test.png", cv::IMREAD_GRAYSCALE);
         Mat test_img;
         assert(!test_img_.empty() && "check your img path");
  
         Timer timer;
         std::vector<line2Dup::Match> matches;// = sbmif.test(test_img);
         int loopN=10;
+
+        
+        cv::Size size1 = test_img_.size();
+        size1.width=((int)(size1.width*downScale))/8*8;
+        size1.height=((int)(size1.height*downScale))/8*8;
+
         for(int i=0;i<loopN;i++)
         {
-          cv::Size size1 = test_img_.size();
-          size1.width=((int)(size1.width*downScale))/8*8;
-          size1.height=((int)(size1.height*downScale))/8*8;
-
           
           // cv::resize(inImg, outImg, cv::Size(), 0.75, 0.75);
           resize(test_img_,test_img,size1,cv::INTER_AREA);//resize image

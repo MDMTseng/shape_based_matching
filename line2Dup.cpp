@@ -1569,15 +1569,15 @@ int Detector::addTemplate(const Mat source, const std::string &class_id,
 }
 
 
-int Detector::addTemplate_rotate(const std::string &class_id, TemplatePyramid ref_tp, cv::Point2f center)
+int Detector::addTemplate_rotate(const std::string &class_id, TemplatePyramid ref_tp, cv::Point2f center,float angleFrom,float angleTo,int angleSegments)
 {
 	std::vector<TemplatePyramid> &template_pyramids = class_templates[class_id];
 	auto to_rotate_tp = ref_tp;
   float firstAngle=0;
 #pragma omp parallel for
-	for (int i = 0; i < 360; i+=1)
+	for (int i = 0; i < angleSegments; i+=1)
 	{
-		float theta = i- firstAngle;
+		float theta = i*(angleTo-angleFrom)/angleSegments- angleFrom;
 		int template_id = static_cast<int>(template_pyramids.size());
 
 
@@ -1625,7 +1625,7 @@ int Detector::addTemplate_rotate(const std::string &class_id, TemplatePyramid re
 
 
 
-int Detector::addTemplate_rotate(const std::string &class_id, shape_based_matching::shapeInfo_producer& shapes)
+int Detector::addTemplate_rotate(const std::string &class_id, shape_based_matching::shapeInfo_producer& shapes,float angleFrom,float angleTo,int angleSegments)
 {
 	if (shapes.infos.size() < 1) return -1;
 	shapes.produce_infos();
@@ -1634,7 +1634,7 @@ int Detector::addTemplate_rotate(const std::string &class_id, shape_based_matchi
 
 	auto center = cv::Point2f(shapes.src.cols/2.0,shapes.src.rows/2.0);
 
-  return addTemplate_rotate(class_id,tp,center);
+  return addTemplate_rotate(class_id,tp,center,angleFrom,angleTo,angleSegments);
 }
 
 

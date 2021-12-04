@@ -8,8 +8,10 @@ class SBM_if{
   std::string prefix = "test/";
   line2Dup::Detector detector;
   SBM_if();
-
-  void train(Mat &img,float scaleN=1);
+  SBM_if(int num_features, std::vector<int> T, float weak_thresh = 30.0f, float strong_thresh = 60.0f);
+  int TemplateFeatureExtraction (const Mat source,
+                          const Mat &object_mask, int num_features,line2Dup::TemplatePyramid &ret_tp);
+  void train(Mat &img,float scaleN=1,Mat *mask=NULL);
   std::vector<line2Dup::Match> test(Mat &img);
 
 };

@@ -11,13 +11,34 @@ SBM_if::SBM_if(): detector(60, {4,6},30,80)
 {
 
 }
-
-void SBM_if::train(Mat &img,float scaleN)
+SBM_if::SBM_if(int num_features, std::vector<int> T, float weak_thresh, float strong_thresh): detector(num_features,T,weak_thresh,strong_thresh)
 {
-  Mat mask = Mat(img.size(), CV_8UC1, {255});
 
+}
+
+int SBM_if::TemplateFeatureExtraction (const Mat source,
+                          const Mat &object_mask, int num_features,line2Dup::TemplatePyramid &ret_tp)
+{
+  return detector.TemplateFeatureExtraction (source, object_mask, num_features,ret_tp);
+}
+
+
+// int SBM_if::FeatureRegister (const Mat source,
+//                           const Mat &object_mask, int num_features,line2Dup::TemplatePyramid &ret_tp)
+// {
+//   return detector.TemplateFeatureExtraction (source, object_mask, num_features,ret_tp);
+// }
+
+void SBM_if::train(Mat &img,float scaleN,Mat *mask)
+{
+  
+  Mat _mask = Mat(img.size(), CV_8UC1, {255});
+  if(mask==NULL)
+  {
+    mask=&_mask;
+  }
   line2Dup::TemplatePyramid tp;
-  detector.TemplateFeatureExtraction (img, mask, 62,tp);
+  detector.TemplateFeatureExtraction (img, *mask, 60,tp);
 
   for(int i=0;i<tp.size();i++)
   {
@@ -37,10 +58,10 @@ void SBM_if::train(Mat &img,float scaleN)
   }
 
 
-
+  int rot_segments=360;
 
   auto center = cv::Point2f(img.cols*scaleN,img.rows*scaleN);
-  detector.addTemplate_rotate(class_id,tp,center);
+  detector.addTemplate_rotate(class_id,tp,center,0,360,rot_segments);
 
   for(int i=0;i<tp.size();i++)
   {
@@ -74,7 +95,7 @@ void SBM_if::train(Mat &img,float scaleN)
     
   }
 
-  detector.addTemplate_rotate(class_id+"_f",tp,center);
+  detector.addTemplate_rotate(class_id+"_f",tp,center,0,360,rot_segments);
 }
 // only support gray img now
 std::vector<line2Dup::Match> SBM_if::test(Mat &img)

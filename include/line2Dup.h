@@ -286,9 +286,9 @@ public:
                                     const cv::Mat &object_mask, int num_features,TemplatePyramid &ret_tp);
     int addTemplate_rotate(const std::string &class_id, int zero_id, float theta, cv::Point2f center);
 
-    int addTemplate_rotate(const std::string &class_id, shape_based_matching::shapeInfo_producer& shapes);
+    int addTemplate_rotate(const std::string &class_id, shape_based_matching::shapeInfo_producer& shapes,float angleFrom=0,float angleTo=360,int angleSegments=360);
     
-    int addTemplate_rotate(const std::string &class_id, TemplatePyramid tp, cv::Point2f center);
+    int addTemplate_rotate(const std::string &class_id, TemplatePyramid tp, cv::Point2f center,float angleFrom=0,float angleTo=360,int angleSegments=360);
 
     const cv::Ptr<ColorGradient> &getModalities() const { return modality; }
 

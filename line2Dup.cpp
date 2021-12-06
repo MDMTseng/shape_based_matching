@@ -1339,8 +1339,6 @@ int Detector::addTemplate_rotate(const string &class_id, int zero_id,
 
     for (int l = 0; l < pyramid_levels; ++l)
     {
-        if(l>0) center /= 2;
-
         for(auto& f: to_rotate_tp[l].features){
             Point2f p;
             p.x = f.x + to_rotate_tp[l].tl_x;
@@ -1361,6 +1359,8 @@ int Detector::addTemplate_rotate(const string &class_id, int zero_id,
 
             tp[l].features.push_back(f_new);
         }
+        if(l>0) center /= 2;
+
         tp[l].pyramid_level = l;
     }
 
@@ -1586,8 +1586,6 @@ int Detector::addTemplate_rotate(const std::string &class_id, TemplatePyramid re
 
 		for (int l = 0; l < pyramid_levels; ++l)
 		{
-			if (l > 0) center /= 2;
-
 			for (auto& f : to_rotate_tp[l].features) {
 				Point2f p;
 				p.x = f.x + to_rotate_tp[l].tl_x;
@@ -1609,6 +1607,8 @@ int Detector::addTemplate_rotate(const std::string &class_id, TemplatePyramid re
 				tp[l].features.push_back(f_new);
 				tp[l].angle = theta;
 			}
+			if (l > 0) center /= 2;
+
 			tp[l].pyramid_level = l;
 		}
 

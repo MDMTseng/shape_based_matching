@@ -12,6 +12,9 @@ class SBM_if{
   int TemplateFeatureExtraction (const Mat source,
                           const Mat &object_mask, int num_features,line2Dup::TemplatePyramid &ret_tp);
   void train(Mat &img,float scaleN=1,Mat *mask=NULL);
+
+  void train(std::string name,line2Dup::TemplatePyramid &tp,cv::Point2f rotateCenter,float scaleN=1,float angleFrom=0,float angleTo=360,int angleSegments=360);
+  // void train(std::string name,line2Dup::TemplatePyramid &tp);
   std::vector<line2Dup::Match> test(Mat &img);
 
 };

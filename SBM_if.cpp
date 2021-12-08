@@ -40,6 +40,17 @@ void SBM_if::train(Mat &img,float scaleN,Mat *mask)
   line2Dup::TemplatePyramid tp;
   detector.TemplateFeatureExtraction (img, *mask, 60,tp);
 
+  auto center = cv::Point2f(img.cols/2,img.rows/2);
+  train(class_id,tp,center,scaleN);
+
+}
+
+
+
+void SBM_if::train(std::string name,line2Dup::TemplatePyramid &tp,cv::Point2f rotateCenter,float scaleN,float angleFrom,float angleTo,int angleSegments)
+{
+
+  
   for(int i=0;i<tp.size();i++)
   {
     int minY=999;
@@ -58,11 +69,8 @@ void SBM_if::train(Mat &img,float scaleN,Mat *mask)
   }
 
 
-  int rot_segments=360;
-
-  auto center = cv::Point2f(img.cols*scaleN,img.rows*scaleN);
-  detector.addTemplate_rotate(class_id,tp,center,0,360,rot_segments);
-
+  detector.addTemplate_rotate(name,tp,rotateCenter,angleFrom,angleTo,angleSegments);
+  
   for(int i=0;i<tp.size();i++)
   {
     // printf("pyLevel[%d]: xy:%d %d wh:%d  %d\n",i,tp[i].tl_x,tp[i].tl_y,tp[i].width,tp[i].height);
@@ -95,8 +103,10 @@ void SBM_if::train(Mat &img,float scaleN,Mat *mask)
     
   }
 
-  detector.addTemplate_rotate(class_id+"_f",tp,center,0,360,rot_segments);
+  detector.addTemplate_rotate(name+"_f",tp,rotateCenter,angleFrom,angleTo,angleSegments);
 }
+
+
 // only support gray img now
 std::vector<line2Dup::Match> SBM_if::test(Mat &img)
 {

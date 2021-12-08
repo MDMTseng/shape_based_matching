@@ -1316,8 +1316,12 @@ static cv::Point2f rotate2d(const cv::Point2f inPoint, const double angRad)
 {
     cv::Point2f outPoint;
     //CW rotation
-    outPoint.x = std::cos(angRad)*inPoint.x - std::sin(angRad)*inPoint.y;
-    outPoint.y = std::sin(angRad)*inPoint.x + std::cos(angRad)*inPoint.y;
+
+    float s = std::sin(angRad);
+    float c = std::cos(angRad);
+
+    outPoint.x = c*inPoint.x - s*inPoint.y;
+    outPoint.y = s*inPoint.x + c*inPoint.y;
     return outPoint;
 }
 
@@ -1343,7 +1347,7 @@ int Detector::addTemplate_rotate(const string &class_id, int zero_id,
             Point2f p;
             p.x = f.x + to_rotate_tp[l].tl_x;
             p.y = f.y + to_rotate_tp[l].tl_y;
-            Point2f p_rot = rotatePoint(p, center, -theta/180*CV_PI);
+            Point2f p_rot = rotate2d(p, -theta/180*CV_PI);
 
             Feature f_new;
             f_new.x = int(p_rot.x + 0.5f);
@@ -1578,6 +1582,7 @@ int Detector::addTemplate_rotate(const std::string &class_id, TemplatePyramid re
 	for (int i = 0; i < angleSegments; i+=1)
 	{
 		float theta = i*(angleTo-angleFrom)/angleSegments- angleFrom;
+    // printf("theta:%f\n",theta);
 		int template_id = static_cast<int>(template_pyramids.size());
 
 
@@ -1586,11 +1591,13 @@ int Detector::addTemplate_rotate(const std::string &class_id, TemplatePyramid re
 
 		for (int l = 0; l < pyramid_levels; ++l)
 		{
+      
+      tp[l].features.resize(0);
 			for (auto& f : to_rotate_tp[l].features) {
 				Point2f p;
 				p.x = f.x + to_rotate_tp[l].tl_x;
 				p.y = f.y + to_rotate_tp[l].tl_y;
-				Point2f p_rot = rotatePoint(p, center, -theta / 180 * CV_PI);
+				Point2f p_rot = rotatePoint(p, center, theta / 180 * CV_PI);
 
 				Feature f_new;
 				f_new.x = int(p_rot.x + 0.5f);
@@ -1605,8 +1612,8 @@ int Detector::addTemplate_rotate(const std::string &class_id, TemplatePyramid re
 
 
 				tp[l].features.push_back(f_new);
-				tp[l].angle = theta;
 			}
+      tp[l].angle = theta;
 			if (l > 0) center /= 2;
 
 			tp[l].pyramid_level = l;

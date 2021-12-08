@@ -285,6 +285,12 @@ void dumpTempPy(line2Dup::TemplatePyramid *TP)
 }
 
 
+string toFixed(float num,int dec=2)
+{
+  std::stringstream ss;
+  ss << std::fixed << std::setprecision(dec) << num;
+  return ss.str();
+}
 
 void noise_test(string mode = "test"){
     line2Dup::Detector detector(64, {16});
@@ -393,7 +399,7 @@ void noise_test(string mode = "test"){
         // std::vector<std::string> ids;
         // string class_id = "test";
         // ids.push_back(class_id);
-
+        string template_name="AAA";
         float downScale=1;
         string test_folder="case1";
         SBM_if sbmif(60, {2,4},40,120);
@@ -403,27 +409,47 @@ void noise_test(string mode = "test"){
             assert(!img.empty() && "check your img path");
 
             
+
+
+
+
+            Mat _mask;
+            
+            if(1)
+            {
+              _mask = Mat(img.size(), CV_8UC1,{255});
+            }
+            else
+            {
+              _mask = Mat(img.size(), CV_8UC1);
+
+              cv::rectangle(_mask, cv::Rect(1087,231,1596-1087,666-231), cv::Scalar::all(255), cv::FILLED);
+            }
+
+
+
             // blur( img, img, Size(3, 3));
-            if(true)
+            if(false)
+            {
+
+
+              shape_based_matching::shapeInfo_producer shapes(img, _mask);
+              shapes.angle_range = {0, 360};
+              shapes.angle_step = 1;
+              shapes.produce_infos();
+              sbmif.detector.addTemplate_rotate(sbmif.class_id, shapes);
+
+
+
+            }
+            else if(true)
             {
               line2Dup::TemplatePyramid tp;
-              Mat _mask;
-              
-              if(1)
-              {
-                _mask = Mat(img.size(), CV_8UC1,{255});
-              }
-              else
-              {
-                _mask = Mat(img.size(), CV_8UC1);
-
-                cv::rectangle(_mask, cv::Rect(1087,231,1596-1087,666-231), cv::Scalar::all(255), cv::FILLED);
-              }
               //1087,231   1596,666
               sbmif.TemplateFeatureExtraction(img,_mask,60,tp);
               
 
-              dumpTempPy(&tp);
+              // dumpTempPy(&tp);
               printf("<img: %d %d\n",img.cols,img.rows);
 
               for(int i=0;i<tp.size();i++)
@@ -435,9 +461,10 @@ void noise_test(string mode = "test"){
 
 
 
-              sbmif.train(sbmif.class_id,tp,cv::Point2f(img.rows/2,img.cols/2),downScale,0,360,360);
+              sbmif.train(template_name     ,tp,cv::Point2f(0,0),false,downScale,0,360,360);
+              sbmif.train(template_name+"_f",tp,cv::Point2f(0,0),true,downScale,0,360,360);
             }
-            else
+            else if(false)
             {
               sbmif.train(img,downScale);
             }
@@ -472,10 +499,15 @@ void noise_test(string mode = "test"){
           // cv::resize(inImg, outImg, cv::Size(), 0.75, 0.75);
           // resize(test_img_,test_img,size1,cv::INTER_AREA);//resize image
 
-
           test_img= test_img_(cv::Rect(0,0,size1.width,size1.height));
+
+          // cv::Point2f pc(test_img.cols/2., test_img.rows/2.);
+          // cv::Mat r = cv::getRotationMatrix2D(pc, -130, 1.0);
+          // cv::warpAffine(test_img, test_img, r, test_img.size());
           // blur( test_img, test_img, Size(3, 3));
-          matches = sbmif.test(test_img);
+          // matches = sbmif.test(test_img);
+
+          matches = sbmif.detector.match(test_img, 80,100, {template_name,template_name+"_f"});
         }
         timer.out("MATCH::====================");
 
@@ -526,15 +558,14 @@ void noise_test(string mode = "test"){
             }
             
             // cv::Point2f center=templ;
-
-            cv::putText(test_img, to_string(int(round(match.similarity)))+"  a:"+to_string(round(templ[0].angle*10)/10.0),
+            cv::putText(test_img, toFixed(match.similarity,0)+"  a:"+toFixed(templ[0].angle,2)+" cl:"+match.class_id,
                         Point(match.x-10, match.y-3), FONT_HERSHEY_PLAIN, 2, randColor);
 
 
             printf("%s id:%d    templ.size:%d",match.class_id.c_str(),match.template_id,templ.size());
             {
               cv::Point2f cenPt = cv::Point2f((float)match.x+templ[0].width/2,(float)match.y+templ[0].height/2);
-              cv::Point2f Pt2 = rotate2d(cv::Point2f(100,0) ,-templ[0].angle*M_PI/180);
+              cv::Point2f Pt2 = rotate2d(cv::Point2f(100,0) ,templ[0].angle*M_PI/180);
               Pt2+=cenPt;
               cv::line(test_img, cenPt, Pt2, randColor, 2);
             }
@@ -543,7 +574,7 @@ void noise_test(string mode = "test"){
 
 
 
-            printf("xy:%d,%d  wh:%d,%d\n angle:%f",x,y,templ[0].width,templ[0].height,templ[0].angle);
+            printf("xy:%d,%d  wh:%d,%d\n angle:%f class_id:%s",x,y,templ[0].width,templ[0].height,templ[0].angle,match.class_id.c_str());
             // cv::RotatedRect rotatedRectangle(
             //   {(float)(x+match.x)/2, (float)(y+match.y)/2}, 
             //   {(float)templ[0].width, (float)templ[0].height}, 

@@ -41,15 +41,16 @@ void SBM_if::train(Mat &img,float scaleN,Mat *mask)
   detector.TemplateFeatureExtraction (img, *mask, 60,tp);
 
   auto center = cv::Point2f(img.cols/2,img.rows/2);
-  train(class_id,tp,center,scaleN);
+  train(class_id,tp,center,scaleN,false);
+  train(class_id+"_f",tp,center,scaleN,true);
 
 }
 
 
 
-void SBM_if::train(std::string name,line2Dup::TemplatePyramid &tp,cv::Point2f rotateCenter,float scaleN,float angleFrom,float angleTo,int angleSegments)
+void SBM_if::train(std::string name,line2Dup::TemplatePyramid &_tp,cv::Point2f rotateCenter,bool y_flip,float scaleN,float angleFrom,float angleTo,int angleSegments)
 {
-
+  line2Dup::TemplatePyramid tp=_tp;
   
   for(int i=0;i<tp.size();i++)
   {
@@ -68,42 +69,45 @@ void SBM_if::train(std::string name,line2Dup::TemplatePyramid &tp,cv::Point2f ro
     }
   }
 
-
-  detector.addTemplate_rotate(name,tp,rotateCenter,angleFrom,angleTo,angleSegments);
-  
-  for(int i=0;i<tp.size();i++)
+  if(y_flip==true)
   {
-    // printf("pyLevel[%d]: xy:%d %d wh:%d  %d\n",i,tp[i].tl_x,tp[i].tl_y,tp[i].width,tp[i].height);
-    
-    int minY=999;
-    int maxY=0;
-    
-    for (auto& f : tp[i].features)
+
+    for(int i=0;i<tp.size();i++)
     {
-      int trueY=tp[i].tl_y+f.y;
-      if(minY>trueY)
+      // printf("pyLevel[%d]: xy:%d %d wh:%d  %d\n",i,tp[i].tl_x,tp[i].tl_y,tp[i].width,tp[i].height);
+      
+      int minY=999;
+      int maxY=0;
+      
+      for (auto& f : tp[i].features)
       {
-        minY=trueY;
+        int trueY=tp[i].tl_y+f.y;
+        if(minY>trueY)
+        {
+          minY=trueY;
+        }
+        if(maxY>trueY)
+        {
+          maxY=trueY;
+        }
+        f.y=trueY;
       }
-      if(maxY>trueY)
+
+      for (auto& f : tp[i].features)
       {
-        maxY=trueY;
+        f.y=maxY-f.y;
+        f.theta*=-1;
       }
-      f.y=trueY;
+
+
+      // printf("pyLevel[%d]: xy:%d %d wh:%d  %d\n",i,tp[i].tl_x,tp[i].tl_y,tp[i].width,tp[i].height);
+      
     }
 
-    for (auto& f : tp[i].features)
-    {
-      f.y=maxY-f.y;
-      f.theta*=-1;
-    }
-
-
-    // printf("pyLevel[%d]: xy:%d %d wh:%d  %d\n",i,tp[i].tl_x,tp[i].tl_y,tp[i].width,tp[i].height);
-    
   }
 
-  detector.addTemplate_rotate(name+"_f",tp,rotateCenter,angleFrom,angleTo,angleSegments);
+
+  detector.addTemplate_rotate(name,tp,rotateCenter,angleFrom,angleTo,angleSegments);
 }
 
 

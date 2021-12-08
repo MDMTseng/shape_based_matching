@@ -1330,49 +1330,6 @@ static cv::Point2f rotatePoint(const cv::Point2f inPoint, const cv::Point2f cent
     return rotate2d(inPoint - center, angRad) + center;
 }
 
-int Detector::addTemplate_rotate(const string &class_id, int zero_id,
-                                 float theta, cv::Point2f center)
-{
-    std::vector<TemplatePyramid> &template_pyramids = class_templates[class_id];
-    int template_id = static_cast<int>(template_pyramids.size());
-
-    const auto& to_rotate_tp = template_pyramids[zero_id];
-
-    TemplatePyramid tp;
-    tp.resize(pyramid_levels);
-
-    for (int l = 0; l < pyramid_levels; ++l)
-    {
-        for(auto& f: to_rotate_tp[l].features){
-            Point2f p;
-            p.x = f.x + to_rotate_tp[l].tl_x;
-            p.y = f.y + to_rotate_tp[l].tl_y;
-            Point2f p_rot = rotate2d(p, -theta/180*CV_PI);
-
-            Feature f_new;
-            f_new.x = int(p_rot.x + 0.5f);
-            f_new.y = int(p_rot.y + 0.5f);
-
-            f_new.theta = f.theta - theta;
-            while(f_new.theta > 360) f_new.theta -= 360;
-            while(f_new.theta < 0) f_new.theta += 360;
-
-            f_new.label = int(f_new.theta * 16 / 360 + 0.5f);
-            f_new.label &= 7;
-
-
-            tp[l].features.push_back(f_new);
-        }
-        if(l>0) center /= 2;
-
-        tp[l].pyramid_level = l;
-    }
-
-    cropTemplates(tp);
-
-    template_pyramids.push_back(tp);
-    return template_id;
-}
 const std::vector<Template> &Detector::getTemplates(const std::string &class_id, int template_id) const
 {
     TemplatesMap::const_iterator i = class_templates.find(class_id);
@@ -1577,12 +1534,10 @@ int Detector::addTemplate_rotate(const std::string &class_id, TemplatePyramid re
 {
 	std::vector<TemplatePyramid> &template_pyramids = class_templates[class_id];
 	auto to_rotate_tp = ref_tp;
-  float firstAngle=0;
 #pragma omp parallel for
 	for (int i = 0; i < angleSegments; i+=1)
 	{
 		float theta = i*(angleTo-angleFrom)/angleSegments- angleFrom;
-    // printf("theta:%f\n",theta);
 		int template_id = static_cast<int>(template_pyramids.size());
 
 
@@ -1603,7 +1558,7 @@ int Detector::addTemplate_rotate(const std::string &class_id, TemplatePyramid re
 				f_new.x = int(p_rot.x + 0.5f);
 				f_new.y = int(p_rot.y + 0.5f);
 
-				f_new.theta = f.theta - theta;
+				f_new.theta = f.theta + theta;
 				while (f_new.theta > 360) f_new.theta -= 360;
 				while (f_new.theta < 0) f_new.theta += 360;
 

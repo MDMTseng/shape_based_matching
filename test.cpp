@@ -400,7 +400,7 @@ void noise_test(string mode = "test"){
         // string class_id = "test";
         // ids.push_back(class_id);
         string template_name="AAA";
-        float downScale=1;
+        float downScale=0.5;
         string test_folder="case1";
         
         SBM_if sbmif(60, {2,4},40,120);
@@ -494,27 +494,27 @@ void noise_test(string mode = "test"){
  
         Timer timer;
         std::vector<line2Dup::Match> matches;// = sbmif.test(test_img);
-        int loopN=1;
 
         
         cv::Size size1 = test_img_.size();
         size1.width=((int)(size1.width*downScale))/8*8;
         size1.height=((int)(size1.height*downScale))/8*8;
 
+        sbmif.detector.set_produce_dxy = true;
+        int loopN=10;
         for(int i=0;i<loopN;i++)
         {
           
           // cv::resize(inImg, outImg, cv::Size(), 0.75, 0.75);
-          // resize(test_img_,test_img,size1,cv::INTER_AREA);//resize image
+          resize(test_img_,test_img,size1,cv::INTER_AREA);//resize image
 
-          test_img= test_img_(cv::Rect(0,0,size1.width,size1.height));
+          // test_img= test_img_(cv::Rect(0,0,size1.width,size1.height));
 
           // cv::Point2f pc(test_img.cols/2., test_img.rows/2.);
           // cv::Mat r = cv::getRotationMatrix2D(pc, -130, 1.0);
           // cv::warpAffine(test_img, test_img, r, test_img.size());
           // blur( test_img, test_img, Size(3, 3));
           // matches = sbmif.test(test_img);
-
           matches = sbmif.detector.match(test_img, 80,100, {template_name,template_name+"_f"});
         }
         timer.out("MATCH::====================");

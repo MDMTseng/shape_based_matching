@@ -45,12 +45,12 @@ include_directories (${INCLUDE_DIRECTORIES} "${CMAKE_CURRENT_SOURCE_DIR}/MIPP/")
 include_directories (${CMAKE_CURRENT_SOURCE_DIR} "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 # test exe
-add_executable(${PROJECT_NAME}_test line2Dup.cpp SBM_if.cpp test.cpp UTIL.cpp)
+add_executable(${PROJECT_NAME}_test line2Dup.cpp SBM_if.cpp test.cpp UTIL.cpp TemplateMatching_SubPix.cpp)
 target_link_libraries(${PROJECT_NAME}_test ${OpenCV_LIBS})
 
 # test exe
-add_executable(${PROJECT_NAME}_test_fusion line2Dup.cpp test_fusion.cpp)
+add_executable(${PROJECT_NAME}_test_fusion line2Dup.cpp test_fusion.cpp TemplateMatching_SubPix.cpp)
 target_link_libraries(${PROJECT_NAME}_test_fusion ${OpenCV_LIBS})
 
-add_library(${PROJECT_NAME} line2Dup.cpp SBM_if.cpp  UTIL.cpp)
+add_library(${PROJECT_NAME} line2Dup.cpp SBM_if.cpp  UTIL.cpp TemplateMatching_SubPix.cpp)
 target_link_libraries(${PROJECT_NAME} ${OpenCV_LIBS})

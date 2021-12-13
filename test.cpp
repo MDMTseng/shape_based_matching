@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <chrono>
 #include <UTIL.hpp>
+#include <TemplateMatching_SubPix.h>
 using namespace std;
 using namespace cv;
 
@@ -651,11 +652,79 @@ void view_angle(){
     cv::waitKey(0);
 }
 
+
+void test_blockmatching()
+{   
+    string prefix="./TemplateLocating/";
+    Mat tarImg = imread(prefix+"tarImg.png"); 
+    Mat blockImg = imread(prefix+"blockImg.png"); 
+
+    Mat tarGray,blockGray;
+    cvtColor(tarImg, tarGray, COLOR_BGR2GRAY);
+    cvtColor(blockImg, blockGray, COLOR_BGR2GRAY);
+    Mat result;
+    bool isResForMax;
+    
+    
+    // cv::Point2f locate;
+    // Point level1Pt;
+
+    // 
+    // 
+    
+    // {
+    //   int marging=3;
+    //   int _scale=3;
+
+    //   Point level1Pt= MatchingMethod(tarGray,blockGray,result,isResForMax);
+    //   printf("matchLoc:%d %d\n",level1Pt.x,level1Pt.y);
+    //   cv::Size blockGray_size = blockGray.size();
+    //   // 
+    //   Mat blockGrayX;
+    //   resize(blockGray,blockGrayX,{(int)(blockGray_size.width*_scale),(int)(blockGray_size.height*_scale)},cv::INTER_AREA);//resize image
+    //   Mat tarGrayX;
+    //   tarGrayX= tarGray(cv::Rect(level1Pt.x-marging,level1Pt.y-marging,2*marging+blockGray_size.width,2*marging+blockGray_size.height));//crop
+      
+    //   cv::Size tarGray_size = tarGrayX.size();
+    //   resize(tarGrayX,tarGrayX,{(int)(tarGray_size.width*_scale),(int)(tarGray_size.height*_scale)},cv::INTER_AREA);//resize image
+    //   Point level2Pt= MatchingMethod(tarGrayX,blockGrayX,result,isResForMax);
+    //   locate=cv::Point2f(
+    //     level1Pt.x-marging+(float)level2Pt.x/_scale,
+    //     level1Pt.y-marging+(float)level2Pt.y/_scale
+    //   );
+    //   printf("matchLoc:%f %f\n",locate.x,locate.y);
+    //   // Point level2Pt= MatchingMethod(tarGray,blockGray);
+      
+    //   // cv::waitKey(0);
+
+    // }
+
+    {
+      
+      Timer timer;
+      Point2f levelXPt = TemplateMatching_SubPix(tarGray,blockGray,result,isResForMax);
+
+      printf("matchLoc_subPix:%f %f\n",levelXPt.x,levelXPt.y);
+      timer.out("MATCH::====================");
+    }
+
+    exit(-1);
+
+}
+
+
+
+
+
+
+
+
 int main(){
     
 #ifdef _OPENMP
     printf("OPEN MP is here\n");
 #endif
+    test_blockmatching();
     MIPP_test();
     noise_test("traintest"); // test or train
     return 0;

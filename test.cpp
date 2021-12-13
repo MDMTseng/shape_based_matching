@@ -402,6 +402,7 @@ void noise_test(string mode = "test"){
         string template_name="AAA";
         float downScale=1;
         string test_folder="case1";
+        
         SBM_if sbmif(60, {2,4},40,120);
         {
             Mat img = imread(prefix+test_folder+"/train.png");
@@ -459,10 +460,17 @@ void noise_test(string mode = "test"){
 
               // img.size();
 
+              cv::Point2f f0Pos(tp[0].tl_x+tp[0].features[0].x,tp[0].tl_y+tp[0].features[0].y);
+              cv::Point2f cenOffset=cv::Point2f(0,0)-f0Pos;
+              sbmif.regTemplateOffset(template_name     ,{cenOffset,false});
+              sbmif.regTemplateOffset(template_name+"_f",{cenOffset,true});
+
+
 
 
               sbmif.train(template_name     ,tp,cv::Point2f(0,0),false,downScale,0,360,360);
-              sbmif.train(template_name+"_f",tp,cv::Point2f(0,0),true,downScale,0,360,360);
+              sbmif.train(template_name+"_f",tp,cv::Point2f(0,0),true ,downScale,0,360,360);
+
             }
             else if(false)
             {
@@ -538,9 +546,9 @@ void noise_test(string mode = "test"){
 
         for(auto idx: idxs){
         //for(int idx=0;idx<matches.size(); idx++){
-            auto match = matches[idx];
+            line2Dup::Match match = matches[idx];
 
-            auto templ = sbmif.detector.getTemplates(match.class_id,
+            const std::vector<line2Dup::Template> &templ = sbmif.detector.getTemplates(match.class_id,
                                             match.template_id);
             int x =  templ[0].width + match.x;
             int y = templ[0].height + match.y;
@@ -564,8 +572,12 @@ void noise_test(string mode = "test"){
 
             printf("%s id:%d    templ.size:%d",match.class_id.c_str(),match.template_id,templ.size());
             {
-              cv::Point2f cenPt = cv::Point2f((float)match.x+templ[0].width/2,(float)match.y+templ[0].height/2);
-              cv::Point2f Pt2 = rotate2d(cv::Point2f(100,0) ,templ[0].angle*M_PI/180);
+              // cv::Point2f cenPt = cv::Point2f((float)match.x+templ[0].width/2,(float)match.y+templ[0].height/2);
+              // cv::Point2f cenPt = cv::Point2f((float)match.x,(float)match.y);
+
+              cv::Point2f cenPt = cv::Point2f((float)templ[0].features[0].x+match.x,(float)templ[0].features[0].y+match.y);
+              SBM_if::anchorInfo Aoffset = sbmif.fetchTemplateOffset(match.class_id);
+              cv::Point2f Pt2 = rotate2d(Aoffset.offset ,templ[0].angle*M_PI/180);
               Pt2+=cenPt;
               cv::line(test_img, cenPt, Pt2, randColor, 2);
             }

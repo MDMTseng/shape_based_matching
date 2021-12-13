@@ -86,13 +86,12 @@ void SBM_if::train(std::string name,line2Dup::TemplatePyramid &_tp,cv::Point2f r
         {
           minY=trueY;
         }
-        if(maxY>trueY)
+        if(maxY<trueY)
         {
           maxY=trueY;
         }
         f.y=trueY;
       }
-
       for (auto& f : tp[i].features)
       {
         f.y=maxY-f.y;
@@ -110,6 +109,20 @@ void SBM_if::train(std::string name,line2Dup::TemplatePyramid &_tp,cv::Point2f r
   detector.addTemplate_rotate(name,tp,rotateCenter,angleFrom,angleTo,angleSegments);
 }
 
+
+void SBM_if::regTemplateOffset(std::string class_id,struct anchorInfo anchor_info)
+{
+  // if(anchor_info.flip==true)
+  // {
+  //   anchor_info.offset.y*=-1;
+  // }
+  template_Offset[class_id]=anchor_info;
+}
+
+SBM_if::anchorInfo SBM_if::fetchTemplateOffset(std::string class_id)
+{
+  return template_Offset[class_id];
+}
 
 // only support gray img now
 std::vector<line2Dup::Match> SBM_if::test(Mat &img)

@@ -5,10 +5,22 @@ using namespace cv;
 class SBM_if{
   public:
   std::string class_id = "test";
+
+
+  struct anchorInfo{
+    cv::Point2f offset;
+    bool flip;
+  };
+  std::map<std::string, struct anchorInfo> template_Offset;
   std::string prefix = "test/";
   line2Dup::Detector detector;
   SBM_if();
   SBM_if(int num_features, std::vector<int> T, float weak_thresh = 30.0f, float strong_thresh = 60.0f);
+
+  void regTemplateOffset(std::string class_id,struct anchorInfo anchor_info);
+
+  struct anchorInfo fetchTemplateOffset(std::string class_id);
+
   int TemplateFeatureExtraction (const Mat source,
                           const Mat &object_mask, int num_features,line2Dup::TemplatePyramid &ret_tp);
   void train(Mat &img,float scaleN=1,Mat *mask=NULL);

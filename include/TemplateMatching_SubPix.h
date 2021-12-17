@@ -5,8 +5,8 @@
 
 
 
-cv::Point TemplateMatching_Pix(cv::Mat &img,cv::Mat &templ,cv::Mat &result,bool &isResForMax);
-cv::Point2f TemplateMatching_SubPix(cv::Mat &img,cv::Mat &templ,cv::Mat &result,bool &isResForMax);
+cv::Point TemplateMatching_Pix(cv::Mat &img,cv::Mat &templ,cv::Mat &result,bool &isResForMax,int match_method=cv::TM_CCOEFF_NORMED);
+cv::Point2f TemplateMatching_SubPix(cv::Mat &img,cv::Mat &templ,cv::Mat &result,bool &isResForMax,int match_method=cv::TM_CCOEFF_NORMED);
 
 
 

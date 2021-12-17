@@ -10,13 +10,13 @@
 using namespace std;
 using namespace cv;
 
-Point TemplateMatching_Pix(Mat &img,Mat &templ,Mat &result,bool &isResForMax)
+Point TemplateMatching_Pix(Mat &img,Mat &templ,Mat &result,bool &isResForMax,int match_method)
 {
   Mat mask; 
   bool use_mask=false;
 
 
-  int match_method=TM_CCOEFF_NORMED;//TM_CCOEFF_NORMED;
+  // int match_method=TM_CCOEFF_NORMED;
 
 
   int result_cols = img.cols - templ.cols + 1;
@@ -41,13 +41,13 @@ Point TemplateMatching_Pix(Mat &img,Mat &templ,Mat &result,bool &isResForMax)
 
 
 
-Point2f TemplateMatching_SubPix(Mat &img,Mat &templ,Mat &result,bool &isResForMax)
+Point2f TemplateMatching_SubPix(Mat &img,Mat &templ,Mat &result,bool &isResForMax,int match_method)
 {
 
     
       
-  Point levelXPt = TemplateMatching_Pix(img,templ,result,isResForMax);
-  cv::Point2d outPix;
+  Point levelXPt = TemplateMatching_Pix(img,templ,result,isResForMax,match_method);
+  cv::Point2d outPix(levelXPt.x,levelXPt.y);
   int retX= minMaxLocSubPix(&outPix,result,&levelXPt,0);
   
   // printf("matchLoc_subPix:%f %f\n",outPix.x,outPix.y);

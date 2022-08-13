@@ -1,6 +1,7 @@
 #ifndef CXX_SBM_IF_HPP
 #define CXX_SBM_IF_HPP
 #include "line2Dup.h"
+#include "UTIL.hpp"
 using namespace cv;
 class SBM_if{
   public:

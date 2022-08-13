@@ -1537,7 +1537,7 @@ int Detector::addTemplate_rotate(const std::string &class_id, TemplatePyramid re
 #pragma omp parallel for
 	for (int i = 0; i < angleSegments; i+=1)
 	{
-		float theta = i*(angleTo-angleFrom)/angleSegments- angleFrom;
+		float theta = i*(angleTo-angleFrom)/angleSegments+ angleFrom;
 		int template_id = static_cast<int>(template_pyramids.size());
 
 

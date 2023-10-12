@@ -18,7 +18,6 @@ Point TemplateMatching_Pix(Mat &img,Mat &templ,Mat &result,bool &isResForMax,int
 
   // int match_method=TM_CCOEFF_NORMED;
 
-
   int result_cols = img.cols - templ.cols + 1;
   int result_rows = img.rows - templ.rows + 1;
   result.create( result_rows, result_cols, CV_32FC1 );
@@ -27,10 +26,15 @@ Point TemplateMatching_Pix(Mat &img,Mat &templ,Mat &result,bool &isResForMax,int
     { matchTemplate( img, templ, result, match_method, mask); }
   else
     { matchTemplate( img, templ, result, match_method); }
-  normalize( result, result, 0, 1, NORM_MINMAX, -1, Mat() );
-  double minVal; double maxVal; Point minLoc; Point maxLoc;
+//   normalize( result, result, 0, 1, NORM_MINMAX, -1);
+  double minVal=999; double maxVal=-1; Point minLoc; Point maxLoc;
   Point matchLoc;
-  minMaxLoc( result, &minVal, &maxVal, &minLoc, &maxLoc, Mat() );
+  minMaxLoc( result, &minVal, &maxVal, &minLoc, &maxLoc );
+
+//   printf(">>>>>minLoc:%d %d:%f \n",minLoc.x,minLoc.y,minVal);
+//   printf(">>>>>maxLoc:%d %d:%f \n",maxLoc.x,maxLoc.y,maxVal);
+
+
   if( match_method  == TM_SQDIFF || match_method == TM_SQDIFF_NORMED )
     { matchLoc = minLoc; isResForMax=false;}
   else
@@ -48,10 +52,13 @@ Point2f TemplateMatching_SubPix(Mat &img,Mat &templ,Mat &result,bool &isResForMa
       
   Point levelXPt = TemplateMatching_Pix(img,templ,result,isResForMax,match_method);
   cv::Point2d outPix(levelXPt.x,levelXPt.y);
+
+//   printf("img:%d %d  templ:%d %d\n",img.cols,img.rows,templ.cols,templ.rows);
+//   printf("matchLoc_subPix ori:%f %f\n",outPix.x,outPix.y);
   int retX= minMaxLocSubPix(&outPix,result,&levelXPt,0);
   
-  // printf("matchLoc_subPix:%f %f\n",outPix.x,outPix.y);
-  // timer.out("MATCH::====================");
+//   printf("matchLoc_subPix sub:%f %f\n",outPix.x,outPix.y);
+//   timer.out("MATCH::====================");
     
 
   return Point2f(outPix.x,outPix.y);

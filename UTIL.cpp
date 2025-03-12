@@ -33,7 +33,7 @@ template <typename BoxType>
 inline void cv_dnn::NMSFast_(const std::vector<BoxType>& bboxes,
       const std::vector<float>& scores, const float score_threshold,
       const float nms_threshold, const float eta, const int top_k,
-      std::vector<int>& indices, float (*computeOverlap)(const BoxType&, const BoxType&))
+      std::vector<int>& indices, float (*computeOverlap)(const BoxType&, const BoxType&,void* ctx),void* ctx)
 {
     CV_Assert(bboxes.size() == scores.size());
     std::vector<std::pair<float, int> > score_index_vec;
@@ -43,20 +43,27 @@ inline void cv_dnn::NMSFast_(const std::vector<BoxType>& bboxes,
     float adaptive_threshold = nms_threshold;
     indices.clear();
     for (size_t i = 0; i < score_index_vec.size(); ++i) {
+        // printf("w:%d  h:%d\n", bboxes[i].width, bboxes[i].height);
         const int idx = score_index_vec[i].second;
         bool keep = true;
+        float overlap=-1;
         for (int k = 0; k < (int)indices.size() && keep; ++k) {
             const int kept_idx = indices[k];
-            float overlap = computeOverlap(bboxes[idx], bboxes[kept_idx]);
+            overlap = computeOverlap(bboxes[idx], bboxes[kept_idx],ctx);
             keep = overlap <= adaptive_threshold;
         }
         if (keep)
             indices.push_back(idx);
-        if (keep && eta < 1 && adaptive_threshold > 0.5) {
+        else
+        {
+            // printf("overlap:%.2f thres:%f\n",overlap,adaptive_threshold);
+        }
+        if (keep && eta < 1 && adaptive_threshold > 0.1) {
           adaptive_threshold *= eta;
         }
     }
 }
+
 
 
 // copied from opencv 3.4, not exist in 3.0
@@ -70,20 +77,38 @@ double  cv_dnn::jaccardDistance__(const Rect_<_Tp>& a, const Rect_<_Tp>& b) {
         return 0.0;
     }
 
-    double Aab = (a & b).area();
-    // distance = 1 - jaccard_index
-    return 1.0 - Aab / (Aa + Ab - Aab);
+    float Aab = (a & b).area();
+    float dist=1.0f - Aab / (Aa + Ab - Aab);
+
+    return dist;
 }
 
 template <typename T>
-inline float cv_dnn::rectOverlap(const T& a, const T& b)
+inline float cv_dnn::rectOverlap(const T& a, const T& b,void* ctx)
 {
-    return 1.f - static_cast<float>(jaccardDistance__(a, b));
-}
+    float angle_diff = fmod(fabs(a.angle_deg - b.angle_deg), 360.0f);
+    if (angle_diff > 180.0f) {
+        angle_diff = 360.0f - angle_diff;
+    }
+    // if(angle_diff>10)//large angle diff, consider as no overlap
+    // {
+    //     return 0.f;
+    // }
 
-void cv_dnn::NMSBoxes(const std::vector<Rect>& bboxes, const std::vector<float>& scores,
-                          const float score_threshold, const float nms_threshold,
-                          std::vector<int>& indices, const float eta, const int top_k)
+
+
+
+    
+    return 1.f - static_cast<float>(jaccardDistance__(a.rect, b.rect));
+}
+//Non Maximum Suppression
+void cv_dnn::NMSBoxes(const std::vector<NMSBoxesStruct>& bboxes, // Vector of bounding boxes
+                      const std::vector<float>& scores, // Vector of scores corresponding to each bounding box
+                      const float score_threshold, // Minimum score required to keep a bounding box
+                      const float nms_threshold, // Threshold for non-maximum suppression
+                      std::vector<int>& indices, // Output vector of indices of kept bounding boxes
+                      const float eta, // Soft NMS parameter
+                      const int top_k) // Maximum number of bounding boxes to keep
 {
-    NMSFast_(bboxes, scores, score_threshold, nms_threshold, eta, top_k, indices, rectOverlap);
+    NMSFast_(bboxes, scores, score_threshold, nms_threshold, eta, top_k, indices, rectOverlap,NULL);
 }

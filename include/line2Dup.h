@@ -114,7 +114,7 @@ public:
 
     void quantize(cv::Mat &dst) const;
 
-    bool extractTemplate(Template &templ) const;
+    bool extractTemplate(Template &templ,int nms_kernel_size) const;
 
     void pyrDown();
 
@@ -283,7 +283,11 @@ public:
                                     const cv::Mat &object_mask, int num_features = 0);
 
     int TemplateFeatureExtraction (const cv::Mat source,
+                                    const cv::Mat &object_mask, int num_features,int nms_kernel_size,TemplatePyramid &ret_tp);
+
+    int TemplateFeatureExtraction (const cv::Mat source,
                                     const cv::Mat &object_mask, int num_features,TemplatePyramid &ret_tp);
+
 
     int addTemplate_rotate(const std::string &class_id, shape_based_matching::shapeInfo_producer& shapes,float angleFrom=0,float angleTo=360,int angleSegments=360);
     
@@ -306,6 +310,8 @@ public:
     void read(const cv::FileNode &fn);
     void write(cv::FileStorage &fs) const;
 
+
+    bool removeClass(const std::string &class_id);
     std::string readClass(const cv::FileNode &fn, const std::string &class_id_override = "");
     void writeClass(const std::string &class_id, cv::FileStorage &fs) const;
 

@@ -46,11 +46,11 @@ include_directories (${CMAKE_CURRENT_SOURCE_DIR} "${CMAKE_CURRENT_SOURCE_DIR}/in
 
 # test exe
 add_executable(${PROJECT_NAME}_test line2Dup.cpp SBM_if.cpp test.cpp UTIL.cpp TemplateMatching_SubPix.cpp)
-target_link_libraries(${PROJECT_NAME}_test ${OpenCV_LIBS})
+target_link_libraries(${PROJECT_NAME}_test PUBLIC OpenMP::OpenMP_CXX ${OpenCV_LIBS})
 
 # test exe
 add_executable(${PROJECT_NAME}_test_fusion line2Dup.cpp test_fusion.cpp TemplateMatching_SubPix.cpp)
-target_link_libraries(${PROJECT_NAME}_test_fusion ${OpenCV_LIBS})
+target_link_libraries(${PROJECT_NAME}_test_fusion PUBLIC OpenMP::OpenMP_CXX ${OpenCV_LIBS})
 
 add_library(${PROJECT_NAME} line2Dup.cpp SBM_if.cpp  UTIL.cpp TemplateMatching_SubPix.cpp)
-target_link_libraries(${PROJECT_NAME} ${OpenCV_LIBS})
+target_link_libraries(${PROJECT_NAME} PUBLIC OpenMP::OpenMP_CXX ${OpenCV_LIBS})

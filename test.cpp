@@ -346,19 +346,20 @@ void noise_test(string mode = "test"){
         size_t top5 = 500;
         if(top5>matches.size()) top5=matches.size();
 
-        vector<Rect> boxes;
+        vector<cv_dnn::NMSBoxesStruct> boxes;
         vector<float> scores;
         vector<int> idxs;
         for(auto match: matches){
-            Rect box;
-            box.x = match.x;
-            box.y = match.y;
+            cv_dnn::NMSBoxesStruct box;
+            box.rect.x = match.x;
+            box.rect.y = match.y;
 
             auto templ = detector.getTemplates("test",
                                                match.template_id);
 
-            box.width = templ[0].width;
-            box.height = templ[0].height;
+            box.rect.width = templ[0].width;
+            box.rect.height = templ[0].height;
+            box.angle_deg = templ[0].angle;
             boxes.push_back(box);
             scores.push_back(match.similarity);
         }
@@ -448,7 +449,7 @@ void noise_test(string mode = "test"){
             {
               line2Dup::TemplatePyramid tp;
               //1087,231   1596,666
-              sbmif.TemplateFeatureExtraction(img,_mask,60,tp);
+              sbmif.TemplateFeatureExtraction(img,_mask,60,5,tp);
               
 
               // dumpTempPy(&tp);
@@ -526,20 +527,21 @@ void noise_test(string mode = "test"){
         size_t top5 = 500;
         if(top5>matches.size()) top5=matches.size();
 
-        vector<Rect> boxes;
+        vector<cv_dnn::NMSBoxesStruct> boxes;
         vector<float> scores;
         vector<int> idxs;
         for(auto match: matches){
-            Rect box;
-            box.x = match.x;
-            box.y = match.y;
+            cv_dnn::NMSBoxesStruct box;
+            box.rect.x = match.x;
+            box.rect.y = match.y;
             
             // printf("template_id:%d\n",match.template_id);
             auto templ = sbmif.detector.getTemplates(match.class_id,
                                                match.template_id);
 
-            box.width = templ[0].width;
-            box.height = templ[0].height;
+            box.rect.width = templ[0].width;
+            box.rect.height = templ[0].height;
+            box.angle_deg = templ[0].angle;
             boxes.push_back(box);
             scores.push_back(match.similarity);
         }

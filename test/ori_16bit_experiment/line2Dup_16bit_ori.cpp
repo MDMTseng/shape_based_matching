@@ -1143,6 +1143,8 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
                           const std::string &class_id,
                           const std::vector<TemplatePyramid> &template_pyramids) const
 {
+
+    int initMatchThreshold = threshold*3/4;
     for (size_t template_id = 0; template_id < template_pyramids.size(); ++template_id)
     {
         const TemplatePyramid &tp = template_pyramids[template_id];
@@ -1186,6 +1188,8 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
         }
 
         // Find initial matches
+
+
         std::vector<Match> candidates;
         for (int r = 0; r < similarities.rows; ++r)
         {
@@ -1195,7 +1199,7 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
                 int raw_score = row[c];
                 float score = (raw_score * 100.f) / (4 * num_features);
 
-                if (score > threshold)
+                if (score > initMatchThreshold)
                 {
                     int offset = lowest_T / 2 + (lowest_T % 2 - 1);
                     int x = c * lowest_T + offset;
@@ -1291,7 +1295,7 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
 
             // Filter out any matches that drop below the similarity threshold
             std::vector<Match>::iterator new_end = std::remove_if(candidates.begin(), candidates.end(),
-                                                                  MatchPredicate(threshold));
+                                                                  MatchPredicate(initMatchThreshold));
             candidates.erase(new_end, candidates.end());
         }
         matches.insert(matches.end(), candidates.begin(), candidates.end());

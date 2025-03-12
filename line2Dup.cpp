@@ -403,7 +403,7 @@ void ColorGradientPyramid::quantize(Mat &dst) const
     angle.copyTo(dst, mask);
 }
 
-bool ColorGradientPyramid::extractTemplate(Template &templ) const
+bool ColorGradientPyramid::extractTemplate(Template &templ,int nms_kernel_size) const
 {
     // Want features on the border to distinguish from background
     Mat local_mask;
@@ -417,7 +417,6 @@ bool ColorGradientPyramid::extractTemplate(Template &templ) const
     bool no_mask = local_mask.empty();
     float threshold_sq = strong_threshold * strong_threshold;
 
-    int nms_kernel_size = 5;
     cv::Mat magnitude_valid = cv::Mat(magnitude.size(), CV_8UC1, cv::Scalar(255));
 
     for (int r = 0+nms_kernel_size/2; r < magnitude.rows-nms_kernel_size/2; ++r)
@@ -463,6 +462,8 @@ bool ColorGradientPyramid::extractTemplate(Template &templ) const
             }
         }
     }
+
+    std::cout << "candidates.size()=" << candidates.size() << std::endl;
     // We require a certain number of features
     if (candidates.size() < num_features){
         if(candidates.size() <= 4) {
@@ -1086,7 +1087,6 @@ std::vector<Match> Detector::match(Mat source, float threshold,float mag_thres, 
         const int imgCols = biggest_imgCols >> cur_l;
 
         const int cur_T = T_at_level[cur_l];
-        printf(">>>imgRows:%d,imgCols:%d,cur_T:%d\n",imgRows,imgCols,cur_T);
         assert(cur_T % 2 == 0);
 
         // use old linear function will create those for us
@@ -1175,6 +1175,8 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
                           const std::string &class_id,
                           const std::vector<TemplatePyramid> &template_pyramids) const
 {
+
+    int initMatchThreshold = threshold*72*3/4/75;
 #pragma omp declare reduction \
     (omp_insert: std::vector<Match>: omp_out.insert(omp_out.end(), omp_in.begin(), omp_in.end()))
 
@@ -1216,8 +1218,9 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
                 {
                     int raw_score = row[c];
                     float score = (raw_score * 100.f) / (4 * num_features);
+                    float score_h = ((raw_score+4) * 100.f) / (4 * num_features);
 
-                    if (score > threshold)
+                    if (score_h > threshold)
                     {
                         int offset = /*lowest_T / 2 + */(lowest_T % 2 - 1); // spread has no offset now
                         int x = c * lowest_T + offset;
@@ -1478,10 +1481,8 @@ void Detector::writeClasses(const std::string &format) const
     }
 }
 
-
-
 int Detector::TemplateFeatureExtraction (const Mat source,
-                          const Mat &object_mask, int num_features,TemplatePyramid &ret_tp)
+                          const Mat &object_mask, int num_features,int nms_kernel_size,TemplatePyramid &ret_tp)
 {
 
     ret_tp.resize(pyramid_levels);
@@ -1500,7 +1501,7 @@ int Detector::TemplateFeatureExtraction (const Mat source,
             if (l > 0)
                 qp->pyrDown();
 
-            bool success = qp->extractTemplate(ret_tp[l]);
+            bool success = qp->extractTemplate(ret_tp[l],nms_kernel_size);
             if (!success)
                 return -1; 
         }
@@ -1512,6 +1513,12 @@ int Detector::TemplateFeatureExtraction (const Mat source,
 }
 
 
+
+int Detector::TemplateFeatureExtraction(const Mat source,
+                          const Mat &object_mask, int num_features,TemplatePyramid &ret_tp)
+{
+    return TemplateFeatureExtraction(source,object_mask,num_features,5,ret_tp);
+}
 
 
 int Detector::addTemplate(const Mat source, const std::string &class_id,
@@ -1529,6 +1536,10 @@ int Detector::addTemplate(const Mat source, const std::string &class_id,
     return template_id;
 }
 
+bool Detector::removeClass(const std::string &class_id)
+{
+    return class_templates.erase(class_id);
+}
 
 int Detector::addTemplate_rotate(const std::string &class_id, TemplatePyramid ref_tp, cv::Point2f center,float angleFrom,float angleTo,int angleSegments)
 {

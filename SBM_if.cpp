@@ -17,9 +17,9 @@ SBM_if::SBM_if(int num_features, std::vector<int> T, float weak_thresh, float st
 }
 
 int SBM_if::TemplateFeatureExtraction (const Mat source,
-                          const Mat &object_mask, int num_features,line2Dup::TemplatePyramid &ret_tp)
+                          const Mat &object_mask, int num_features,int nms_kernel_size,line2Dup::TemplatePyramid &ret_tp)
 {
-  return detector.TemplateFeatureExtraction (source, object_mask, num_features,ret_tp);
+  return detector.TemplateFeatureExtraction (source, object_mask, num_features,nms_kernel_size,ret_tp);
 }
 
 

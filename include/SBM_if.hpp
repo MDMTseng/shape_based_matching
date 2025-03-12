@@ -23,7 +23,7 @@ class SBM_if{
   struct anchorInfo fetchTemplateOffset(std::string class_id);
 
   int TemplateFeatureExtraction (const Mat source,
-                          const Mat &object_mask, int num_features,line2Dup::TemplatePyramid &ret_tp);
+                          const Mat &object_mask, int num_features,int nms_kernel_size,line2Dup::TemplatePyramid &ret_tp);
   void train(Mat &img,float scaleN=1,Mat *mask=NULL);
 
   void train(std::string name,line2Dup::TemplatePyramid &_tp,cv::Point2f rotateCenter,bool y_flip=false,float scaleN=1,float angleFrom=0,float angleTo=360,int angleSegments=360);

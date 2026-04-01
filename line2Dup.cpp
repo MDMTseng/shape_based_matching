@@ -1,6 +1,12 @@
 #include "line2Dup.h"
 #include <iostream>
 
+#ifdef __AVX2__
+#include <immintrin.h>
+#elif defined(_MSC_VER) && defined(__AVX2__)
+#include <immintrin.h>
+#endif
+
 using namespace std;
 using namespace cv;
 
@@ -561,26 +567,24 @@ static void orUnaligned8u(const uchar *src, const int src_stride,
     {
         int c = 0;
 
-        // not aligned, which will happen because we move 1 bytes a time for spreading
-        while (reinterpret_cast<unsigned long long>(src + c) % 16 != 0) {
-            dst[c] |= src[c];
-            c++;
+#ifdef __AVX2__
+        // AVX2: 32 bytes per iteration, unaligned loads (no penalty on Intel Haswell+)
+        for (; c <= width - 32; c += 32) {
+            __m256i s = _mm256_loadu_si256((const __m256i*)(src + c));
+            __m256i d = _mm256_loadu_si256((const __m256i*)(dst + c));
+            _mm256_storeu_si256((__m256i*)(dst + c), _mm256_or_si256(d, s));
         }
-
-        // avoid out of bound when can't divid
-        // note: can't use c<width !!!
-        for (; c <= width-mipp::N<uint8_t>(); c+=mipp::N<uint8_t>()){
+#else
+        for (; c <= width - mipp::N<uint8_t>(); c += mipp::N<uint8_t>()) {
             mipp::Reg<uint8_t> src_v((uint8_t*)src + c);
             mipp::Reg<uint8_t> dst_v((uint8_t*)dst + c);
-
-            mipp::Reg<uint8_t> res_v = mipp::orb(src_v, dst_v);
-            res_v.store((uint8_t*)dst + c);
+            mipp::orb(src_v, dst_v).store((uint8_t*)dst + c);
         }
+#endif
 
-        for(; c<width; c++)
+        for (; c < width; c++)
             dst[c] |= src[c];
 
-        // Advance to next row
         src += src_stride;
         dst += dst_stride;
     }
@@ -616,107 +620,94 @@ static void computeResponseMaps(const Mat &src, std::vector<Mat> &response_maps)
     for (int i = 0; i < 8; ++i)
         response_maps[i].create(src.size(), CV_8U);
 
-    Mat lsb4(src.size(), CV_8U);
-    Mat msb4(src.size(), CV_8U);
+    const int total = src.rows * src.cols;
+    const uchar *src_data = src.ptr<uchar>();
 
-    for (int r = 0; r < src.rows; ++r)
+#ifdef __AVX2__
+    // =========================================================================
+    // AVX2 FAST PATH: 1 orientation per pass, fused nibble-split + vpshufb.
+    // 8 passes, each a tight loop with 2 LUT registers + sequential store.
+    // The spread image stays in L2 cache across all 8 passes.
+    // =========================================================================
     {
-        const uchar *src_r = src.ptr(r);
-        uchar *lsb4_r = lsb4.ptr(r);
-        uchar *msb4_r = msb4.ptr(r);
+        const __m256i nibble_mask = _mm256_set1_epi8(0x0F);
 
-        for (int c = 0; c < src.cols; ++c)
-        {
-            // Least significant 4 bits of spread image pixel
-            lsb4_r[c] = src_r[c] & 15;
-            // Most significant 4 bits, right-shifted to be in [0, 16)
-            msb4_r[c] = (src_r[c] & 240) >> 4;
+        for (int ori = 0; ori < 8; ++ori) {
+            uchar *map_data = response_maps[ori].ptr<uchar>();
+            const uchar *lut_ptr = SIMILARITY_LUT + 32 * ori;
+
+            __m256i lut_lo = _mm256_broadcastsi128_si256(
+                _mm_loadu_si128((const __m128i*)lut_ptr));
+            __m256i lut_hi = _mm256_broadcastsi128_si256(
+                _mm_loadu_si128((const __m128i*)(lut_ptr + 16)));
+
+            int i = 0;
+            for (; i <= total - 32; i += 32) {
+                __m256i spread = _mm256_loadu_si256((const __m256i*)(src_data + i));
+                __m256i lo_nib = _mm256_and_si256(spread, nibble_mask);
+                __m256i hi_nib = _mm256_and_si256(
+                    _mm256_srli_epi16(spread, 4), nibble_mask);
+                __m256i result = _mm256_max_epu8(
+                    _mm256_shuffle_epi8(lut_lo, lo_nib),
+                    _mm256_shuffle_epi8(lut_hi, hi_nib));
+                _mm256_storeu_si256((__m256i*)(map_data + i), result);
+            }
+            for (; i < total; ++i) {
+                uchar sb = src_data[i];
+                map_data[i] = std::max(lut_ptr[sb & 0x0F], lut_ptr[(sb >> 4) + 16]);
+            }
         }
     }
-
+#elif defined(has_shuff_int8_t) && defined(has_max_int8_t)
+    // SSE path (original, correct -- mipp::shuff works on 128-bit)
     {
+        // Split nibbles into separate buffers (needed for SSE path)
+        Mat lsb4(src.size(), CV_8U);
+        Mat msb4(src.size(), CV_8U);
+        for (int r = 0; r < src.rows; ++r) {
+            const uchar *src_r = src.ptr(r);
+            uchar *lsb4_r = lsb4.ptr(r);
+            uchar *msb4_r = msb4.ptr(r);
+            for (int c = 0; c < src.cols; ++c) {
+                lsb4_r[c] = src_r[c] & 15;
+                msb4_r[c] = (src_r[c] & 240) >> 4;
+            }
+        }
+
         uchar *lsb4_data = lsb4.ptr<uchar>();
         uchar *msb4_data = msb4.ptr<uchar>();
 
-        bool no_max = true;
-        bool no_shuff = true;
-
-#ifdef has_max_int8_t
-        no_max = false;
-#endif
-
-#ifdef has_shuff_int8_t
-        no_shuff = false;
-#endif
-        // LUT is designed for 128 bits SIMD, so quite triky for others
-
-        // For each of the 8 quantized orientations...
-        for (int ori = 0; ori < 8; ++ori){
+        for (int ori = 0; ori < 8; ++ori) {
             uchar *map_data = response_maps[ori].ptr<uchar>();
             const uchar *lut_low = SIMILARITY_LUT + 32 * ori;
+            mipp::Reg<uint8_t> lut_low_v((uint8_t*)lut_low);
+            mipp::Reg<uint8_t> lut_high_v((uint8_t*)lut_low + 16);
 
-            if(mipp::N<uint8_t>() == 1 || no_max || no_shuff){ // no SIMD
-                for (int i = 0; i < src.rows * src.cols; ++i)
-                    map_data[i] = std::max(lut_low[lsb4_data[i]], lut_low[msb4_data[i] + 16]);
-            }
-            else if(mipp::N<uint8_t>() == 16){ // 128 SIMD, no add base
-
-                const uchar *lut_low = SIMILARITY_LUT + 32 * ori;
-                mipp::Reg<uint8_t> lut_low_v((uint8_t*)lut_low);
-                mipp::Reg<uint8_t> lut_high_v((uint8_t*)lut_low + 16);
-
-                for (int i = 0; i < src.rows * src.cols; i += mipp::N<uint8_t>()){
-                    mipp::Reg<uint8_t> low_mask((uint8_t*)lsb4_data + i);
-                    mipp::Reg<uint8_t> high_mask((uint8_t*)msb4_data + i);
-
-                    mipp::Reg<uint8_t> low_res = mipp::shuff(lut_low_v, low_mask);
-                    mipp::Reg<uint8_t> high_res = mipp::shuff(lut_high_v, high_mask);
-
-                    mipp::Reg<uint8_t> result = mipp::max(low_res, high_res);
-                    result.store((uint8_t*)map_data + i);
-                }
-            }
-            else if(mipp::N<uint8_t>() == 16 || mipp::N<uint8_t>() == 32
-                    || mipp::N<uint8_t>() == 64){ //128 256 512 SIMD
-                CV_Assert((src.rows * src.cols) % mipp::N<uint8_t>() == 0);
-
-                uint8_t lut_temp[mipp::N<uint8_t>()] = {0};
-
-                for(int slice=0; slice<mipp::N<uint8_t>()/16; slice++){
-                    std::copy_n(lut_low, 16, lut_temp+slice*16);
-                }
-                mipp::Reg<uint8_t> lut_low_v(lut_temp);
-
-                uint8_t base_add_array[mipp::N<uint8_t>()] = {0};
-                for(uint8_t slice=0; slice<mipp::N<uint8_t>(); slice+=16){
-                    std::copy_n(lut_low+16, 16, lut_temp+slice);
-                    std::fill_n(base_add_array+slice, 16, slice);
-                }
-                mipp::Reg<uint8_t> base_add(base_add_array);
-                mipp::Reg<uint8_t> lut_high_v(lut_temp);
-
-                for (int i = 0; i < src.rows * src.cols; i += mipp::N<uint8_t>()){
-                    mipp::Reg<uint8_t> mask_low_v((uint8_t*)lsb4_data+i);
-                    mipp::Reg<uint8_t> mask_high_v((uint8_t*)msb4_data+i);
-
-                    mask_low_v += base_add;
-                    mask_high_v += base_add;
-
-                    mipp::Reg<uint8_t> shuff_low_result = mipp::shuff(lut_low_v, mask_low_v);
-                    mipp::Reg<uint8_t> shuff_high_result = mipp::shuff(lut_high_v, mask_high_v);
-
-                    mipp::Reg<uint8_t> result = mipp::max(shuff_low_result, shuff_high_result);
-                    result.store((uint8_t*)map_data + i);
-                }
-            }
-            else{
-                for (int i = 0; i < src.rows * src.cols; ++i)
-                    map_data[i] = std::max(lut_low[lsb4_data[i]], lut_low[msb4_data[i] + 16]);
+            for (int i = 0; i < total; i += mipp::N<uint8_t>()) {
+                mipp::Reg<uint8_t> low_mask((uint8_t*)lsb4_data + i);
+                mipp::Reg<uint8_t> high_mask((uint8_t*)msb4_data + i);
+                mipp::Reg<uint8_t> low_res = mipp::shuff(lut_low_v, low_mask);
+                mipp::Reg<uint8_t> high_res = mipp::shuff(lut_high_v, high_mask);
+                mipp::Reg<uint8_t> result = mipp::max(low_res, high_res);
+                result.store((uint8_t*)map_data + i);
             }
         }
-
-
     }
+#else
+    // Scalar fallback
+    {
+        for (int ori = 0; ori < 8; ++ori) {
+            uchar *map_data = response_maps[ori].ptr<uchar>();
+            const uchar *lut_low = SIMILARITY_LUT + 32 * ori;
+            for (int i = 0; i < total; ++i) {
+                uchar sb = src_data[i];
+                map_data[i] = std::max(
+                    lut_low[sb & 0x0F],
+                    lut_low[(sb >> 4) + 16]);
+            }
+        }
+    }
+#endif
 }
 
 static void linearize(const Mat &response_map, Mat &linearized, int T)
@@ -795,38 +786,75 @@ static void similarity(const std::vector<Mat> &linear_memories, const Template &
     int span_x = W - wf;
     int span_y = H - hf;
 
-    int template_positions = span_y * W + span_x + 1; // why add 1?
+    int template_positions = span_y * W + span_x + 1;
 
     dst = Mat::zeros(H, W, CV_16U);
     short *dst_ptr = dst.ptr<short>();
-    mipp::Reg<uint8_t> zero_v(uint8_t(0));
 
-    for (int i = 0; i < (int)templ.features.size(); ++i)
-    {
-
+    // Collect valid feature LM pointers upfront
+    std::vector<const uchar*> lm_ptrs;
+    lm_ptrs.reserve(templ.features.size());
+    for (int i = 0; i < (int)templ.features.size(); ++i) {
         Feature f = templ.features[i];
-
         if (f.x < 0 || f.x >= size.width || f.y < 0 || f.y >= size.height)
             continue;
-        const uchar *lm_ptr = accessLinearMemory(linear_memories, f, T, W);
+        lm_ptrs.push_back(accessLinearMemory(linear_memories, f, T, W));
+    }
+    int num_valid = (int)lm_ptrs.size();
 
-        int j = 0;
+    // OPTIMIZATION: Chunked uint8 accumulation.
+    // Max score per feature = 4. In a batch of 63 features: 63*4=252 < 255.
+    // Accumulate in uint8 at FULL SIMD width (32 bytes on AVX2 = 2x throughput).
+    // Widen to int16 only between batches.
+    const int BATCH = 63;
 
-        // *2 to avoid int8 read out of range
-        for(; j <= template_positions -mipp::N<int16_t>()*2; j+=mipp::N<int16_t>()){
-            mipp::Reg<uint8_t> src8_v((uint8_t*)lm_ptr + j);
+    for (int batch_start = 0; batch_start < num_valid; batch_start += BATCH) {
+        int batch_end = std::min(batch_start + BATCH, num_valid);
 
-            // uchar to short, once for N bytes
-            mipp::Reg<int16_t> src16_v(mipp::interleavelo(src8_v, zero_v).r);
+#ifdef __AVX2__
+        // AVX2 path: accumulate batch in uint8 temp buffer, then widen
+        std::vector<uint8_t> acc8(template_positions, 0);
 
-            mipp::Reg<int16_t> dst_v((int16_t*)dst_ptr + j);
-
-            mipp::Reg<int16_t> res_v = src16_v + dst_v;
-            res_v.store((int16_t*)dst_ptr + j);
+        for (int fi = batch_start; fi < batch_end; ++fi) {
+            const uchar *lm_ptr = lm_ptrs[fi];
+            int j = 0;
+            for (; j <= template_positions - 32; j += 32) {
+                __m256i s = _mm256_loadu_si256((const __m256i*)(lm_ptr + j));
+                __m256i d = _mm256_loadu_si256((const __m256i*)(acc8.data() + j));
+                _mm256_storeu_si256((__m256i*)(acc8.data() + j), _mm256_add_epi8(d, s));
+            }
+            for (; j < template_positions; ++j)
+                acc8[j] += lm_ptr[j];
         }
 
-        for(; j<template_positions; j++)
-            dst_ptr[j] += short(lm_ptr[j]);
+        // Widen uint8 -> int16 and add to dst
+        {
+            int j = 0;
+            for (; j <= template_positions - 16; j += 16) {
+                __m128i s8 = _mm_loadu_si128((const __m128i*)(acc8.data() + j));
+                __m256i s16 = _mm256_cvtepu8_epi16(s8);
+                __m256i d16 = _mm256_loadu_si256((const __m256i*)(dst_ptr + j));
+                _mm256_storeu_si256((__m256i*)(dst_ptr + j), _mm256_add_epi16(d16, s16));
+            }
+            for (; j < template_positions; ++j)
+                dst_ptr[j] += (short)acc8[j];
+        }
+#else
+        // Non-AVX2: original MIPP path (int16 widening per feature)
+        mipp::Reg<uint8_t> zero_v(uint8_t(0));
+        for (int fi = batch_start; fi < batch_end; ++fi) {
+            const uchar *lm_ptr = lm_ptrs[fi];
+            int j = 0;
+            for (; j <= template_positions - mipp::N<int16_t>() * 2; j += mipp::N<int16_t>()) {
+                mipp::Reg<uint8_t> src8_v((uint8_t*)lm_ptr + j);
+                mipp::Reg<int16_t> src16_v(mipp::interleavelo(src8_v, zero_v).r);
+                mipp::Reg<int16_t> dst_v((int16_t*)dst_ptr + j);
+                (src16_v + dst_v).store((int16_t*)dst_ptr + j);
+            }
+            for (; j < template_positions; ++j)
+                dst_ptr[j] += short(lm_ptr[j]);
+        }
+#endif
     }
 }
 

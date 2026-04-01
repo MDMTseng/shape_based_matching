@@ -10,7 +10,7 @@ IF(MSVC)
     # MSVC: use /arch:AVX2 for AVX2 support + define __AVX2__ for our code
     SET(PLATFORM_COMPILE_FLAGS "/arch:AVX2")
     add_definitions(-D__AVX2__)
-    SET(COMMON_COMPILE_FLAGS "/W3 /O2")
+    SET(COMMON_COMPILE_FLAGS "/W3 /O2 /openmp")
     SET(CMAKE_CXX_FLAGS "${PLATFORM_COMPILE_FLAGS} ${COMMON_COMPILE_FLAGS}")
     SET(CMAKE_CXX_FLAGS_RELEASE "/O2")
 ELSEIF(${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm")
@@ -46,3 +46,7 @@ target_link_libraries(bench_avx2 ${OpenCV_LIBS})
 # Robustness test
 add_executable(test_robustness line2Dup.cpp test_robustness.cpp)
 target_link_libraries(test_robustness ${OpenCV_LIBS})
+
+# Preprocessing stage profiler
+add_executable(bench_preprocess bench_preprocess.cpp)
+target_link_libraries(bench_preprocess ${OpenCV_LIBS})

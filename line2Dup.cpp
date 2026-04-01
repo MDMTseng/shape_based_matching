@@ -1188,13 +1188,6 @@ std::vector<Match> Detector::match(Mat source, float threshold,
                 for (int ori = 0; ori < 8; ++ori)
                     memories[ori].create(T * T, mem_w * mem_h, CV_8U);
 
-                // Small row buffers for on-the-fly spread computation
-                std::vector<uchar> v_or_buf(src_cols, 0);  // vertical OR result
-                std::vector<uchar> hv_spread_buf(src_cols, 0);  // full 2D spread result
-                std::vector<uchar> discount_buf(src_cols, 0);  // popcount discount per pixel
-#ifdef __AVX2__
-                std::vector<uchar> response_buf(src_cols, 0);  // LUT response per ori
-#endif
                 // Popcount discount table: fewer bits set = more discriminative.
                 // Spreading naturally sets 2-3 bits on clean edges, so we only
                 // penalize when many bits are set (ambiguous/noisy regions).
@@ -1203,7 +1196,19 @@ std::vector<Match> Detector::match(Mat source, float threshold,
                 static const int pop4[16] = {
                     0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4};
 
+                // Parallelized row loop: each thread gets private row buffers.
+                // No write conflicts because each (grid_row, dec_r) pair is unique per row r.
+                #pragma omp parallel for schedule(dynamic, 16)
                 for (int r = 0; r < src_rows; ++r) {
+                // Per-thread row buffers (allocated on first use via thread-local)
+                thread_local std::vector<uchar> v_or_buf, hv_spread_buf, discount_buf;
+                thread_local std::vector<uchar> response_buf;
+                if ((int)v_or_buf.size() != src_cols) {
+                    v_or_buf.resize(src_cols, 0);
+                    hv_spread_buf.resize(src_cols, 0);
+                    discount_buf.resize(src_cols, 0);
+                    response_buf.resize(src_cols, 0);
+                }
                     // --- Step 1: Vertical OR of T rows centered at r ---
                     int y0 = std::max(0, r - half);
                     int y1 = std::min(src_rows - 1, r + half);
@@ -1365,12 +1370,47 @@ std::vector<Match> Detector::match(Mat source, float threshold,
                             resp_row[x] = (uchar)(raw * disc_row[x] / 4);
                         }
 
-                        // Strided decimate from response row to linear memories
-                        for (int c_start = 0; c_start < T; ++c_start) {
-                            int grid_index = grid_row * T + c_start;
-                            uchar *mem_ptr = memories[ori].ptr(grid_index) + dec_r * mem_w;
-                            for (int c = c_start; c < src_cols; c += T) {
-                                *mem_ptr++ = resp_row[c];
+                        // Strided decimate from response row to linear memories.
+                        // For T=4: use SSE shuffles to extract every 4th byte.
+                        // Each 16-byte load yields 4 output bytes; 4 loads → 16 outputs.
+                        if (T == 4) {
+                            // Shuffle masks: pick every 4th byte at each offset
+                            alignas(16) static const uint8_t shuf_t4[4][16] = {
+                                {0,4,8,12, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80},
+                                {1,5,9,13, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80},
+                                {2,6,10,14, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80},
+                                {3,7,11,15, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80},
+                            };
+                            for (int c_start = 0; c_start < 4; ++c_start) {
+                                int grid_index = grid_row * 4 + c_start;
+                                uchar *mem_ptr = memories[ori].ptr(grid_index) + dec_r * mem_w;
+                                __m128i mask = _mm_load_si128((const __m128i*)shuf_t4[c_start]);
+                                int c = 0;
+                                for (; c + 64 <= src_cols; c += 64) {
+                                    const uchar *p = resp_row + c;
+                                    __m128i v0 = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(p)),      mask);
+                                    __m128i v1 = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(p + 16)),  mask);
+                                    __m128i v2 = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(p + 32)),  mask);
+                                    __m128i v3 = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(p + 48)),  mask);
+                                    __m128i v01 = _mm_unpacklo_epi32(v0, v1);
+                                    __m128i v23 = _mm_unpacklo_epi32(v2, v3);
+                                    __m128i out = _mm_unpacklo_epi64(v01, v23);
+                                    _mm_storeu_si128((__m128i*)mem_ptr, out);
+                                    mem_ptr += 16;
+                                }
+                                // Scalar tail
+                                for (int cc = c + c_start; cc < src_cols; cc += 4) {
+                                    *mem_ptr++ = resp_row[cc];
+                                }
+                            }
+                        } else {
+                            // General T: scalar strided copy
+                            for (int c_start = 0; c_start < T; ++c_start) {
+                                int grid_index = grid_row * T + c_start;
+                                uchar *mem_ptr = memories[ori].ptr(grid_index) + dec_r * mem_w;
+                                for (int c = c_start; c < src_cols; c += T) {
+                                    *mem_ptr++ = resp_row[c];
+                                }
                             }
                         }
 #else
@@ -1439,12 +1479,13 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
                           const std::string &class_id,
                           const std::vector<TemplatePyramid> &template_pyramids) const
 {
-#pragma omp declare reduction \
-    (omp_insert: std::vector<Match>: omp_out.insert(omp_out.end(), omp_in.begin(), omp_in.end()))
-
-#pragma omp parallel for reduction(omp_insert:matches)
-    for (size_t template_id = 0; template_id < template_pyramids.size(); ++template_id)
+    // MSVC OpenMP only supports 2.0 (no custom reductions, no unsigned loop var).
+    // Use critical section for thread-safe match collection instead.
+    int num_templates = static_cast<int>(template_pyramids.size());
+#pragma omp parallel for schedule(dynamic)
+    for (int template_id_i = 0; template_id_i < num_templates; ++template_id_i)
     {
+        size_t template_id = static_cast<size_t>(template_id_i);
         const TemplatePyramid &tp = template_pyramids[template_id];
         // First match over the whole image at the lowest pyramid level
         /// @todo Factor this out into separate function
@@ -1568,6 +1609,7 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
             candidates.erase(new_end, candidates.end());
         }
 
+        #pragma omp critical
         matches.insert(matches.end(), candidates.begin(), candidates.end());
     }
 }

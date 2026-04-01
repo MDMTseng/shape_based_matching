@@ -1166,66 +1166,169 @@ std::vector<Match> Detector::match(Mat source, float threshold,
                 quantizers[i]->pyrDown();
         }
 
-        Mat quantized, spread_quantized;
-        std::vector<Mat> response_maps;
+        Mat quantized;
         for (int i = 0; i < (int)quantizers.size(); ++i)
         {
             quantizers[i]->quantize(quantized);
-            spread(quantized, spread_quantized, T);
 
-            // FUSED: computeResponseMaps + linearize in one pass.
-            // Instead of writing 8 full response map images then strided-copying
-            // into linear memories, write directly to linear memory layout.
-            // Eliminates 8 intermediate Mat allocations + 8 linearize passes.
+            // FULLY FUSED: spread + computeResponseMaps + linearize in one pass.
+            // Instead of creating WxH spread buffer then reading it back,
+            // compute the spread on-the-fly per row using two small temp buffers.
+            // Eliminates both h_spread and spread_quantized intermediate allocations.
             {
                 LinearMemories &memories = lm_level[i];
-                CV_Assert(spread_quantized.rows % T == 0);
-                CV_Assert(spread_quantized.cols % T == 0);
-                int mem_w = spread_quantized.cols / T;
-                int mem_h = spread_quantized.rows / T;
+                CV_Assert(quantized.rows % T == 0);
+                CV_Assert(quantized.cols % T == 0);
+                int src_cols = quantized.cols;
+                int src_rows = quantized.rows;
+                int mem_w = src_cols / T;
+                int mem_h = src_rows / T;
+                int half = T / 2;
 
                 for (int ori = 0; ori < 8; ++ori)
                     memories[ori].create(T * T, mem_w * mem_h, CV_8U);
 
-                const uchar *src_data = spread_quantized.ptr<uchar>();
-                int src_cols = spread_quantized.cols;
-                int src_rows = spread_quantized.rows;
-
+                // Small row buffers for on-the-fly spread computation
+                std::vector<uchar> v_or_buf(src_cols, 0);  // vertical OR result
+                std::vector<uchar> hv_spread_buf(src_cols, 0);  // full 2D spread result
 #ifdef __AVX2__
-                const __m256i nibble_mask = _mm256_set1_epi8(0x0F);
+                std::vector<uchar> response_buf(src_cols, 0);  // LUT response per ori
 #endif
 
-                for (int ori = 0; ori < 8; ++ori) {
-                    const uchar *lut_ptr = SIMILARITY_LUT + 32 * ori;
+                for (int r = 0; r < src_rows; ++r) {
+                    // --- Step 1: Vertical OR of T rows centered at r ---
+                    int y0 = std::max(0, r - half);
+                    int y1 = std::min(src_rows - 1, r + half);
+
+                    // Start with first row
+                    {
+                        const uchar *first = quantized.ptr(y0);
+                        int x = 0;
+#ifdef __AVX2__
+                        for (; x <= src_cols - 32; x += 32) {
+                            _mm256_storeu_si256((__m256i*)(v_or_buf.data() + x),
+                                _mm256_loadu_si256((const __m256i*)(first + x)));
+                        }
+#endif
+                        for (; x < src_cols; ++x) v_or_buf[x] = first[x];
+                    }
+                    // OR remaining rows
+                    for (int yy = y0 + 1; yy <= y1; ++yy) {
+                        const uchar *row = quantized.ptr(yy);
+                        int x = 0;
+#ifdef __AVX2__
+                        for (; x <= src_cols - 32; x += 32) {
+                            __m256i acc = _mm256_loadu_si256((const __m256i*)(v_or_buf.data() + x));
+                            __m256i v = _mm256_loadu_si256((const __m256i*)(row + x));
+                            _mm256_storeu_si256((__m256i*)(v_or_buf.data() + x),
+                                _mm256_or_si256(acc, v));
+                        }
+#endif
+                        for (; x < src_cols; ++x) v_or_buf[x] |= row[x];
+                    }
+
+                    // --- Step 2: Horizontal OR spread ---
+                    {
+                        const uchar *src = v_or_buf.data();
+                        uchar *dst = hv_spread_buf.data();
+
+                        int x = 0;
+#ifdef __AVX2__
+                        // AVX2 interior where all offsets are in bounds
+                        for (; x <= src_cols - 32 - half; x += 32) {
+                            __m256i acc = _mm256_loadu_si256((const __m256i*)(src + x));
+                            for (int d = 1; d <= half; ++d) {
+                                if (x - d >= 0)
+                                    acc = _mm256_or_si256(acc,
+                                        _mm256_loadu_si256((const __m256i*)(src + x - d)));
+                                if (x + d <= src_cols - 32)
+                                    acc = _mm256_or_si256(acc,
+                                        _mm256_loadu_si256((const __m256i*)(src + x + d)));
+                            }
+                            _mm256_storeu_si256((__m256i*)(dst + x), acc);
+                        }
+#endif
+                        // Scalar for remaining / borders
+                        for (; x < src_cols; ++x) {
+                            uchar val = src[x];
+                            for (int d = 1; d <= half; ++d) {
+                                if (x - d >= 0) val |= src[x - d];
+                                if (x + d < src_cols) val |= src[x + d];
+                            }
+                            dst[x] = val;
+                        }
+                        // Fix up any AVX2-skipped left border
+                        for (x = 0; x < std::min(half, src_cols); ++x) {
+                            uchar val = src[x];
+                            for (int d = 1; d <= half; ++d) {
+                                if (x - d >= 0) val |= src[x - d];
+                                if (x + d < src_cols) val |= src[x + d];
+                            }
+                            dst[x] = val;
+                        }
+                    }
+
+                    // --- Step 3: LUT + write to linear memories ---
+                    int grid_row = r % T;
+                    int dec_r = r / T;
+                    const uchar *spread_row = hv_spread_buf.data();
+
+                    for (int ori = 0; ori < 8; ++ori) {
+                        const uchar *lut_ptr = SIMILARITY_LUT + 32 * ori;
 
 #ifdef __AVX2__
-                    __m256i lut_lo = _mm256_broadcastsi128_si256(
-                        _mm_loadu_si128((const __m128i*)lut_ptr));
-                    __m256i lut_hi = _mm256_broadcastsi128_si256(
-                        _mm_loadu_si128((const __m128i*)(lut_ptr + 16)));
-#endif
+                        // AVX2: apply LUT to full spread row at once,
+                        // then strided-decimate to linear memories.
+                        // This is faster than scalar strided LUT because
+                        // vpshufb processes 32 bytes per cycle.
+                        __m256i lut_lo_v = _mm256_broadcastsi128_si256(
+                            _mm_loadu_si128((const __m128i*)lut_ptr));
+                        __m256i lut_hi_v = _mm256_broadcastsi128_si256(
+                            _mm_loadu_si128((const __m128i*)(lut_ptr + 16)));
+                        __m256i nibble_mask = _mm256_set1_epi8(0x0F);
 
-                    // For each sub-grid offset (r_start, c_start)
-                    int grid_index = 0;
-                    for (int r_start = 0; r_start < T; ++r_start) {
+                        // Apply LUT to full row into response buffer
+                        // response_row[c] = max(lut_lo[sb & 0xF], lut_hi[(sb>>4) & 0xF])
+                        uchar *resp_row = response_buf.data();
+                        int x = 0;
+                        for (; x <= src_cols - 32; x += 32) {
+                            __m256i sb = _mm256_loadu_si256((const __m256i*)(spread_row + x));
+                            __m256i lo_nib = _mm256_and_si256(sb, nibble_mask);
+                            __m256i hi_nib = _mm256_and_si256(
+                                _mm256_srli_epi16(sb, 4), nibble_mask);
+                            __m256i score = _mm256_max_epu8(
+                                _mm256_shuffle_epi8(lut_lo_v, lo_nib),
+                                _mm256_shuffle_epi8(lut_hi_v, hi_nib));
+                            _mm256_storeu_si256((__m256i*)(resp_row + x), score);
+                        }
+                        for (; x < src_cols; ++x) {
+                            uchar sb = spread_row[x];
+                            resp_row[x] = std::max(
+                                lut_ptr[sb & 0x0F],
+                                lut_ptr[(sb >> 4) + 16]);
+                        }
+
+                        // Strided decimate from response row to linear memories
                         for (int c_start = 0; c_start < T; ++c_start) {
-                            uchar *mem_ptr = memories[ori].ptr(grid_index);
-                            ++grid_index;
-
-                            // Walk every T-th pixel, apply LUT, write to linear memory
-                            for (int r = r_start; r < src_rows; r += T) {
-                                const uchar *row = src_data + r * src_cols;
-                                int c = c_start;
-
-                                // Scalar: apply LUT and write directly
-                                for (; c < src_cols; c += T) {
-                                    uchar sb = row[c];
-                                    *mem_ptr++ = std::max(
-                                        lut_ptr[sb & 0x0F],
-                                        lut_ptr[(sb >> 4) + 16]);
-                                }
+                            int grid_index = grid_row * T + c_start;
+                            uchar *mem_ptr = memories[ori].ptr(grid_index) + dec_r * mem_w;
+                            for (int c = c_start; c < src_cols; c += T) {
+                                *mem_ptr++ = resp_row[c];
                             }
                         }
+#else
+                        for (int c_start = 0; c_start < T; ++c_start) {
+                            int grid_index = grid_row * T + c_start;
+                            uchar *mem_ptr = memories[ori].ptr(grid_index) + dec_r * mem_w;
+
+                            for (int c = c_start; c < src_cols; c += T) {
+                                uchar sb = spread_row[c];
+                                *mem_ptr++ = std::max(
+                                    lut_ptr[sb & 0x0F],
+                                    lut_ptr[(sb >> 4) + 16]);
+                            }
+                        }
+#endif
                     }
                 }
             }

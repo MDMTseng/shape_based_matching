@@ -38,3 +38,7 @@ include_directories (${INCLUDE_DIRECTORIES} "${CMAKE_CURRENT_SOURCE_DIR}/MIPP/")
 # test exe
 add_executable(${PROJECT_NAME}_test line2Dup.cpp test.cpp)
 target_link_libraries(${PROJECT_NAME}_test ${OpenCV_LIBS})
+
+# AVX2 benchmark
+add_executable(bench_avx2 line2Dup.cpp bench_avx2.cpp)
+target_link_libraries(bench_avx2 ${OpenCV_LIBS})

@@ -322,7 +322,7 @@ void angle_test(string mode = "test", bool use_rot = true){
         auto matches = detector.match(img, 90, ids);
         timer.out();
 
-        if(img.channels() == 1) cvtColor(img, img, CV_GRAY2BGR);
+        if(img.channels() == 1) cvtColor(img, img, cv::COLOR_GRAY2BGR);
 
         std::cout << "matches.size(): " << matches.size() << std::endl;
         size_t top5 = 1;

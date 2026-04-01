@@ -1191,9 +1191,17 @@ std::vector<Match> Detector::match(Mat source, float threshold,
                 // Small row buffers for on-the-fly spread computation
                 std::vector<uchar> v_or_buf(src_cols, 0);  // vertical OR result
                 std::vector<uchar> hv_spread_buf(src_cols, 0);  // full 2D spread result
+                std::vector<uchar> discount_buf(src_cols, 0);  // popcount discount per pixel
 #ifdef __AVX2__
                 std::vector<uchar> response_buf(src_cols, 0);  // LUT response per ori
 #endif
+                // Popcount discount table: fewer bits set = more discriminative.
+                // Spreading naturally sets 2-3 bits on clean edges, so we only
+                // penalize when many bits are set (ambiguous/noisy regions).
+                // popcount 0->0, 1-3->4(full), 4->3, 5->2, 6->1, 7-8->0
+                static const uchar discount_table[9] = {0, 4, 4, 4, 3, 2, 1, 0, 0};
+                static const int pop4[16] = {
+                    0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4};
 
                 for (int r = 0; r < src_rows; ++r) {
                     // --- Step 1: Vertical OR of T rows centered at r ---
@@ -1268,27 +1276,60 @@ std::vector<Match> Detector::match(Mat source, float threshold,
                         }
                     }
 
-                    // --- Step 3: LUT + write to linear memories ---
+                    // --- Step 2b: Compute popcount discount for entire row ---
+                    // This is orientation-independent, so compute once per row.
+                    {
+                        const uchar *sp = hv_spread_buf.data();
+                        uchar *disc = discount_buf.data();
+                        int x = 0;
+#ifdef __AVX2__
+                        alignas(16) static const uchar pop4_tbl[16] = {
+                            0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4};
+                        __m256i pop4_lut = _mm256_broadcastsi128_si256(
+                            _mm_load_si128((const __m128i*)pop4_tbl));
+                        alignas(16) static const uchar disc_tbl[16] = {
+                            0, 4, 4, 4, 3, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+                        __m256i disc_lut = _mm256_broadcastsi128_si256(
+                            _mm_load_si128((const __m128i*)disc_tbl));
+                        __m256i nmask = _mm256_set1_epi8(0x0F);
+
+                        for (; x <= src_cols - 32; x += 32) {
+                            __m256i sb = _mm256_loadu_si256((const __m256i*)(sp + x));
+                            __m256i lo = _mm256_and_si256(sb, nmask);
+                            __m256i hi = _mm256_and_si256(
+                                _mm256_srli_epi16(sb, 4), nmask);
+                            __m256i pcnt = _mm256_add_epi8(
+                                _mm256_shuffle_epi8(pop4_lut, lo),
+                                _mm256_shuffle_epi8(pop4_lut, hi));
+                            __m256i dv = _mm256_shuffle_epi8(disc_lut, pcnt);
+                            _mm256_storeu_si256((__m256i*)(disc + x), dv);
+                        }
+#endif
+                        for (; x < src_cols; ++x) {
+                            uchar sb = sp[x];
+                            int nbits = pop4[sb & 0x0F] + pop4[(sb >> 4) & 0x0F];
+                            disc[x] = (nbits < 9) ? discount_table[nbits] : 0;
+                        }
+                    }
+
+                    // --- Step 3: LUT + discount + write to linear memories ---
                     int grid_row = r % T;
                     int dec_r = r / T;
                     const uchar *spread_row = hv_spread_buf.data();
+                    const uchar *disc_row = discount_buf.data();
 
                     for (int ori = 0; ori < 8; ++ori) {
                         const uchar *lut_ptr = SIMILARITY_LUT + 32 * ori;
 
 #ifdef __AVX2__
-                        // AVX2: apply LUT to full spread row at once,
+                        // AVX2: apply LUT + popcount discount to full spread row,
                         // then strided-decimate to linear memories.
-                        // This is faster than scalar strided LUT because
-                        // vpshufb processes 32 bytes per cycle.
                         __m256i lut_lo_v = _mm256_broadcastsi128_si256(
                             _mm_loadu_si128((const __m128i*)lut_ptr));
                         __m256i lut_hi_v = _mm256_broadcastsi128_si256(
                             _mm_loadu_si128((const __m128i*)(lut_ptr + 16)));
                         __m256i nibble_mask = _mm256_set1_epi8(0x0F);
 
-                        // Apply LUT to full row into response buffer
-                        // response_row[c] = max(lut_lo[sb & 0xF], lut_hi[(sb>>4) & 0xF])
                         uchar *resp_row = response_buf.data();
                         int x = 0;
                         for (; x <= src_cols - 32; x += 32) {
@@ -1296,16 +1337,32 @@ std::vector<Match> Detector::match(Mat source, float threshold,
                             __m256i lo_nib = _mm256_and_si256(sb, nibble_mask);
                             __m256i hi_nib = _mm256_and_si256(
                                 _mm256_srli_epi16(sb, 4), nibble_mask);
-                            __m256i score = _mm256_max_epu8(
+                            __m256i raw_score = _mm256_max_epu8(
                                 _mm256_shuffle_epi8(lut_lo_v, lo_nib),
                                 _mm256_shuffle_epi8(lut_hi_v, hi_nib));
-                            _mm256_storeu_si256((__m256i*)(resp_row + x), score);
+
+                            // Apply popcount discount: result = raw * disc / 4
+                            __m256i dv = _mm256_loadu_si256((const __m256i*)(disc_row + x));
+                            // Unpack to 16-bit, multiply, shift right 2, pack
+                            __m256i zero = _mm256_setzero_si256();
+                            __m256i raw_lo16 = _mm256_unpacklo_epi8(raw_score, zero);
+                            __m256i raw_hi16 = _mm256_unpackhi_epi8(raw_score, zero);
+                            __m256i dsc_lo16 = _mm256_unpacklo_epi8(dv, zero);
+                            __m256i dsc_hi16 = _mm256_unpackhi_epi8(dv, zero);
+                            __m256i prod_lo = _mm256_srli_epi16(
+                                _mm256_mullo_epi16(raw_lo16, dsc_lo16), 2);
+                            __m256i prod_hi = _mm256_srli_epi16(
+                                _mm256_mullo_epi16(raw_hi16, dsc_hi16), 2);
+                            __m256i result = _mm256_packus_epi16(prod_lo, prod_hi);
+
+                            _mm256_storeu_si256((__m256i*)(resp_row + x), result);
                         }
                         for (; x < src_cols; ++x) {
                             uchar sb = spread_row[x];
-                            resp_row[x] = std::max(
+                            uchar raw = std::max(
                                 lut_ptr[sb & 0x0F],
                                 lut_ptr[(sb >> 4) + 16]);
+                            resp_row[x] = (uchar)(raw * disc_row[x] / 4);
                         }
 
                         // Strided decimate from response row to linear memories
@@ -1323,9 +1380,10 @@ std::vector<Match> Detector::match(Mat source, float threshold,
 
                             for (int c = c_start; c < src_cols; c += T) {
                                 uchar sb = spread_row[c];
-                                *mem_ptr++ = std::max(
+                                uchar raw = std::max(
                                     lut_ptr[sb & 0x0F],
                                     lut_ptr[(sb >> 4) + 16]);
+                                *mem_ptr++ = (uchar)(raw * disc_row[c] / 4);
                             }
                         }
 #endif

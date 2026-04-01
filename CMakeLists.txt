@@ -42,3 +42,7 @@ target_link_libraries(${PROJECT_NAME}_test ${OpenCV_LIBS})
 # AVX2 benchmark
 add_executable(bench_avx2 line2Dup.cpp bench_avx2.cpp)
 target_link_libraries(bench_avx2 ${OpenCV_LIBS})
+
+# Robustness test
+add_executable(test_robustness line2Dup.cpp test_robustness.cpp)
+target_link_libraries(test_robustness ${OpenCV_LIBS})

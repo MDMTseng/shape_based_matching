@@ -592,16 +592,80 @@ static void orUnaligned8u(const uchar *src, const int src_stride,
 
 static void spread(const Mat &src, Mat &dst, int T)
 {
-    // Allocate and zero-initialize spread (OR'ed) image
-    dst = Mat::zeros(src.size(), CV_8U);
+    // OPTIMIZATION: separable spread. Original does T*T full-image OR passes.
+    // Separable does 2 passes: horizontal OR (T wide), then vertical OR (T tall).
+    // For T=4: 16 passes -> 2 passes = 8x less work.
+    // Valid because OR is associative and commutative.
 
-    // Fill in spread gradient image (section 2.3)
-    for (int r = 0; r < T; ++r)
-    {
-        for (int c = 0; c < T; ++c)
-        {
-            orUnaligned8u(&src.at<unsigned char>(r, c), static_cast<const int>(src.step1()), dst.ptr(),
-                          static_cast<const int>(dst.step1()), src.cols - c, src.rows - r);
+    int half = T / 2;
+    int rows = src.rows;
+    int cols = src.cols;
+    int step = static_cast<int>(src.step1());
+
+    // Pass 1: horizontal OR
+    Mat h_spread = Mat::zeros(src.size(), CV_8U);
+    for (int r = 0; r < rows; ++r) {
+        const uchar *src_row = src.ptr(r);
+        uchar *dst_row = h_spread.ptr(r);
+
+        int c = 0;
+#ifdef __AVX2__
+        // Process interior where all offsets are in-bounds
+        for (; c <= cols - 32 - half; c += 32) {
+            __m256i acc = _mm256_loadu_si256((const __m256i*)(src_row + c));
+            for (int d = 1; d <= half; ++d) {
+                if (c - d >= 0)
+                    acc = _mm256_or_si256(acc,
+                        _mm256_loadu_si256((const __m256i*)(src_row + c - d)));
+                if (c + d < cols - 31)
+                    acc = _mm256_or_si256(acc,
+                        _mm256_loadu_si256((const __m256i*)(src_row + c + d)));
+            }
+            _mm256_storeu_si256((__m256i*)(dst_row + c), acc);
+        }
+#endif
+        // Scalar for remaining / all if no AVX2
+        for (; c < cols; ++c) {
+            uchar val = src_row[c];
+            for (int d = 1; d <= half; ++d) {
+                if (c - d >= 0) val |= src_row[c - d];
+                if (c + d < cols) val |= src_row[c + d];
+            }
+            dst_row[c] = val;
+        }
+    }
+
+    // Pass 2: vertical OR
+    dst = Mat::zeros(src.size(), CV_8U);
+    int h_step = static_cast<int>(h_spread.step1());
+    int d_step = static_cast<int>(dst.step1());
+
+    for (int r = 0; r < rows; ++r) {
+        uchar *dst_row = dst.ptr(r);
+
+        int c = 0;
+#ifdef __AVX2__
+        for (; c <= cols - 32; c += 32) {
+            __m256i acc = _mm256_loadu_si256(
+                (const __m256i*)(h_spread.ptr(r) + c));
+            for (int d = 1; d <= half; ++d) {
+                if (r - d >= 0)
+                    acc = _mm256_or_si256(acc,
+                        _mm256_loadu_si256((const __m256i*)(h_spread.ptr(r - d) + c)));
+                if (r + d < rows)
+                    acc = _mm256_or_si256(acc,
+                        _mm256_loadu_si256((const __m256i*)(h_spread.ptr(r + d) + c)));
+            }
+            _mm256_storeu_si256((__m256i*)(dst_row + c), acc);
+        }
+#endif
+        for (; c < cols; ++c) {
+            uchar val = h_spread.ptr(r)[c];
+            for (int d = 1; d <= half; ++d) {
+                if (r - d >= 0) val |= h_spread.ptr(r - d)[c];
+                if (r + d < rows) val |= h_spread.ptr(r + d)[c];
+            }
+            dst_row[c] = val;
         }
     }
 }
@@ -1108,11 +1172,63 @@ std::vector<Match> Detector::match(Mat source, float threshold,
         {
             quantizers[i]->quantize(quantized);
             spread(quantized, spread_quantized, T);
-            computeResponseMaps(spread_quantized, response_maps);
 
-            LinearMemories &memories = lm_level[i];
-            for (int j = 0; j < 8; ++j)
-                linearize(response_maps[j], memories[j], T);
+            // FUSED: computeResponseMaps + linearize in one pass.
+            // Instead of writing 8 full response map images then strided-copying
+            // into linear memories, write directly to linear memory layout.
+            // Eliminates 8 intermediate Mat allocations + 8 linearize passes.
+            {
+                LinearMemories &memories = lm_level[i];
+                CV_Assert(spread_quantized.rows % T == 0);
+                CV_Assert(spread_quantized.cols % T == 0);
+                int mem_w = spread_quantized.cols / T;
+                int mem_h = spread_quantized.rows / T;
+
+                for (int ori = 0; ori < 8; ++ori)
+                    memories[ori].create(T * T, mem_w * mem_h, CV_8U);
+
+                const uchar *src_data = spread_quantized.ptr<uchar>();
+                int src_cols = spread_quantized.cols;
+                int src_rows = spread_quantized.rows;
+
+#ifdef __AVX2__
+                const __m256i nibble_mask = _mm256_set1_epi8(0x0F);
+#endif
+
+                for (int ori = 0; ori < 8; ++ori) {
+                    const uchar *lut_ptr = SIMILARITY_LUT + 32 * ori;
+
+#ifdef __AVX2__
+                    __m256i lut_lo = _mm256_broadcastsi128_si256(
+                        _mm_loadu_si128((const __m128i*)lut_ptr));
+                    __m256i lut_hi = _mm256_broadcastsi128_si256(
+                        _mm_loadu_si128((const __m128i*)(lut_ptr + 16)));
+#endif
+
+                    // For each sub-grid offset (r_start, c_start)
+                    int grid_index = 0;
+                    for (int r_start = 0; r_start < T; ++r_start) {
+                        for (int c_start = 0; c_start < T; ++c_start) {
+                            uchar *mem_ptr = memories[ori].ptr(grid_index);
+                            ++grid_index;
+
+                            // Walk every T-th pixel, apply LUT, write to linear memory
+                            for (int r = r_start; r < src_rows; r += T) {
+                                const uchar *row = src_data + r * src_cols;
+                                int c = c_start;
+
+                                // Scalar: apply LUT and write directly
+                                for (; c < src_cols; c += T) {
+                                    uchar sb = row[c];
+                                    *mem_ptr++ = std::max(
+                                        lut_ptr[sb & 0x0F],
+                                        lut_ptr[(sb >> 4) + 16]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         sizes.push_back(quantized.size());

@@ -1,12 +1,6 @@
 #include "line2Dup.h"
 #include <iostream>
 
-#ifdef __AVX2__
-#include <immintrin.h>
-#elif defined(_MSC_VER) && defined(__AVX2__)
-#include <immintrin.h>
-#endif
-
 using namespace std;
 using namespace cv;
 
@@ -622,112 +616,107 @@ static void computeResponseMaps(const Mat &src, std::vector<Mat> &response_maps)
     for (int i = 0; i < 8; ++i)
         response_maps[i].create(src.size(), CV_8U);
 
-    const int total = src.rows * src.cols;
-    const uchar *src_data = src.ptr<uchar>();
+    Mat lsb4(src.size(), CV_8U);
+    Mat msb4(src.size(), CV_8U);
 
-#ifdef __AVX2__
-    // =========================================================================
-    // AVX2 FAST PATH: fused nibble-split + vpshufb LUT + max
-    //
-    // The original code had TWO problems:
-    // 1. Separate pass to split lsb4/msb4 (extra memory + bandwidth)
-    // 2. mipp::shuff<uint8_t> on AVX2 is a SCALAR LOOP (not vpshufb!)
-    //
-    // This fix: fuse nibble-split into the LUT loop, use raw _mm256_shuffle_epi8.
-    // vpshufb on AVX2 operates per-128-bit-lane, so the 16-byte LUT is
-    // duplicated into both lanes via _mm256_broadcastsi128_si256.
-    // =========================================================================
+    for (int r = 0; r < src.rows; ++r)
     {
-        const __m256i nibble_mask = _mm256_set1_epi8(0x0F);
+        const uchar *src_r = src.ptr(r);
+        uchar *lsb4_r = lsb4.ptr(r);
+        uchar *msb4_r = msb4.ptr(r);
 
-        for (int ori = 0; ori < 8; ++ori) {
-            uchar *map_data = response_maps[ori].ptr<uchar>();
-            const uchar *lut_ptr = SIMILARITY_LUT + 32 * ori;
-
-            // Load 16-byte lo LUT and 16-byte hi LUT, broadcast to both lanes
-            __m256i lut_lo = _mm256_broadcastsi128_si256(
-                _mm_loadu_si128((const __m128i*)lut_ptr));
-            __m256i lut_hi = _mm256_broadcastsi128_si256(
-                _mm_loadu_si128((const __m128i*)(lut_ptr + 16)));
-
-            int i = 0;
-            for (; i <= total - 32; i += 32) {
-                // Load 32 spread bytes
-                __m256i spread = _mm256_loadu_si256((const __m256i*)(src_data + i));
-
-                // Split nibbles (fused -- no separate lsb4/msb4 buffer!)
-                __m256i lo_nib = _mm256_and_si256(spread, nibble_mask);
-                __m256i hi_nib = _mm256_and_si256(
-                    _mm256_srli_epi16(spread, 4), nibble_mask);
-
-                // LUT lookup via VPSHUFB (the REAL hardware instruction!)
-                __m256i lo_result = _mm256_shuffle_epi8(lut_lo, lo_nib);
-                __m256i hi_result = _mm256_shuffle_epi8(lut_hi, hi_nib);
-
-                // Max of the two lookups
-                __m256i result = _mm256_max_epu8(lo_result, hi_result);
-                _mm256_storeu_si256((__m256i*)(map_data + i), result);
-            }
-
-            // Scalar tail
-            for (; i < total; ++i) {
-                uchar sb = src_data[i];
-                map_data[i] = std::max(
-                    lut_ptr[sb & 0x0F],
-                    lut_ptr[(sb >> 4) + 16]);
-            }
+        for (int c = 0; c < src.cols; ++c)
+        {
+            // Least significant 4 bits of spread image pixel
+            lsb4_r[c] = src_r[c] & 15;
+            // Most significant 4 bits, right-shifted to be in [0, 16)
+            msb4_r[c] = (src_r[c] & 240) >> 4;
         }
     }
-#elif defined(has_shuff_int8_t) && defined(has_max_int8_t)
-    // SSE path (original, correct -- mipp::shuff works on 128-bit)
-    {
-        // Split nibbles into separate buffers (needed for SSE path)
-        Mat lsb4(src.size(), CV_8U);
-        Mat msb4(src.size(), CV_8U);
-        for (int r = 0; r < src.rows; ++r) {
-            const uchar *src_r = src.ptr(r);
-            uchar *lsb4_r = lsb4.ptr(r);
-            uchar *msb4_r = msb4.ptr(r);
-            for (int c = 0; c < src.cols; ++c) {
-                lsb4_r[c] = src_r[c] & 15;
-                msb4_r[c] = (src_r[c] & 240) >> 4;
-            }
-        }
 
+    {
         uchar *lsb4_data = lsb4.ptr<uchar>();
         uchar *msb4_data = msb4.ptr<uchar>();
 
-        for (int ori = 0; ori < 8; ++ori) {
-            uchar *map_data = response_maps[ori].ptr<uchar>();
-            const uchar *lut_low = SIMILARITY_LUT + 32 * ori;
-            mipp::Reg<uint8_t> lut_low_v((uint8_t*)lut_low);
-            mipp::Reg<uint8_t> lut_high_v((uint8_t*)lut_low + 16);
+        bool no_max = true;
+        bool no_shuff = true;
 
-            for (int i = 0; i < total; i += mipp::N<uint8_t>()) {
-                mipp::Reg<uint8_t> low_mask((uint8_t*)lsb4_data + i);
-                mipp::Reg<uint8_t> high_mask((uint8_t*)msb4_data + i);
-                mipp::Reg<uint8_t> low_res = mipp::shuff(lut_low_v, low_mask);
-                mipp::Reg<uint8_t> high_res = mipp::shuff(lut_high_v, high_mask);
-                mipp::Reg<uint8_t> result = mipp::max(low_res, high_res);
-                result.store((uint8_t*)map_data + i);
-            }
-        }
-    }
-#else
-    // Scalar fallback
-    {
-        for (int ori = 0; ori < 8; ++ori) {
+#ifdef has_max_int8_t
+        no_max = false;
+#endif
+
+#ifdef has_shuff_int8_t
+        no_shuff = false;
+#endif
+        // LUT is designed for 128 bits SIMD, so quite triky for others
+
+        // For each of the 8 quantized orientations...
+        for (int ori = 0; ori < 8; ++ori){
             uchar *map_data = response_maps[ori].ptr<uchar>();
             const uchar *lut_low = SIMILARITY_LUT + 32 * ori;
-            for (int i = 0; i < total; ++i) {
-                uchar sb = src_data[i];
-                map_data[i] = std::max(
-                    lut_low[sb & 0x0F],
-                    lut_low[(sb >> 4) + 16]);
+
+            if(mipp::N<uint8_t>() == 1 || no_max || no_shuff){ // no SIMD
+                for (int i = 0; i < src.rows * src.cols; ++i)
+                    map_data[i] = std::max(lut_low[lsb4_data[i]], lut_low[msb4_data[i] + 16]);
+            }
+            else if(mipp::N<uint8_t>() == 16){ // 128 SIMD, no add base
+
+                const uchar *lut_low = SIMILARITY_LUT + 32 * ori;
+                mipp::Reg<uint8_t> lut_low_v((uint8_t*)lut_low);
+                mipp::Reg<uint8_t> lut_high_v((uint8_t*)lut_low + 16);
+
+                for (int i = 0; i < src.rows * src.cols; i += mipp::N<uint8_t>()){
+                    mipp::Reg<uint8_t> low_mask((uint8_t*)lsb4_data + i);
+                    mipp::Reg<uint8_t> high_mask((uint8_t*)msb4_data + i);
+
+                    mipp::Reg<uint8_t> low_res = mipp::shuff(lut_low_v, low_mask);
+                    mipp::Reg<uint8_t> high_res = mipp::shuff(lut_high_v, high_mask);
+
+                    mipp::Reg<uint8_t> result = mipp::max(low_res, high_res);
+                    result.store((uint8_t*)map_data + i);
+                }
+            }
+            else if(mipp::N<uint8_t>() == 16 || mipp::N<uint8_t>() == 32
+                    || mipp::N<uint8_t>() == 64){ //128 256 512 SIMD
+                CV_Assert((src.rows * src.cols) % mipp::N<uint8_t>() == 0);
+
+                uint8_t lut_temp[mipp::N<uint8_t>()] = {0};
+
+                for(int slice=0; slice<mipp::N<uint8_t>()/16; slice++){
+                    std::copy_n(lut_low, 16, lut_temp+slice*16);
+                }
+                mipp::Reg<uint8_t> lut_low_v(lut_temp);
+
+                uint8_t base_add_array[mipp::N<uint8_t>()] = {0};
+                for(uint8_t slice=0; slice<mipp::N<uint8_t>(); slice+=16){
+                    std::copy_n(lut_low+16, 16, lut_temp+slice);
+                    std::fill_n(base_add_array+slice, 16, slice);
+                }
+                mipp::Reg<uint8_t> base_add(base_add_array);
+                mipp::Reg<uint8_t> lut_high_v(lut_temp);
+
+                for (int i = 0; i < src.rows * src.cols; i += mipp::N<uint8_t>()){
+                    mipp::Reg<uint8_t> mask_low_v((uint8_t*)lsb4_data+i);
+                    mipp::Reg<uint8_t> mask_high_v((uint8_t*)msb4_data+i);
+
+                    mask_low_v += base_add;
+                    mask_high_v += base_add;
+
+                    mipp::Reg<uint8_t> shuff_low_result = mipp::shuff(lut_low_v, mask_low_v);
+                    mipp::Reg<uint8_t> shuff_high_result = mipp::shuff(lut_high_v, mask_high_v);
+
+                    mipp::Reg<uint8_t> result = mipp::max(shuff_low_result, shuff_high_result);
+                    result.store((uint8_t*)map_data + i);
+                }
+            }
+            else{
+                for (int i = 0; i < src.rows * src.cols; ++i)
+                    map_data[i] = std::max(lut_low[lsb4_data[i]], lut_low[msb4_data[i] + 16]);
             }
         }
+
+
     }
-#endif
 }
 
 static void linearize(const Mat &response_map, Mat &linearized, int T)

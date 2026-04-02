@@ -404,4 +404,185 @@ Pose2D refineLocal(const std::vector<cv::Point2f>& templ_edges,
     return result;
 }
 
+// -----------------------------------------------------------------------
+// Extract model edges with normals
+// -----------------------------------------------------------------------
+std::vector<EdgePoint> extractModelEdges(const cv::Mat& templ_gray) {
+    int TW = templ_gray.cols;
+    cv::Mat smooth, dx, dy, edges;
+    cv::GaussianBlur(templ_gray, smooth, cv::Size(5, 5), 0);
+    cv::Sobel(smooth, dx, CV_16S, 1, 0, 3);
+    cv::Sobel(smooth, dy, CV_16S, 0, 1, 3);
+    cv::Canny(dx, dy, edges, 30, 60);
+
+    std::vector<EdgePoint> pts;
+    for (int r = 0; r < TW; ++r) {
+        const short* dxr = dx.ptr<short>(r);
+        const short* dyr = dy.ptr<short>(r);
+        for (int c = 0; c < TW; ++c) {
+            if (edges.at<uchar>(r, c) > 0) {
+                EdgePoint ep;
+                ep.pos = cv::Point2f((float)(c - TW / 2), (float)(r - TW / 2));
+                float gx = (float)dxr[c], gy = (float)dyr[c];
+                float mag = std::sqrt(gx * gx + gy * gy);
+                if (mag > 1e-6f) {
+                    ep.normal = cv::Point2f(gx / mag, gy / mag);
+                } else {
+                    ep.normal = cv::Point2f(0, 0);
+                }
+                pts.push_back(ep);
+            }
+        }
+    }
+    return pts;
+}
+
+// -----------------------------------------------------------------------
+// ICP with normal compatibility filtering
+// -----------------------------------------------------------------------
+Pose2D refineWithNormals(const std::vector<EdgePoint>& model_edges,
+                         const cv::Mat& scene_dx, const cv::Mat& scene_dy,
+                         const Pose2D& initial_pose,
+                         int templ_size,
+                         int roi_margin,
+                         const ICPConfig& config) {
+    int sw = scene_dx.cols, sh = scene_dx.rows;
+    int half = templ_size / 2 + roi_margin;
+
+    int rx = (int)(initial_pose.x + 0.5f) - half;
+    int ry = (int)(initial_pose.y + 0.5f) - half;
+    int rw = 2 * half, rh = 2 * half;
+    if (rx < 0) rx = 0;
+    if (ry < 0) ry = 0;
+    if (rx + rw > sw) rw = sw - rx;
+    if (ry + rh > sh) rh = sh - ry;
+    if (rw <= 10 || rh <= 10) return initial_pose;
+
+    cv::Rect roi(rx, ry, rw, rh);
+    cv::Mat local_dx = scene_dx(roi);
+    cv::Mat local_dy = scene_dy(roi);
+
+    // Build local edge scene
+    EdgeScene local_scene;
+    local_scene.build(local_dx, local_dy,
+                      config.max_dist * 3, config.max_dist * 6,
+                      config.max_dist);
+
+    Pose2D pose = initial_pose;
+    pose.x -= rx;
+    pose.y -= ry;
+
+    float cos_thresh = std::cos(config.normal_angle_thresh * (float)CV_PI / 180.0f);
+    int N = (int)model_edges.size();
+    float prev_fitness = 0, prev_rmse = 1e10f;
+
+    for (int iter = 0; iter < config.max_iterations; ++iter) {
+        float rad = pose.angle * (float)CV_PI / 180.0f;
+        float cs = std::cos(rad) * pose.scale;
+        float sn = std::sin(rad) * pose.scale;
+
+        float ATA[3][3] = {}, ATb[3] = {};
+        float total_error = 0;
+        int inlier_count = 0;
+
+        for (int i = 0; i < N; ++i) {
+            // Transform model point
+            float px = model_edges[i].pos.x, py = model_edges[i].pos.y;
+            float mx = cs * px - sn * py + pose.x;
+            float my = sn * px + cs * py + pose.y;
+
+            int ix = (int)(mx + 0.5f), iy = (int)(my + 0.5f);
+            if (ix < 0 || ix >= local_scene.width || iy < 0 || iy >= local_scene.height) continue;
+
+            float closest_cx = local_scene.closest_x.at<float>(iy, ix);
+            float closest_cy = local_scene.closest_y.at<float>(iy, ix);
+            if (closest_cx < 0) continue;
+
+            float dx = mx - closest_cx, dy = my - closest_cy;
+            if (dx * dx + dy * dy > config.max_dist * config.max_dist) continue;
+
+            // Scene normal at closest edge
+            int ecx = std::max(0, std::min(local_scene.width - 1, (int)(closest_cx + 0.5f)));
+            int ecy = std::max(0, std::min(local_scene.height - 1, (int)(closest_cy + 0.5f)));
+            float snx = local_scene.normal_x.at<float>(ecy, ecx);
+            float sny = local_scene.normal_y.at<float>(ecy, ecx);
+            if (snx == 0 && sny == 0) continue;
+
+            // Transform model normal by current rotation
+            float mnx = model_edges[i].normal.x;
+            float mny = model_edges[i].normal.y;
+            float rot_mnx = cs * mnx - sn * mny;
+            float rot_mny = sn * mnx + cs * mny;
+            float nmag = std::sqrt(rot_mnx*rot_mnx + rot_mny*rot_mny);
+            if (nmag > 1e-6f) { rot_mnx /= nmag; rot_mny /= nmag; }
+
+            // Normal compatibility check: reject if normals disagree
+            // dot product > cos_thresh means angle < threshold
+            // Use absolute value because normals can point in opposite directions
+            float ndot = std::abs(rot_mnx * snx + rot_mny * sny);
+            if (ndot < cos_thresh) continue;  // normals incompatible, skip
+
+            // Point-to-plane error
+            float e_plane = dx * snx + dy * sny;
+            total_error += e_plane * e_plane;
+            ++inlier_count;
+
+            // Jacobian for point-to-plane
+            float jp0 = -my * snx + mx * sny;
+            float jp1 = snx;
+            float jp2 = sny;
+
+            ATA[0][0] += jp0*jp0; ATA[0][1] += jp0*jp1; ATA[0][2] += jp0*jp2;
+            ATA[1][1] += jp1*jp1; ATA[1][2] += jp1*jp2;
+            ATA[2][2] += jp2*jp2;
+            ATb[0] -= jp0 * e_plane;
+            ATb[1] -= jp1 * e_plane;
+            ATb[2] -= jp2 * e_plane;
+
+            // Point-to-point regularization
+            float w = config.point_to_point_weight;
+            if (w > 0) {
+                ATA[0][0] += w * (my*my + mx*mx);
+                ATA[0][1] += w * (-my);
+                ATA[0][2] += w * (mx);
+                ATA[1][1] += w;
+                ATA[2][2] += w;
+                ATb[0] -= w * (-my*dx + mx*dy);
+                ATb[1] -= w * dx;
+                ATb[2] -= w * dy;
+            }
+        }
+
+        if (inlier_count == 0) break;
+        pose.fitness = (float)inlier_count / N;
+        pose.rmse = std::sqrt(total_error / inlier_count);
+
+        if (iter > 0 &&
+            std::abs(pose.fitness - prev_fitness) < config.convergence_fitness &&
+            std::abs(pose.rmse - prev_rmse) < config.convergence_rmse)
+            break;
+        prev_fitness = pose.fitness;
+        prev_rmse = pose.rmse;
+
+        // Solve
+        ATA[1][0] = ATA[0][1]; ATA[2][0] = ATA[0][2]; ATA[2][1] = ATA[1][2];
+        for (int i = 0; i < 3; ++i) ATA[i][i] += 0.01f;
+        float update[3] = {};
+        if (!solve3x3(ATA, ATb, update)) break;
+
+        float d_theta = std::max(-0.1f, std::min(0.1f, update[0]));
+        float d_tx = std::max(-5.0f, std::min(5.0f, update[1]));
+        float d_ty = std::max(-5.0f, std::min(5.0f, update[2]));
+        pose.angle += d_theta * 180.0f / (float)CV_PI;
+        pose.x += d_tx;
+        pose.y += d_ty;
+    }
+
+    while (pose.angle < 0) pose.angle += 360.0f;
+    while (pose.angle >= 360.0f) pose.angle -= 360.0f;
+    pose.x += rx;
+    pose.y += ry;
+    return pose;
+}
+
 } // namespace icp_refine

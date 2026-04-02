@@ -69,20 +69,9 @@ int main() {
     int ntmpl = det.numTemplates("L");
     printf("Templates: %d (step=%.0f deg)\n", ntmpl, angle_step);
 
-    // Template edge points for ICP
-    vector<Point2f> templ_edge_pts;
-    {
-        Mat ts, tdx, tdy, te;
-        GaussianBlur(templ, ts, Size(5,5), 0);
-        Sobel(ts, tdx, CV_16S, 1, 0, 3);
-        Sobel(ts, tdy, CV_16S, 0, 1, 3);
-        Canny(tdx, tdy, te, 30, 60);
-        for (int r = 0; r < TW; ++r)
-            for (int c = 0; c < TW; ++c)
-                if (te.at<uchar>(r, c) > 0)
-                    templ_edge_pts.push_back(Point2f((float)(c - TW/2), (float)(r - TW/2)));
-        printf("Template edge points: %d\n\n", (int)templ_edge_pts.size());
-    }
+    // Template edge points with normals for ICP
+    auto model_edges = icp_refine::extractModelEdges(templ);
+    printf("Template edge points: %d\n\n", (int)model_edges.size());
 
     // Test: single object at center, sweep angle 0-360 in 1-degree steps
     int cx = W/2, cy = H/2;
@@ -129,29 +118,18 @@ int main() {
         cfg.max_dist = 10.0f;
         cfg.point_to_point_weight = 0.1f;
 
-        // Multi-start ICP: try coarse angle + offsets to cover the ~5 deg
-        // systematic bias, pick the result with best fitness.
-        // Also reject ICP results that diverge too far from initial pose.
+        // Multi-start ICP with normal compatibility filtering.
+        // No need for divergence rejection - normal check prevents
+        // wrong correspondences that caused ICP to make things worse.
         icp_refine::Pose2D refined;
         refined.fitness = -1;
         for (float angle_offset : {0.0f, angle_step, angle_step*2, angle_step*3}) {
             float try_angle = coarse_angle + angle_offset;
             icp_refine::Pose2D init_pose(mcx, mcy, try_angle);
-            auto result = icp_refine::refineLocal(
-                templ_edge_pts, scene_dx, scene_dy, init_pose, TW, 20, cfg);
-            // Reject if ICP moved too far from initial position (likely diverged)
-            float moved = std::sqrt((result.x - mcx)*(result.x - mcx) +
-                                    (result.y - mcy)*(result.y - mcy));
-            if (moved > cfg.max_dist * 0.5f) continue;  // reject if moved > 5px
+            auto result = icp_refine::refineWithNormals(
+                model_edges, scene_dx, scene_dy, init_pose, TW, 20, cfg);
             if (result.fitness > refined.fitness)
                 refined = result;
-        }
-        // Fallback: if all ICP results rejected, use coarse with best-start angle
-        if (refined.fitness < 0) {
-            refined.x = mcx;
-            refined.y = mcy;
-            refined.angle = coarse_angle + angle_step * 2.5f; // compensate bias
-            if (refined.angle >= 360) refined.angle -= 360;
         }
 
         // Compute angular errors (handle wraparound)
@@ -263,9 +241,15 @@ int main() {
         cfg2.max_iterations = 30;
         cfg2.max_dist = 10.0f;
 
-        icp_refine::Pose2D init2(mcx2, mcy2, coarse_angle2);
-        auto ref2 = icp_refine::refineLocal(
-            templ_edge_pts, scene_dx2, scene_dy2, init2, TW, 20, cfg2);
+        icp_refine::Pose2D best2;
+        best2.fitness = -1;
+        for (float ao : {0.0f, angle_step, angle_step*2, angle_step*3}) {
+            icp_refine::Pose2D init2(mcx2, mcy2, coarse_angle2 + ao);
+            auto r2 = icp_refine::refineWithNormals(
+                model_edges, scene_dx2, scene_dy2, init2, TW, 20, cfg2);
+            if (r2.fitness > best2.fitness) best2 = r2;
+        }
+        auto& ref2 = best2;
 
         float a_err = ref2.angle - gt_angle;
         if (a_err > 180) a_err -= 360;

@@ -34,6 +34,10 @@ struct ICPConfig {
     float point_to_point_weight = 0.1f; ///< Blend point-to-point with point-to-plane.
                                         ///< 0 = pure point-to-plane (slides on edges),
                                         ///< 1 = equal weight. 0.1 is a good default.
+    float normal_angle_thresh = 45.0f;  ///< Max angle (degrees) between model and scene
+                                        ///< edge normals to accept a correspondence.
+                                        ///< Prevents cross-part matching (e.g., vertical
+                                        ///< arm matching horizontal arm edges).
     bool use_subpixel = false;     ///< Subpixel edge refinement via Hessian
     bool use_scale = false;        ///< Sim2 (with scale) vs SO2 (no scale)
 };
@@ -53,12 +57,26 @@ struct EdgeScene {
                float canny_low = 30, float canny_high = 60, float max_dist = 10);
 };
 
-/// Extract model edge points from a template at a given pose.
-/// @param templ_edges  Edge pixel positions relative to template center.
-/// @param pose         Initial pose (x, y, angle, scale).
-/// @return Transformed model points in scene coordinates.
+/// Model edge: position + normal direction
+struct EdgePoint {
+    cv::Point2f pos;       ///< Position relative to template center
+    cv::Point2f normal;    ///< Edge normal direction (unit vector)
+};
+
+/// Extract model edge points with normals from a template image.
+std::vector<EdgePoint> extractModelEdges(const cv::Mat& templ_gray);
+
+/// Transform model points to scene coordinates at a given pose.
 std::vector<cv::Point2f> transformModelPoints(
     const std::vector<cv::Point2f>& templ_edges, const Pose2D& pose);
+
+/// Refine using model edges with normals (better correspondence filtering).
+Pose2D refineWithNormals(const std::vector<EdgePoint>& model_edges,
+                         const cv::Mat& scene_dx, const cv::Mat& scene_dy,
+                         const Pose2D& initial_pose,
+                         int templ_size,
+                         int roi_margin = 20,
+                         const ICPConfig& config = ICPConfig());
 
 /// Run ICP refinement using pre-built full scene.
 Pose2D refine(const std::vector<cv::Point2f>& templ_edges,

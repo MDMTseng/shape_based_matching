@@ -126,56 +126,59 @@ void EdgeScene::build(const cv::Mat& sobel_dx, const cv::Mat& sobel_dy,
         }
     }
 
-    // Build closest-edge lookup via distance transform
-    // For each pixel, store the closest edge pixel's coordinates
+    // Build closest-edge lookup via OpenCV distance transform with labels.
+    // distanceTransformWithLabels assigns each pixel the label of its nearest
+    // edge pixel. We then map labels back to coordinates. O(W*H) total.
     closest_x = cv::Mat(height, width, CV_32F, cv::Scalar(-1));
     closest_y = cv::Mat(height, width, CV_32F, cv::Scalar(-1));
 
-    // Collect edge pixel positions
-    std::vector<cv::Point> edge_pts;
-    for (int r = 0; r < height; ++r)
-        for (int c = 0; c < width; ++c)
-            if (edge_map.at<uchar>(r, c) > 0)
-                edge_pts.push_back(cv::Point(c, r));
-
-    if (edge_pts.empty()) return;
-
-    // Brute-force closest edge for pixels within max_dist
-    // For efficiency, use distance transform to limit search
-    cv::Mat dist_map;
     cv::Mat inv_edge;
     cv::bitwise_not(edge_map, inv_edge);
-    cv::distanceTransform(inv_edge, dist_map, cv::DIST_L2, 3);
 
-    int max_d = (int)std::ceil(max_dist);
+    cv::Mat dist_map, labels;
+    cv::distanceTransform(inv_edge, dist_map, labels,
+                          cv::DIST_L2, 3, cv::DIST_LABEL_PIXEL);
+
+    // Build label → coordinate map. Labels are 1-based, assigned to each
+    // connected zero-pixel (edge pixel) in raster order.
+    // Find max label to size the lookup.
+    int max_label = 0;
+    for (int r = 0; r < height; ++r) {
+        const int* lr = labels.ptr<int>(r);
+        const uchar* er = edge_map.ptr<uchar>(r);
+        for (int c = 0; c < width; ++c) {
+            if (er[c] > 0 && lr[c] > max_label)
+                max_label = lr[c];
+        }
+    }
+
+    // Map: label → (x, y) of the edge pixel with that label
+    std::vector<cv::Point> label_coords(max_label + 1, cv::Point(-1, -1));
+    for (int r = 0; r < height; ++r) {
+        const int* lr = labels.ptr<int>(r);
+        const uchar* er = edge_map.ptr<uchar>(r);
+        for (int c = 0; c < width; ++c) {
+            if (er[c] > 0 && lr[c] > 0 && lr[c] <= max_label) {
+                label_coords[lr[c]] = cv::Point(c, r);
+            }
+        }
+    }
+
+    // Fill closest_x/y using labels and distance threshold
     for (int r = 0; r < height; ++r) {
         float* cxr = closest_x.ptr<float>(r);
         float* cyr = closest_y.ptr<float>(r);
         const float* dr = dist_map.ptr<float>(r);
+        const int* lr = labels.ptr<int>(r);
         for (int c = 0; c < width; ++c) {
             if (dr[c] > max_dist) continue;
-            if (edge_map.at<uchar>(r, c) > 0) {
-                cxr[c] = (float)c;
-                cyr[c] = (float)r;
-                continue;
-            }
-            // Find closest edge pixel in local window
-            float best_d2 = max_dist * max_dist;
-            int best_ec = c, best_er = r;
-            int r0 = std::max(0, r - max_d), r1 = std::min(height - 1, r + max_d);
-            int c0 = std::max(0, c - max_d), c1 = std::min(width - 1, c + max_d);
-            for (int rr = r0; rr <= r1; ++rr) {
-                const uchar* er = edge_map.ptr<uchar>(rr);
-                for (int cc = c0; cc <= c1; ++cc) {
-                    if (er[cc] > 0) {
-                        float d2 = (float)((rr - r) * (rr - r) + (cc - c) * (cc - c));
-                        if (d2 < best_d2) { best_d2 = d2; best_ec = cc; best_er = rr; }
-                    }
+            int lbl = lr[c];
+            if (lbl > 0 && lbl <= max_label) {
+                cv::Point p = label_coords[lbl];
+                if (p.x >= 0) {
+                    cxr[c] = (float)p.x;
+                    cyr[c] = (float)p.y;
                 }
-            }
-            if (best_d2 < max_dist * max_dist) {
-                cxr[c] = (float)best_ec;
-                cyr[c] = (float)best_er;
             }
         }
     }

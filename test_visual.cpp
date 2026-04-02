@@ -298,7 +298,10 @@ int main() {
 
         // ICP refinement on NMS'd matches
         auto nms_matches = spatial_nms(matches, (float)TW * 0.8f);
+        double icp_ms = 0;
         {
+            auto icp_t0 = chrono::high_resolution_clock::now();
+
             // Build edge scene from this image
             Mat scene_smooth, scene_dx, scene_dy;
             GaussianBlur(scene, scene_smooth, Size(7, 7), 0);
@@ -318,18 +321,21 @@ int main() {
                 auto& tmpl_info = det.getTemplates(m.class_id, m.template_id);
                 float cx = m.x + tmpl_info[0].width / 2.0f;
                 float cy = m.y + tmpl_info[0].height / 2.0f;
-                float coarse_angle = m.template_id * 2.0f;  // 2-degree step
+                float coarse_angle = m.template_id * 2.0f;
 
                 icp_refine::Pose2D init_pose(cx, cy, coarse_angle);
                 auto refined = icp_refine::refine(templ_edge_pts, edge_scene, init_pose, icp_cfg);
                 m.refined_angle = refined.angle;
-                // Update position too
                 m.x = (int)(refined.x - tmpl_info[0].width / 2.0f + 0.5f);
                 m.y = (int)(refined.y - tmpl_info[0].height / 2.0f + 0.5f);
             }
+
+            icp_ms = chrono::duration<double, std::milli>(
+                chrono::high_resolution_clock::now() - icp_t0).count();
         }
 
-        printf("%-20s: %5d matches  %6.1fms", tc.name.c_str(), (int)matches.size(), ms);
+        printf("%-20s: %5d matches  match=%.1fms  icp=%.1fms  total=%.1fms",
+               tc.name.c_str(), (int)matches.size(), ms, icp_ms, ms + icp_ms);
         if (!nms_matches.empty())
             printf("  best=%.0f", nms_matches[0].similarity);
         printf("\n");

@@ -74,3 +74,8 @@ add_executable(test_multires line2Dup.cpp icp_refine.cpp test_multires.cpp)
 target_link_libraries(test_multires ${OpenCV_LIBS})
 add_executable(test_icp_bias line2Dup.cpp icp_refine.cpp test_icp_bias.cpp)
 target_link_libraries(test_icp_bias ${OpenCV_LIBS})
+
+# New high-level API
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_executable(test_api line2Dup.cpp icp_refine.cpp shape_matcher.cpp test_api.cpp)
+target_link_libraries(test_api ${OpenCV_LIBS})

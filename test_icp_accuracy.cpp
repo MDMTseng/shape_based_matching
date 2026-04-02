@@ -87,8 +87,11 @@ int main() {
     int cx = W/2, cy = H/2;
     // AUTO-CALIBRATION TEST
     printf("\n=== Auto-calibrate angle bias ===\n");
+    auto cal_t0 = chrono::high_resolution_clock::now();
     float bias = det.calibrateAngleBias(templ, angle_step, "L", threshold);
-    printf("  Measured bias: %+.1f deg\n", bias);
+    double cal_ms = chrono::duration<double, std::milli>(
+        chrono::high_resolution_clock::now() - cal_t0).count();
+    printf("  Measured bias: %+.1f deg  (took %.1fms)\n", bias, cal_ms);
     printf("  Correction:    %+.1f deg (add to coarse angle)\n", -bias);
 
     // Verify: sweep with compensation

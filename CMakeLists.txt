@@ -62,3 +62,7 @@ target_link_libraries(test_visual ${OpenCV_LIBS})
 # ICP accuracy sweep
 add_executable(test_icp_accuracy line2Dup.cpp icp_refine.cpp test_icp_accuracy.cpp)
 target_link_libraries(test_icp_accuracy ${OpenCV_LIBS})
+
+# Bias table
+add_executable(test_bias_table line2Dup.cpp test_bias_table.cpp)
+target_link_libraries(test_bias_table ${OpenCV_LIBS})

@@ -64,7 +64,10 @@ All optimizations applied to meiqua's original shape_based_matching implementati
 
 Edge-based ICP for sub-degree orientation and sub-pixel position accuracy.
 
-### ICP Architecture
+### Inverse ICP (current default)
+
+Instead of the traditional forward ICP (model edges → scene EDT), we use **inverse ICP**
+(scene edges → template EDT). This eliminates divergence from edge ambiguity.
 
 ```
 Coarse match (LineMOD)
@@ -73,25 +76,60 @@ Coarse match (LineMOD)
 Spatial NMS (deduplicate overlapping detections)
     |
     v
-Local ROI ICP (per object, ~0.3ms each)
-    |  Extract 160x160 patch around match
-    |  Canny + EDT + normals on patch only
+Inverse ICP (per object)
+    |  Pre-built template EDT (cached, computed once at addModel)
+    |  Extract scene Canny edges in local ROI
+    |  Inverse-transform scene edges to template space
+    |  Match against template EDT (clean, no ambiguity)
     |  Point-to-plane ICP with normal compatibility check
     v
-Refined pose: < 1 deg, < 1px accuracy
+Refined pose: < 0.5 deg, < 1px accuracy, zero divergence
 ```
+
+### Forward vs Inverse ICP
+
+Forward ICP builds the EDT on the scene and matches model points against it.
+The problem: scene EDT contains edges from multiple objects, noise, and background.
+At certain template angles (e.g., 315° for L-shape), model edge points from one
+arm can snap to scene edges from the other arm — a valid-looking but wrong match.
+
+Inverse ICP builds the EDT on the template (once, at setup time). Scene edges are
+inverse-transformed to template space and matched against the clean template EDT.
+The template has no ambiguity — each arm's edges are well-separated in canonical space.
+
+| Metric (72 angles, isolated) | Forward ICP | Inverse ICP |
+|------------------------------|-------------|-------------|
+| Divergence failures (>5px) | **11/72** | **0/72** |
+| Mean angle error | 0.24 deg | **0.04 deg** |
+| Mean position error | 4.0 px | **0.66 px** |
+| Worst position error | 37.1 px | **1.3 px** |
 
 ### Key ICP Features
 
-- **Normal compatibility filtering** — reject correspondences where model and scene edge normals disagree by > 45 degrees. Prevents cross-part matching (e.g., vertical arm matching horizontal arm edges). This single fix eliminated all ICP divergence cases.
+- **Inverse correspondence direction** — scene edges matched against template EDT.
+  Template EDT is clean (no other objects, no noise), eliminating divergence from
+  edge ambiguity. Zero failures across all angles.
+
+- **Normal compatibility filtering** — reject correspondences where model and scene edge normals disagree by > 45 degrees. Prevents cross-part matching.
 
 - **Point-to-point regularization** — small weighted point-to-point term alongside point-to-plane prevents sliding along straight edges.
 
-- **Local ROI processing** — compute Canny + distance transform + normals only in a small patch around each match. ~0.3ms per object vs 40ms for full-scene processing.
+- **Cached template EDT** — `buildTemplateScene()` called once at `addModel()` time.
+  Stored in FeatureSet. Zero per-match overhead for template processing.
+
+- **Local ROI scene edges** — Canny edge extraction only in a small patch around
+  each match. Higher thresholds (50/100) to suppress noise edges.
 
 - **EDT-based distance field** — use OpenCV `distanceTransform` with `DIST_LABEL_PIXEL` for O(W*H) closest-edge lookup instead of brute-force O(W*H*max_dist^2).
 
 - **3x3 LDL solver** — no Eigen dependency. Custom 3x3 symmetric positive-definite solver for the SO2 pose update (theta, tx, ty). Also supports 4x4 solver for Sim2 (with scale).
+
+### Known limitation
+
+Inverse ICP scene edge extraction uses Canny thresholds 50/100. Under moderate
+noise (sigma >= 20) without blur, valid edges may be rejected, degrading accuracy.
+Possible fix: adaptive Canny thresholds based on scene noise estimate, or
+pre-blur the scene ROI more aggressively.
 
 ### ICP Accuracy (120 angles, 3-degree sweep, clean image)
 
@@ -287,49 +325,49 @@ causes neighbors to absorb its load. Adding equally-sensitive features lowers al
 
 Optimization cost: 80-220ms (offline, once per template). Cached call: 0ms.
 
-### ICP vs ROI Comparison (FHD 1920x1080, 200x200 template, 10 objects)
+### Inverse ICP vs ROI Comparison (FHD 1920x1080, 200x200 template, 10 objects)
 
-| | None (coarse) | ICP (dense) | ROI (8 optimized) |
+| | None (coarse) | ICP (inverse) | ROI (8 optimized) |
 |---|---|---|---|
-| **Speed** | 25ms | 31ms | **26ms** |
-| **Angle** | 10.0 deg | **0.2 deg** | 1.1 deg |
-| **Position** | 5.7px | 4.3px | **0.6px** |
+| **Speed** | 23ms | **25ms** | 25ms |
+| **Angle** | 10.0 deg | **0.5 deg** | 1.1 deg |
+| **Position** | 5.7px | 1.0px | **0.6px** |
 
 ### Accuracy Under Degradation (FHD, 10 objects)
 
 | Condition | ICP angle | ROI angle | ICP pos | ROI pos |
 |-----------|----------|----------|---------|---------|
-| clean | **0.2 deg** | 1.1 deg | 4.3px | **0.6px** |
-| noise s=10 | **0.3 deg** | 1.1 deg | 4.6px | **0.6px** |
-| noise s=20 | 1.3 deg | **0.9 deg** | 8.0px | **0.5px** |
-| blur k=5 | **1.2 deg** | 1.2 deg | 8.5px | **0.7px** |
-| blur k=11 | **0.7 deg** | 1.6 deg | 5.2px | **1.1px** |
-| blur k=21 | **1.2 deg** | 1.7 deg | 6.2px | **1.1px** |
-| n30+b11 | **0.3 deg** | 1.6 deg | 2.1px | **0.9px** |
-| n50+b11 | **0.6 deg** | 1.7 deg | 6.0px | **0.9px** |
+| clean | **0.5 deg** | 1.1 deg | 1.0px | **0.6px** |
+| noise s=10 | **0.9 deg** | 1.1 deg | 1.1px | **0.6px** |
+| noise s=20 | 7.3 deg | **0.9 deg** | 5.1px | **0.5px** |
+| blur k=5 | **0.2 deg** | 1.2 deg | **0.7px** | 0.7px |
+| blur k=11 | **0.2 deg** | 1.6 deg | **0.7px** | 1.1px |
+| blur k=21 | **0.1 deg** | 1.7 deg | **0.8px** | 1.1px |
+| n30+b11 | **0.2 deg** | 1.6 deg | **0.7px** | 0.9px |
+| n50+b11 | **0.2 deg** | 1.7 deg | **0.6px** | 0.9px |
 
-### Why ICP Wins Angle, ROI Wins Position
+### ICP vs ROI Characteristics
 
-- **ICP** aligns hundreds of edge points along the full contour — massive angular
-  constraint via lever arm. But point-to-plane has zero constraint along edge tangent,
-  allowing position to slide. Multi-object scenes cause wrong correspondences (4.3px
-  clean; isolated single-object: 0.1-1.2px).
+- **Inverse ICP** now wins both angle AND position under blur/noise+blur.
+  Template EDT is clean — no divergence, no cross-object matching artifacts.
+  Hundreds of edge correspondences give strong angular + translational constraint.
 
-- **ROI** matches 8 template patches via matchTemplate — each patch pins XY precisely
-  (template match is a 2D lock). But with only 8 points, angular lever arm is limited
-  and patch-level rotation signal is weak (~0.5px displacement per degree at 30px
-  from center).
+- **ROI** still wins under pure noise (s>=20) where ICP's Canny threshold
+  rejects valid edges. matchTemplate averages over the patch, inherently noise-robust.
+
+- **Position**: ICP improved from 4.3px (forward) to 1.0px (inverse) on clean.
+  ROI still slightly better at 0.6px due to template-match 2D locking.
 
 ### When to Use Which
 
 | Scenario | Recommended |
 |----------|-------------|
-| Best angle accuracy needed | **ICP** (0.2 deg) |
-| Best position accuracy needed | **ROI** (0.6px) |
-| Multi-object scenes (avoid cross-matching) | **ROI** |
-| Heavy blur (k > 15) | **ICP** (edge-based, blur-invariant) |
-| Moderate noise (s=20-30) | **ROI** (matchTemplate averages noise) |
-| Speed-critical | **ROI** (26ms vs 31ms for 10 objects) |
+| Blur conditions | **ICP inverse** (0.1-0.2 deg, 0.7px) |
+| Noise+blur (real-world) | **ICP inverse** (0.2 deg, 0.6-0.7px) |
+| Pure noise (no blur) | **ROI** (0.9 deg, 0.5px) |
+| Best angle accuracy | **ICP inverse** (0.04 deg isolated) |
+| Best position accuracy | **ROI** (0.6px) or ICP inverse (0.7px) |
+| Speed-critical | Either — both ~25ms for 10 objects |
 
 ---
 

@@ -208,20 +208,9 @@ int main() {
     }
     printf("Templates: %d\n", det.numTemplates("L"));
 
-    // Extract template edge points (relative to center) for ICP
-    std::vector<cv::Point2f> templ_edge_pts;
-    {
-        Mat templ_smooth, templ_dx, templ_dy, templ_edge;
-        GaussianBlur(templ, templ_smooth, Size(5, 5), 0);
-        Sobel(templ_smooth, templ_dx, CV_16S, 1, 0, 3);
-        Sobel(templ_smooth, templ_dy, CV_16S, 0, 1, 3);
-        Canny(templ_dx, templ_dy, templ_edge, 30, 60);
-        for (int r = 0; r < TW; ++r)
-            for (int c = 0; c < TW; ++c)
-                if (templ_edge.at<uchar>(r, c) > 0)
-                    templ_edge_pts.push_back(Point2f((float)(c - TW/2), (float)(r - TW/2)));
-        printf("Template edge points: %d\n", (int)templ_edge_pts.size());
-    }
+    // Extract template edge points with normals for ICP
+    auto model_edges = icp_refine::extractModelEdges(templ);
+    printf("Template edge points: %d\n", (int)model_edges.size());
 
     // Save template image
     {
@@ -331,8 +320,8 @@ int main() {
                 float coarse_angle = m.template_id * 2.0f;
 
                 icp_refine::Pose2D init_pose(icx, icy, coarse_angle);
-                auto refined = icp_refine::refineLocal(
-                    templ_edge_pts, scene_dx, scene_dy,
+                auto refined = icp_refine::refineWithNormals(
+                    model_edges, scene_dx, scene_dy,
                     init_pose, TW, 20, icp_cfg);
                 m.refined_angle = refined.angle;
                 m.x = (int)(refined.x - TW/2.0f + tmpl_info[0].tl_x + 0.5f);

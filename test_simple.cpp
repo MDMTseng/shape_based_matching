@@ -188,10 +188,10 @@ int main() {
     auto quality = loaded.evaluateQuality();
     printf("\n  Quality: balance=%d  strength=%d  score=%d  — %s\n",
            quality.balance, quality.strength, quality.score, quality.diagnosis.c_str());
-    printf("    cond=%.0f  coverage=%.0f deg  dirs=%d  min/max_str=%.0f/%.0f  %de+%dc\n\n",
-           quality.condition_number, quality.angle_coverage_deg,
-           quality.num_directions, quality.min_dir_strength, quality.max_dir_strength,
-           quality.num_edge, quality.num_corner);
+    printf("    cross=%.0f  sin=%.2f\n\n",
+           quality.best_cross, quality.best_cross_sin);
+           
+           
 
     printf("%-22s  %-22s  %-22s  %-22s  %-22s\n",
            "Init perturbation", "ICP (dense)", "ROI 15pt×5", "ROI 8pt×3", "ROI 8edge-only");

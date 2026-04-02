@@ -93,18 +93,15 @@ struct FeatureSet {
     ///   50-69:  Marginal — may fail under large perturbation or blur
     ///   0-49:   Poor — near-degenerate geometry, unreliable results
     struct QualityReport {
-        int balance;                ///< 0-100: how evenly spread are constraint directions?
-                                    ///< 100 = uniform coverage, 0 = all same direction.
-                                    ///< Based on SVD condition number + angular distribution.
-        int strength;               ///< 0-100: weakest direction's constraint strength.
-                                    ///< 100 = strong edges in all directions.
-                                    ///< Low = one direction has weak/few edges (bottleneck).
-        int score;                  ///< Combined: min(balance, strength)
-        float condition_number;     ///< Raw SVD condition number (lower = better)
-        float angle_coverage_deg;   ///< Normal direction spread in degrees
-        float min_dir_strength;     ///< Weakest direction's total gradient magnitude
-        float max_dir_strength;     ///< Strongest direction's total gradient magnitude
-        int num_directions;         ///< Distinct edge directions (binned 30 deg)
+        int balance;                ///< 0-100: angular diversity of constraint directions.
+                                    ///< From max cross product of normal pairs: sin(angle).
+                                    ///< 100 = perpendicular edges, 0 = all parallel.
+        int strength;               ///< 0-100: gradient strength of the weakest useful pair.
+                                    ///< From cross product magnitude: |n1|×|n2|×sin(angle).
+                                    ///< 100 = strong edges in multiple directions.
+        int score;                  ///< Combined: balance × strength / 100
+        float best_cross;           ///< Best cross product magnitude (unnormalized)
+        float best_cross_sin;       ///< sin(angle) of the best pair (0-1)
         int num_edge, num_corner;
         std::string diagnosis;
     };

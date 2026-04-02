@@ -295,11 +295,8 @@ FeatureSet::QualityReport FeatureSet::evaluateQuality() const {
     r.balance = 0;
     r.strength = 0;
     r.score = 0;
-    r.condition_number = 999;
-    r.angle_coverage_deg = 0;
-    r.min_dir_strength = 0;
-    r.max_dir_strength = 0;
-    r.num_directions = 0;
+    r.best_cross = 0;
+    r.best_cross_sin = 0;
     r.num_edge = 0;
     r.num_corner = 0;
 
@@ -347,101 +344,12 @@ FeatureSet::QualityReport FeatureSet::evaluateQuality() const {
         return r;
     }
 
-    // Analyze each selected point: PCA + edge strength
-    std::vector<float> normal_angles;
-    std::vector<float> J_rows;
-    float total_strength = 0;
     int roi_half = 15;
 
+    // Collect gradient vectors at each selected point for cross product analysis
+    struct GradInfo { cv::Point2f dir; float mag; };
+    std::vector<GradInfo> grads;
     for (int si : selected) {
-        auto& rp = refine_points[si];
-        int tx = (int)(rp.px + tcx + 0.5f), ty = (int)(rp.py + tcy + 0.5f);
-        int h = roi_half;
-        if (tx-h<0||tx+h>=templ_image.cols||ty-h<0||ty+h>=templ_image.rows) {
-            h = std::min({tx,ty,templ_image.cols-1-tx,templ_image.rows-1-ty});
-            if (h < 5) continue;
-        }
-        cv::Mat roi = templ_image(cv::Rect(tx-h, ty-h, 2*h, 2*h));
-
-        // Edge strength
-        cv::Mat dx, dy, mag;
-        cv::Sobel(roi, dx, CV_32F, 1, 0, 3);
-        cv::Sobel(roi, dy, CV_32F, 0, 1, 3);
-        cv::magnitude(dx, dy, mag);
-        float max_mag = *std::max_element(mag.begin<float>(), mag.end<float>());
-        total_strength += max_mag;
-
-        // PCA
-        float thr = 0.3f * max_mag;
-        float cxx=0,cyy=0,cxy=0; int n=0;
-        for(int r2=0;r2<roi.rows;r2++) for(int c2=0;c2<roi.cols;c2++)
-            if(mag.at<float>(r2,c2)>thr) {
-                float ddx=c2-h,ddy=r2-h; cxx+=ddx*ddx;cyy+=ddy*ddy;cxy+=ddx*ddy;n++;
-            }
-        if(n>0){cxx/=n;cyy/=n;cxy/=n;}
-        float trace=cxx+cyy;
-        float disc=std::sqrt(std::max(0.f,(cxx-cyy)*(cxx-cyy)/4+cxy*cxy));
-        float lam1=trace/2+disc, lam2=trace/2-disc;
-        float ratio = (lam2>1e-6f) ? lam1/lam2 : 999;
-        bool is_corner = (ratio < 1.5f);
-
-        cv::Point2f normal;
-        if(std::abs(cxy)>1e-6f) normal = cv::Point2f(lam2-cyy, cxy);
-        else normal = (cxx>=cyy) ? cv::Point2f(0,1) : cv::Point2f(1,0);
-        float len = std::sqrt(normal.x*normal.x + normal.y*normal.y);
-        if(len>1e-6f) normal *= (1.0f/len);
-
-        float angle = std::atan2(normal.y, normal.x) * 180.0f / (float)CV_PI;
-        if (angle < 0) angle += 180;
-        normal_angles.push_back(angle);
-
-        if(is_corner) r.num_corner++; else r.num_edge++;
-
-        // Constraint row
-        float sx = rp.px, sy = rp.py;
-        float j0=-sy*normal.x+sx*normal.y, j1=normal.x, j2=normal.y;
-        J_rows.push_back(j0); J_rows.push_back(j1); J_rows.push_back(j2);
-
-        if(is_corner) {
-            cv::Point2f tang;
-            if(std::abs(cxy)>1e-6f) tang = cv::Point2f(lam1-cyy, cxy);
-            else tang = (cxx>=cyy) ? cv::Point2f(1,0) : cv::Point2f(0,1);
-            float tlen = std::sqrt(tang.x*tang.x+tang.y*tang.y);
-            if(tlen>1e-6f) tang *= (1.0f/tlen);
-            J_rows.push_back(-sy*tang.x+sx*tang.y);
-            J_rows.push_back(tang.x); J_rows.push_back(tang.y);
-            float ta = std::atan2(tang.y, tang.x)*180.0f/(float)CV_PI;
-            if(ta<0) ta+=180;
-            normal_angles.push_back(ta);
-        }
-    }
-
-    // Condition number
-    int nrows = (int)J_rows.size() / 3;
-    if (nrows >= 3) {
-        cv::Mat J(nrows, 3, CV_32F, J_rows.data());
-        cv::Mat w;
-        cv::SVD::compute(J, w);
-        r.condition_number = (w.at<float>(2) > 1e-8f) ? w.at<float>(0)/w.at<float>(2) : 999;
-    }
-
-    // Angle coverage
-    if (!normal_angles.empty()) {
-        std::sort(normal_angles.begin(), normal_angles.end());
-        float max_gap = 0;
-        for (size_t i = 1; i < normal_angles.size(); ++i)
-            max_gap = std::max(max_gap, normal_angles[i]-normal_angles[i-1]);
-        max_gap = std::max(max_gap, 180.0f-normal_angles.back()+normal_angles[0]);
-        r.angle_coverage_deg = 180.0f - max_gap;
-    }
-
-    // Bin into 6 directional buckets (30 deg each, 0-180)
-    // Track BEST (max) per-point gradient strength per bucket
-    float dir_str[6] = {};
-    int dir_cnt[6] = {};
-    for (size_t i = 0; i < selected.size() && i < normal_angles.size(); ++i) {
-        int bin = std::min(5, (int)(normal_angles[i] / 30.0f));
-        int si = selected[i];
         auto& rp = refine_points[si];
         int tx=(int)(rp.px+tcx+0.5f), ty=(int)(rp.py+tcy+0.5f);
         int h=roi_half;
@@ -453,50 +361,65 @@ FeatureSet::QualityReport FeatureSet::evaluateQuality() const {
         cv::Sobel(roi2,dx2,CV_32F,1,0,3);
         cv::Sobel(roi2,dy2,CV_32F,0,1,3);
         cv::magnitude(dx2,dy2,mag2);
-        float pt_str = *std::max_element(mag2.begin<float>(),mag2.end<float>());
-        dir_str[bin] = std::max(dir_str[bin], pt_str);  // best point per direction
-        dir_cnt[bin]++;
+        double max_mag; cv::Point max_loc;
+        cv::minMaxLoc(mag2, nullptr, &max_mag, nullptr, &max_loc);
+        float gx=dx2.at<float>(max_loc.y,max_loc.x);
+        float gy=dy2.at<float>(max_loc.y,max_loc.x);
+        grads.push_back({cv::Point2f(gx,gy), (float)max_mag});
     }
-    r.num_directions = 0;
-    r.min_dir_strength = 1e9f;
-    r.max_dir_strength = 0;
-    for (int i = 0; i < 6; ++i) {
-        if (dir_cnt[i] > 0) {
-            r.num_directions++;
-            r.min_dir_strength = std::min(r.min_dir_strength, dir_str[i]);
-            r.max_dir_strength = std::max(r.max_dir_strength, dir_str[i]);
+
+    // Find the pair with the BEST cross product
+    // |n1 × n2| = |n1.x*n2.y - n1.y*n2.x| = |n1|*|n2|*sin(angle)
+    // Captures both angular diversity AND edge strength in one number
+    for (size_t i = 0; i < grads.size(); ++i) {
+        for (size_t j = i+1; j < grads.size(); ++j) {
+            float cross = std::abs(grads[i].dir.x * grads[j].dir.y -
+                                   grads[i].dir.y * grads[j].dir.x);
+            if (cross > r.best_cross) {
+                r.best_cross = cross;
+                float mag_prod = grads[i].mag * grads[j].mag;
+                r.best_cross_sin = (mag_prod > 1e-6f) ? cross / mag_prod : 0;
+            }
         }
     }
-    if (r.num_directions < 2) r.min_dir_strength = 0;
+
+    // Find the WEAKEST cross product across orthogonal direction pairs.
+    // Split gradients into two groups by direction, find worst inter-group cross.
+    // Simpler: compute cross products for ALL pairs, find the median.
+    // If median is high → well-distributed. If low → most pairs are parallel.
+    std::vector<float> all_cross_sins;
+    for (size_t i = 0; i < grads.size(); ++i) {
+        for (size_t j = i+1; j < grads.size(); ++j) {
+            float cross = std::abs(grads[i].dir.x * grads[j].dir.y -
+                                   grads[i].dir.y * grads[j].dir.x);
+            float mag_prod = grads[i].mag * grads[j].mag;
+            float sin_val = (mag_prod > 1e-6f) ? cross / mag_prod : 0;
+            all_cross_sins.push_back(sin_val);
+        }
+    }
+    if (!all_cross_sins.empty()) {
+        std::sort(all_cross_sins.begin(), all_cross_sins.end());
+    }
 
     // === BALANCE (0-100) ===
-    // From SVD condition number: how well can the solve determine all 3 DOF?
-    // cond=1: perfect (all directions equally constrained)
-    // cond=40: acceptable (one direction 40x weaker)
-    // cond>60: poor (near-degenerate)
-    // Scale: 100/cond, capped at 100, floor at 0 for cond>100
-    // Direct mapping from condition number:
-    // cond < 10: 100, cond 10-70: linear 100→0, cond > 70: 0
-    if (r.condition_number < 10) r.balance = 100;
-    else if (r.condition_number > 70) r.balance = 0;
-    else r.balance = (int)(100.0f * (70.0f - r.condition_number) / 60.0f);
-    // Multiply by coverage gate
-    float cov_gate = std::max(0.0f, std::min(1.0f, r.angle_coverage_deg / 90.0f));
-    r.balance = (int)(r.balance * cov_gate);
-    r.balance = std::max(0, std::min(100, r.balance));
+    // Median of all pairwise sin(angle): captures overall directional spread.
+    // If most pairs are perpendicular → high median → balanced.
+    // If most pairs are parallel → low median → imbalanced.
+    float median_sin = all_cross_sins.empty() ? 0 :
+        all_cross_sins[all_cross_sins.size() / 2];
+    r.balance = (int)(100.0f * std::min(1.0f, median_sin / 0.7f));
 
     // === STRENGTH (0-100) ===
-    // Weakest direction's best-point gradient magnitude.
-    // One strong edge point (~800 for 8-bit) is enough for a direction.
-    r.strength = (int)(100.0f * std::max(0.0f, std::min(1.0f, r.min_dir_strength / 800.0f)));
-    r.strength = std::max(0, std::min(100, r.strength));
+    // Best cross product magnitude: |n1|×|n2|×sin(angle).
+    // Captures the strongest perpendicular pair's edge quality.
+    r.strength = (int)(100.0f * std::min(1.0f, r.best_cross / 400000.0f));
 
     // === COMBINED ===
-    r.score = std::min(r.balance, r.strength);
+    r.score = r.balance * r.strength / 100;
 
     // Diagnosis
     std::string bal_str = (r.balance >= 70) ? "balanced" :
-                          (r.balance >= 40) ? "imbalanced" : "near-parallel";
+                          (r.balance >= 40) ? "angled" : "near-parallel";
     std::string str_str = (r.strength >= 70) ? "strong" :
                           (r.strength >= 40) ? "moderate" : "weak";
     r.diagnosis = bal_str + " / " + str_str;

@@ -60,25 +60,46 @@ int main() {
     fprintf(stderr,"Method 1 (warpAffine):       bias = %+.1f deg  (n=%d)\n",sum1/n,n);
     fprintf(stderr,"Method 2 (rotate features):  bias = %+.1f deg  (n=%d)\n",sum2/n,n);
 
-    // Test with warpAffine scene (same method as template creation)
-    float sum3=0; int n3=0;
-    Mat big(TW*4,TW*4,CV_8U,Scalar(50));
-    draw_L(big,TW*2,TW*2,0,200);
-    for(int gt=0;gt<360;gt+=5){
-        Mat scene(H,W,CV_8U,Scalar(50));
-        Mat M=getRotationMatrix2D(Point2f(TW*2.0f,TW*2.0f),-(double)gt,1.0);
-        M.at<double>(0,2)+=cx-TW*2; M.at<double>(1,2)+=cy-TW*2;
-        Mat rotated; warpAffine(big,rotated,M,big.size(),INTER_LINEAR,BORDER_CONSTANT,Scalar(50));
-        for(int r=0;r<H&&r<TW*4;r++) for(int c=0;c<W&&c<TW*4;c++) {
-            if(r+cy-TW*2>=0&&r+cy-TW*2<H&&c+cx-TW*2>=0&&c+cx-TW*2<W)
-                scene.at<uchar>(r+cy-TW*2,c+cx-TW*2)=rotated.at<uchar>(r,c);
+    // Bias vs step size: warpAffine vs feature rotation
+    fprintf(stderr, "\n%-8s  %10s  %10s\n", "Step", "warpAffine", "FeatRotate");
+    fprintf(stderr, "%-8s  %10s  %10s\n", "----", "----------", "----------");
+
+    for (float step : {1.0f, 2.0f, 3.0f, 5.0f, 10.0f}) {
+        // warpAffine method
+        line2Dup::Detector dw(128,{4,8},30,60);
+        for(int a=0;a<360;a+=(int)step){
+            Mat rt,rm;
+            Mat M=getRotationMatrix2D(Point2f(TW/2.0f,TW/2.0f),-a,1.0);
+            warpAffine(templ,rt,M,Size(TW,TW)); warpAffine(mask,rm,M,Size(TW,TW));
+            dw.addTemplate(rt,"L",rm);
         }
-        auto m=det2.match(pad16(scene),50);
-        if(m.empty()) continue;
-        float e=m[0].template_id*2.0f-gt; if(e>180)e-=360;if(e<-180)e+=360;
-        sum3+=e; n3++;
+
+        // Feature rotation method
+        line2Dup::Detector dr(128,{4,8},30,60);
+        dr.addRotatedTemplates(templ, mask, "L", 0, 360, step);
+
+        float sw=0, sr=0; int nw=0, nr=0;
+        for(int gt=0;gt<360;gt+=5){
+            Mat scene(H,W,CV_8U,Scalar(50));
+            draw_L(scene,cx,cy,gt,200);
+            Mat padded=pad16(scene);
+
+            auto mw=dw.match(padded,50);
+            if(!mw.empty()){
+                float e=mw[0].template_id*step-gt;
+                if(e>180)e-=360;if(e<-180)e+=360;
+                sw+=e; nw++;
+            }
+            auto mr=dr.match(padded,50);
+            if(!mr.empty()){
+                float e=mr[0].template_id*step-gt;
+                if(e>180)e-=360;if(e<-180)e+=360;
+                sr+=e; nr++;
+            }
+        }
+        fprintf(stderr, "step=%2.0f    %+5.1f deg    %+5.1f deg\n",
+                step, nw>0?sw/nw:0, nr>0?sr/nr:0);
     }
-    fprintf(stderr,"Method 2 (warpAffine scene): bias = %+.1f deg  (n=%d)\n",sum3/n3,n3);
 
     return 0;
 }

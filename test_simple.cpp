@@ -145,8 +145,27 @@ int main() {
     }
     printf("\n");
 
-    printf("%-22s  %-22s  %-22s  %-22s\n", "Init perturbation", "ICP (dense)", "ROI 15pt×5", "ROI 8pt×3");
-    printf("%-22s  %-22s  %-22s  %-22s\n", "-----------------", "----------", "----------", "---------");
+    std::vector<roi_refine::SamplePoint> sample_pts_edge;
+    // Select only pure-edge points: pick from refine_points with type==EDGE,
+    // sorted by cornerness ascending (most edge-like first), well-spaced
+    {
+        std::vector<cv::Point2f> edge_pos;
+        std::vector<float> edge_corn;
+        for (auto& rp : loaded.refine_points) {
+            if (rp.type == sbm::FeatureSet::RefinePt::EDGE) {
+                edge_pos.push_back(cv::Point2f(rp.px, rp.py));
+                edge_corn.push_back(0);  // all zero cornerness = pure edge
+            }
+        }
+        sample_pts_edge = roi_refine::selectCriticalPoints(
+            edge_pos, edge_corn, 8, loaded.templ_width, loaded.templ_height);
+    }
+    printf("  Edge-only sample points: %d\n\n", (int)sample_pts_edge.size());
+
+    printf("%-22s  %-22s  %-22s  %-22s  %-22s\n",
+           "Init perturbation", "ICP (dense)", "ROI 15pt×5", "ROI 8pt×3", "ROI 8edge-only");
+    printf("%-22s  %-22s  %-22s  %-22s  %-22s\n",
+           "-----------------", "----------", "----------", "---------", "--------------");
 
     struct PoseError { float dx, dy, da; double noise; int blur; const char* name; };
     PoseError errors[] = {
@@ -235,6 +254,25 @@ int main() {
             cv::Vec3f ip(init_x, init_y, init_a);
             auto ref = roi_refine::refineROI(
                 loaded.templ_image, scene1, sample_pts_8, ip, rcfg);
+
+            double roi_ms = std::chrono::duration<double,std::milli>(
+                std::chrono::high_resolution_clock::now()-t0).count();
+            float ae = ref[2] - 25; if(ae>180)ae-=360; if(ae<-180)ae+=360;
+            float pd = std::sqrt((ref[0]-160)*(ref[0]-160)+(ref[1]-120)*(ref[1]-120));
+            printf("@%+5.1f %4.1fpx %4.1fms  ", ae, pd, roi_ms);
+        }
+
+        // ROI 8 edge-only × 3iter
+        {
+            auto t0 = std::chrono::high_resolution_clock::now();
+            roi_refine::ROIConfig rcfg;
+            rcfg.roi_half = 15;
+            rcfg.search_half = 20;
+            rcfg.max_iters = 3;
+
+            cv::Vec3f ip(init_x, init_y, init_a);
+            auto ref = roi_refine::refineROI(
+                loaded.templ_image, scene1, sample_pts_edge, ip, rcfg);
 
             double roi_ms = std::chrono::duration<double,std::milli>(
                 std::chrono::high_resolution_clock::now()-t0).count();

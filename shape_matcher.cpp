@@ -440,14 +440,23 @@ FeatureSet::QualityReport FeatureSet::evaluateQuality() const {
     for(int i=0;i<12;i++) if(bins[i]) r.num_directions++;
 
     // Compute composite score (0-100)
-    // Factors: condition number, angle coverage, edge strength, point count
-    float score_cond = std::max(0.0f, std::min(1.0f, (50.0f - r.condition_number) / 40.0f));
-    float score_coverage = std::max(0.0f, std::min(1.0f, (r.angle_coverage_deg - 20.0f) / 100.0f));
-    float score_strength = std::max(0.0f, std::min(1.0f, r.mean_edge_strength / 500.0f));
-    float score_count = std::max(0.0f, std::min(1.0f, (float)selected.size() / 10.0f));
+    // Condition number and coverage are GATES — if either is bad, score collapses.
+    // Edge strength and point count are quality multipliers.
+    // Gate: condition and coverage must both be acceptable.
+    // Based on empirical results:
+    //   cond < 40: works (<1 deg accuracy)   → gate = 1.0
+    //   cond 40-80: marginal                 → gate decays
+    //   cond > 80: degenerate                → gate = 0
+    float gate_cond = std::max(0.0f, std::min(1.0f, (80.0f - r.condition_number) / 40.0f));
+    // coverage > 50: good, < 30: degenerate
+    float gate_coverage = std::max(0.0f, std::min(1.0f, (r.angle_coverage_deg - 30.0f) / 20.0f));
+    float gate = std::min(gate_cond, gate_coverage);  // weakest link
 
-    r.score = (int)(100.0f * (score_cond * 0.35f + score_coverage * 0.30f +
-                               score_strength * 0.20f + score_count * 0.15f));
+    float quality_strength = std::max(0.0f, std::min(1.0f, r.mean_edge_strength / 500.0f));
+    float quality_count = std::max(0.0f, std::min(1.0f, (float)selected.size() / 10.0f));
+    float quality = quality_strength * 0.6f + quality_count * 0.4f;
+
+    r.score = (int)(100.0f * gate * quality);
     r.score = std::max(0, std::min(100, r.score));
 
     // Diagnosis

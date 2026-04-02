@@ -119,9 +119,9 @@ int main() {
     line2Dup::Detector det_single(128, {4, 8}, 30, 60);
     det_single.addTemplate(templ, "L", mask);
 
-    // Multi-angle detector (5 deg steps)
+    // Multi-angle detector (2 deg steps = 180 templates)
     line2Dup::Detector det_rot(128, {4, 8}, 30, 60);
-    for (int angle = 0; angle < 360; angle += 5) {
+    for (int angle = 0; angle < 360; angle += 2) {
         Mat rot_templ, rot_mask;
         Mat M = getRotationMatrix2D(Point2f(TW/2.0f, TW/2.0f), -angle, 1.0);
         warpAffine(templ, rot_templ, M, Size(TW, TW));

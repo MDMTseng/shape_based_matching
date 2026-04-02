@@ -54,3 +54,7 @@ target_link_libraries(bench_preprocess ${OpenCV_LIBS})
 # Per-stage profiler (clean vs noisy)
 add_executable(bench_profile line2Dup.cpp bench_profile.cpp)
 target_link_libraries(bench_profile ${OpenCV_LIBS})
+
+# Visual matching test with image output
+add_executable(test_visual line2Dup.cpp test_visual.cpp)
+target_link_libraries(test_visual ${OpenCV_LIBS})

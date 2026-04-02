@@ -361,11 +361,11 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
 
         // Step 1: Compute magnitude + unfiltered 8-bin quantization.
         // Sobel 3x3 on uint8: max |dx|=1020, so 1020*50273=51M fits int32.
-        // No need for long long — int multiply is 3x faster.
         pt0 = pnow();
         Mat quantized_unfiltered = Mat::zeros(src.size(), CV_8U);
-        Mat mag_mask = Mat::zeros(src.size(), CV_8U); // 0xFF if above threshold
+        Mat mag_mask = Mat::zeros(src.size(), CV_8U);
         float threshold_sq = threshold * threshold;
+        int threshold_sq_i = (int)threshold_sq;
 
         for (int r = 1; r < src.rows - 1; ++r) {
             const short *dx = sobel_dx_16s.ptr<short>(r);
@@ -374,17 +374,99 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
             uchar *qr = quantized_unfiltered.ptr<uchar>(r);
             uchar *mask_r = mag_mask.ptr<uchar>(r);
 
-            for (int c = 1; c < src.cols - 1; ++c) {
+            int c = 1;
+#ifdef __AVX2__
+            // AVX2: process 8 pixels at a time in int32.
+            // Widen int16 dx/dy to int32, compute magnitude, threshold,
+            // undirected reduction, and bin via 4 multiply-compares.
+            const __m256i zero = _mm256_setzero_si256();
+            const __m256i four = _mm256_set1_epi32(4);
+            const __m256i seven = _mm256_set1_epi32(7);
+            const __m256i ten_k = _mm256_set1_epi32(10000);
+            const __m256i tan0 = _mm256_set1_epi32(TAN_B[0]);
+            const __m256i tan1 = _mm256_set1_epi32(TAN_B[1]);
+            const __m256i tan2 = _mm256_set1_epi32(TAN_B[2]);
+            const __m256i tan3 = _mm256_set1_epi32(TAN_B[3]);
+            const __m256i thresh_v = _mm256_set1_epi32(threshold_sq_i);
+            const __m256i one32 = _mm256_set1_epi32(1);
+
+            for (; c <= src.cols - 1 - 8; c += 8) {
+                // Widen 8 int16 → 8 int32
+                __m128i dx8 = _mm_loadu_si128((const __m128i*)(dx + c));
+                __m128i dy8 = _mm_loadu_si128((const __m128i*)(dy + c));
+                __m256i gx = _mm256_cvtepi16_epi32(dx8);
+                __m256i gy = _mm256_cvtepi16_epi32(dy8);
+
+                // Magnitude squared
+                __m256i mag_sq = _mm256_add_epi32(
+                    _mm256_mullo_epi32(gx, gx), _mm256_mullo_epi32(gy, gy));
+
+                // Store as float
+                _mm256_storeu_ps(mag_r + c, _mm256_cvtepi32_ps(mag_sq));
+
+                // Threshold mask
+                __m256i above = _mm256_cmpgt_epi32(mag_sq, thresh_v);
+                int above_bits = _mm256_movemask_ps(_mm256_castsi256_ps(above));
+
+                // Store mag_mask (extract low byte of each int32 mask)
+                for (int i = 0; i < 8; ++i)
+                    mask_r[c + i] = (above_bits & (1 << i)) ? 0xFF : 0;
+
+                if (above_bits == 0) continue;
+
+                // Undirected reduction: if gy < 0, negate both
+                __m256i gy_neg = _mm256_cmpgt_epi32(zero, gy);
+                __m256i ugx = _mm256_blendv_epi8(gx, _mm256_sub_epi32(zero, gx), gy_neg);
+                __m256i ugy = _mm256_blendv_epi8(gy, _mm256_sub_epi32(zero, gy), gy_neg);
+
+                // If ugy==0 && ugx<0, negate ugx
+                __m256i ugy_zero = _mm256_cmpeq_epi32(ugy, zero);
+                __m256i ugx_neg = _mm256_cmpgt_epi32(zero, ugx);
+                __m256i fix = _mm256_and_si256(ugy_zero, ugx_neg);
+                ugx = _mm256_blendv_epi8(ugx, _mm256_sub_epi32(zero, ugx), fix);
+
+                // Bin computation: count how many TAN boundaries the ratio exceeds
+                __m256i abs_ugx = _mm256_abs_epi32(ugx);
+                __m256i test_y = _mm256_mullo_epi32(ugy, ten_k);
+
+                // product_i = abs_ugx * TAN_B[i]; count where product > test_y
+                __m256i cnt = _mm256_and_si256(one32,
+                    _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan0), test_y));
+                cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
+                    _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan1), test_y)));
+                cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
+                    _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan2), test_y)));
+                cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
+                    _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan3), test_y)));
+
+                // ugx >= 0: bin = 4 - count
+                __m256i bin_pos = _mm256_sub_epi32(four, cnt);
+                // ugx < 0:  bin = (4 + count) & 7
+                __m256i bin_neg = _mm256_and_si256(
+                    _mm256_add_epi32(four, cnt), seven);
+
+                __m256i ugx_is_neg = _mm256_cmpgt_epi32(zero, ugx);
+                __m256i bin = _mm256_blendv_epi8(bin_pos, bin_neg, ugx_is_neg);
+
+                // Store 8 bins as uint8 (extract low byte of each int32)
+                // Only store where above threshold
+                alignas(32) int bin_arr[8];
+                _mm256_store_si256((__m256i*)bin_arr, bin);
+                for (int i = 0; i < 8; ++i) {
+                    if (above_bits & (1 << i))
+                        qr[c + i] = (uchar)bin_arr[i];
+                }
+            }
+#endif
+            // Scalar tail
+            for (; c < src.cols - 1; ++c) {
                 int gx = dx[c], gy = dy[c];
                 int mag_sq_i = gx*gx + gy*gy;
                 mag_r[c] = (float)mag_sq_i;
 
-                if (mag_sq_i <= (int)threshold_sq) continue;
+                if (mag_sq_i <= threshold_sq_i) continue;
                 mask_r[c] = 0xFF;
 
-                int abs_gx = abs(gx), abs_gy = abs(gy);
-
-                // Reduce to undirected [0,180)
                 int ugx = gx, ugy = gy;
                 if (ugy < 0) { ugx = -ugx; ugy = -ugy; }
                 if (ugy == 0 && ugx < 0) ugx = -ugx;

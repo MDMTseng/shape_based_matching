@@ -299,13 +299,103 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
     GaussianBlur(src, smoothed, Size(KERNEL_SIZE, KERNEL_SIZE), 0, 0, BORDER_REPLICATE);
 
     if(src.channels() == 1){
-        Mat sobel_dx, sobel_dy, sobel_ag;
-        Sobel(smoothed, sobel_dx, CV_32F, 1, 0, 3, 1.0, 0.0, BORDER_REPLICATE);
-        Sobel(smoothed, sobel_dy, CV_32F, 0, 1, 3, 1.0, 0.0, BORDER_REPLICATE);
-        magnitude = sobel_dx.mul(sobel_dx) + sobel_dy.mul(sobel_dy);
-        phase(sobel_dx, sobel_dy, sobel_ag, true);
-        hysteresisGradient(magnitude, angle, sobel_ag, threshold * threshold);
-        angle_ori = sobel_ag;
+        // FAST PATH: integer Sobel + comparison-based 8-bin quantization.
+        // Avoids cv::phase() (atan2 on every pixel) which dominates preprocessing.
+        // Instead, determine orientation bin from dx/dy sign + magnitude comparisons.
+        Mat sobel_dx_16s, sobel_dy_16s;
+        Sobel(smoothed, sobel_dx_16s, CV_16S, 1, 0, 3, 1.0, 0.0, BORDER_REPLICATE);
+        Sobel(smoothed, sobel_dy_16s, CV_16S, 0, 1, 3, 1.0, 0.0, BORDER_REPLICATE);
+
+        // Squared magnitude (float) for threshold compatibility
+        magnitude.create(src.size(), CV_32F);
+        magnitude.setTo(0);
+
+        // angle_ori: compute per-feature atan2 during training, not per-pixel.
+        // Store dx/dy as float for the few features that need theta.
+        angle_ori.create(src.size(), CV_32F);
+        angle_ori.setTo(0);
+
+        // Direct 8-bin quantization from dx, dy (no atan2).
+        // Undirected gradients: [0,180) mapped to 8 bins of 22.5 deg each.
+        // Bin centers: 0, 22.5, 45, 67.5, 90, 112.5, 135, 157.5
+        // Fixed-point tan boundaries * 10000:
+        static const int TAN_B[4] = {1989, 6682, 14966, 50273};
+
+        // Step 1: Compute magnitude + unfiltered 8-bin quantization
+        Mat quantized_unfiltered = Mat::zeros(src.size(), CV_8U);
+        float threshold_sq = threshold * threshold;
+
+        for (int r = 1; r < src.rows - 1; ++r) {
+            const short *dx = sobel_dx_16s.ptr<short>(r);
+            const short *dy = sobel_dy_16s.ptr<short>(r);
+            float *mag_r = magnitude.ptr<float>(r);
+            float *ang_r = angle_ori.ptr<float>(r);
+            uchar *qr = quantized_unfiltered.ptr<uchar>(r);
+
+            for (int c = 1; c < src.cols - 1; ++c) {
+                int gx = dx[c], gy = dy[c];
+                float mag_sq = (float)(gx * gx + gy * gy);
+                mag_r[c] = mag_sq;
+
+                if (mag_sq <= threshold_sq) continue;
+
+                // Reduce to undirected [0,180): flip if gy < 0
+                int ugx = gx, ugy = gy;
+                if (ugy < 0) { ugx = -ugx; ugy = -ugy; }
+                if (ugy == 0 && ugx < 0) ugx = -ugx;
+
+                // Now ugy >= 0, angle in [0, 180)
+                int bin;
+                if (ugx >= 0) {
+                    // angle in [0, 90]: gx >= 0, gy >= 0
+                    long long test_y = (long long)ugy * 10000;
+                    if (test_y < (long long)ugx * TAN_B[0]) bin = 0;
+                    else if (test_y < (long long)ugx * TAN_B[1]) bin = 1;
+                    else if (test_y < (long long)ugx * TAN_B[2]) bin = 2;
+                    else if (test_y < (long long)ugx * TAN_B[3]) bin = 3;
+                    else bin = 4;
+                } else {
+                    // angle in (90, 180): gx < 0, gy >= 0
+                    int agx = -ugx;
+                    long long test_y = (long long)ugy * 10000;
+                    if (test_y < (long long)agx * TAN_B[0]) bin = 0;  // near 180
+                    else if (test_y < (long long)agx * TAN_B[1]) bin = 7;
+                    else if (test_y < (long long)agx * TAN_B[2]) bin = 6;
+                    else if (test_y < (long long)agx * TAN_B[3]) bin = 5;
+                    else bin = 4;
+                }
+
+                qr[c] = (uchar)bin;
+            }
+        }
+
+        // Step 2: 3x3 neighborhood voting (same as hysteresisGradient)
+        angle = Mat::zeros(src.size(), CV_8U);
+        static const int NEIGHBOR_THRESHOLD = 5;
+        for (int r = 1; r < src.rows - 1; ++r) {
+            float *mag_r = magnitude.ptr<float>(r);
+            for (int c = 1; c < src.cols - 1; ++c) {
+                if (mag_r[c] > threshold_sq) {
+                    int histogram[8] = {0,0,0,0,0,0,0,0};
+                    uchar *p0 = quantized_unfiltered.ptr<uchar>(r-1) + c - 1;
+                    uchar *p1 = quantized_unfiltered.ptr<uchar>(r)   + c - 1;
+                    uchar *p2 = quantized_unfiltered.ptr<uchar>(r+1) + c - 1;
+                    histogram[p0[0]]++; histogram[p0[1]]++; histogram[p0[2]]++;
+                    histogram[p1[0]]++; histogram[p1[1]]++; histogram[p1[2]]++;
+                    histogram[p2[0]]++; histogram[p2[1]]++; histogram[p2[2]]++;
+
+                    int max_votes = 0, best_bin = 0;
+                    for (int i = 0; i < 8; ++i) {
+                        if (histogram[i] > max_votes) {
+                            max_votes = histogram[i];
+                            best_bin = i;
+                        }
+                    }
+                    if (max_votes >= NEIGHBOR_THRESHOLD)
+                        angle.at<uchar>(r, c) = (uchar)(1 << best_bin);
+                }
+            }
+        }
 
     }else{
 
@@ -443,47 +533,65 @@ bool ColorGradientPyramid::extractTemplate(Template &templ) const
     float threshold_sq = strong_threshold * strong_threshold;
 
     int nms_kernel_size = 5;
+    int half_nms = nms_kernel_size / 2;
     cv::Mat magnitude_valid = cv::Mat(magnitude.size(), CV_8UC1, cv::Scalar(255));
 
-    for (int r = 0+nms_kernel_size/2; r < magnitude.rows-nms_kernel_size/2; ++r)
+    // Precompute row pointers for magnitude to avoid .at<> bounds checks
+    int mag_step = static_cast<int>(magnitude.step1());
+    int valid_step = static_cast<int>(magnitude_valid.step1());
+    const float *mag_data = magnitude.ptr<float>(0);
+    uchar *valid_data = magnitude_valid.ptr<uchar>(0);
+
+    for (int r = half_nms; r < magnitude.rows - half_nms; ++r)
     {
         const uchar *mask_r = no_mask ? NULL : local_mask.ptr<uchar>(r);
+        const float *mag_r = mag_data + r * mag_step;
+        uchar *valid_r = valid_data + r * valid_step;
+        const uchar *angle_r = angle.ptr<uchar>(r);
+        const float *angle_ori_r = angle_ori.ptr<float>(r);
 
-        for (int c = 0+nms_kernel_size/2; c < magnitude.cols-nms_kernel_size/2; ++c)
+        for (int c = half_nms; c < magnitude.cols - half_nms; ++c)
         {
             if (no_mask || mask_r[c])
             {
                 float score = 0;
-                if(magnitude_valid.at<uchar>(r, c)>0){
-                    score = magnitude.at<float>(r, c);
+                if (valid_r[c] > 0) {
+                    score = mag_r[c];
                     bool is_max = true;
-                    for(int r_offset = -nms_kernel_size/2; r_offset <= nms_kernel_size/2; r_offset++){
-                        for(int c_offset = -nms_kernel_size/2; c_offset <= nms_kernel_size/2; c_offset++){
-                            if(r_offset == 0 && c_offset == 0) continue;
-
-                            if(score < magnitude.at<float>(r+r_offset, c+c_offset)){
+                    for (int ro = -half_nms; ro <= half_nms && is_max; ++ro) {
+                        const float *mag_nr = mag_data + (r + ro) * mag_step;
+                        for (int co = -half_nms; co <= half_nms; ++co) {
+                            if (ro == 0 && co == 0) continue;
+                            if (score < mag_nr[c + co]) {
                                 score = 0;
                                 is_max = false;
                                 break;
                             }
                         }
-                        if(!is_max) break;
                     }
 
-                    if(is_max){
-                        for(int r_offset = -nms_kernel_size/2; r_offset <= nms_kernel_size/2; r_offset++){
-                            for(int c_offset = -nms_kernel_size/2; c_offset <= nms_kernel_size/2; c_offset++){
-                                if(r_offset == 0 && c_offset == 0) continue;
-                                magnitude_valid.at<uchar>(r+r_offset, c+c_offset) = 0;
+                    if (is_max) {
+                        for (int ro = -half_nms; ro <= half_nms; ++ro) {
+                            uchar *valid_nr = valid_data + (r + ro) * valid_step;
+                            for (int co = -half_nms; co <= half_nms; ++co) {
+                                if (ro == 0 && co == 0) continue;
+                                valid_nr[c + co] = 0;
                             }
                         }
                     }
                 }
 
-                if (score > threshold_sq && angle.at<uchar>(r, c) > 0)
+                if (score > threshold_sq && angle_r[c] > 0)
                 {
-                    candidates.push_back(Candidate(c, r, getLabel(angle.at<uchar>(r, c)), score));
-                    candidates.back().f.theta = angle_ori.at<float>(r, c);
+                    candidates.push_back(Candidate(c, r, getLabel(angle_r[c]), score));
+                    float theta = angle_ori_r[c];
+                    if (theta == 0.0f && score > 0) {
+                        int label = candidates.back().f.label;
+                        int bin = 0;
+                        while (bin < 8 && !(label & (1 << bin))) ++bin;
+                        theta = bin * 22.5f;
+                    }
+                    candidates.back().f.theta = theta;
                 }
             }
         }

@@ -1642,6 +1642,20 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
         }
 
 
+        // Cap coarse candidates to top-K by score to prevent noise flooding.
+        // On noisy images, thousands of false candidates pass the threshold.
+        // Keeping only the best ones prevents the refinement stage from exploding.
+        {
+            const int MAX_CANDIDATES = 256;
+            if ((int)candidates.size() > MAX_CANDIDATES) {
+                std::partial_sort(candidates.begin(),
+                                  candidates.begin() + MAX_CANDIDATES,
+                                  candidates.end());
+                // Match::operator< sorts by descending similarity
+                candidates.resize(MAX_CANDIDATES);
+            }
+        }
+
         // Locally refine each match by marching up the pyramid
         for (int l = pyramid_levels - 2; l >= 0; --l)
         {

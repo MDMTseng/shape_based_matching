@@ -50,3 +50,7 @@ target_link_libraries(test_robustness ${OpenCV_LIBS})
 # Preprocessing stage profiler
 add_executable(bench_preprocess bench_preprocess.cpp)
 target_link_libraries(bench_preprocess ${OpenCV_LIBS})
+
+# Per-stage profiler (clean vs noisy)
+add_executable(bench_profile line2Dup.cpp bench_profile.cpp)
+target_link_libraries(bench_profile ${OpenCV_LIBS})

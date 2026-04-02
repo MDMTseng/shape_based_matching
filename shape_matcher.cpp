@@ -31,14 +31,17 @@ bool FeatureSet::save(const std::string& path) const {
     f.write((char*)&origin.y, 4);
     f.write((char*)&angle_offset, 4);
 
-    // ICP edges
-    int32_t ne = (int32_t)icp_edges.size();
+    // Refine points (edges + corners)
+    int32_t ne = (int32_t)refine_points.size();
     f.write((char*)&ne, 4);
-    for (auto& e : icp_edges) {
-        f.write((char*)&e.px, 4);
-        f.write((char*)&e.py, 4);
-        f.write((char*)&e.nx, 4);
-        f.write((char*)&e.ny, 4);
+    for (auto& rp : refine_points) {
+        f.write((char*)&rp.px, 4);
+        f.write((char*)&rp.py, 4);
+        f.write((char*)&rp.nx, 4);
+        f.write((char*)&rp.ny, 4);
+        f.write((char*)&rp.cornerness, 4);
+        uint8_t t = rp.type;
+        f.write((char*)&t, 1);
     }
 
     // Per level
@@ -79,15 +82,18 @@ FeatureSet FeatureSet::load(const std::string& path) {
     f.read((char*)&fs.origin.y, 4);
     f.read((char*)&fs.angle_offset, 4);
 
-    // ICP edges
+    // Refine points (edges + corners)
     int32_t ne;
     f.read((char*)&ne, 4);
-    fs.icp_edges.resize(ne);
-    for (auto& e : fs.icp_edges) {
-        f.read((char*)&e.px, 4);
-        f.read((char*)&e.py, 4);
-        f.read((char*)&e.nx, 4);
-        f.read((char*)&e.ny, 4);
+    fs.refine_points.resize(ne);
+    for (auto& rp : fs.refine_points) {
+        f.read((char*)&rp.px, 4);
+        f.read((char*)&rp.py, 4);
+        f.read((char*)&rp.nx, 4);
+        f.read((char*)&rp.ny, 4);
+        f.read((char*)&rp.cornerness, 4);
+        uint8_t t; f.read((char*)&t, 1);
+        rp.type = (FeatureSet::RefinePt::Type)t;
     }
 
     fs.levels.resize(nl);
@@ -186,29 +192,72 @@ FeatureSet extractFeatures(const cv::Mat& templ_gray,
         }
     }
 
-    // Extract dense Canny edges with accurate normals for ICP
+    // Extract refinement points: dense Canny edges + Harris corners
     {
-        cv::Mat smooth, dx, dy, edges;
+        cv::Mat smooth, dx16, dy16, canny_edges;
         cv::GaussianBlur(templ_gray, smooth, cv::Size(5, 5), 0);
-        cv::Sobel(smooth, dx, CV_16S, 1, 0, 3);
-        cv::Sobel(smooth, dy, CV_16S, 0, 1, 3);
-        cv::Canny(dx, dy, edges, 30, 60);
+        cv::Sobel(smooth, dx16, CV_16S, 1, 0, 3);
+        cv::Sobel(smooth, dy16, CV_16S, 0, 1, 3);
+        cv::Canny(dx16, dy16, canny_edges, 30, 60);
 
         float cx = templ_gray.cols / 2.0f, cy = templ_gray.rows / 2.0f;
+
+        // Dense Canny edge points
         for (int r = 0; r < templ_gray.rows; ++r) {
-            const short* dxr = dx.ptr<short>(r);
-            const short* dyr = dy.ptr<short>(r);
+            const short* dxr = dx16.ptr<short>(r);
+            const short* dyr = dy16.ptr<short>(r);
             for (int c = 0; c < templ_gray.cols; ++c) {
-                if (edges.at<uchar>(r, c) == 0) continue;
+                if (canny_edges.at<uchar>(r, c) == 0) continue;
                 float gx = (float)dxr[c], gy = (float)dyr[c];
                 float mag = std::sqrt(gx*gx + gy*gy);
                 if (mag < 1e-6f) continue;
-                FeatureSet::EdgePoint ep;
-                ep.px = c - cx;
-                ep.py = r - cy;
-                ep.nx = gx / mag;
-                ep.ny = gy / mag;
-                fs.icp_edges.push_back(ep);
+                FeatureSet::RefinePt rp;
+                rp.px = c - cx;
+                rp.py = r - cy;
+                rp.nx = gx / mag;
+                rp.ny = gy / mag;
+                rp.cornerness = 0;
+                rp.type = FeatureSet::RefinePt::EDGE;
+                fs.refine_points.push_back(rp);
+            }
+        }
+
+        // Harris corners
+        cv::Mat harris_resp;
+        cv::cornerHarris(smooth, harris_resp, 3, 3, 0.04);
+
+        // Threshold + NMS to get corner positions
+        double max_resp;
+        cv::minMaxLoc(harris_resp, nullptr, &max_resp);
+        float corner_thresh = (float)(max_resp * 0.1);  // top 10% response
+
+        // Simple 5x5 NMS on Harris response
+        for (int r = 3; r < templ_gray.rows - 3; ++r) {
+            for (int c = 3; c < templ_gray.cols - 3; ++c) {
+                float val = harris_resp.at<float>(r, c);
+                if (val < corner_thresh) continue;
+
+                // Check if local maximum in 5x5
+                bool is_max = true;
+                for (int dr = -2; dr <= 2 && is_max; ++dr)
+                    for (int dc = -2; dc <= 2 && is_max; ++dc)
+                        if ((dr||dc) && harris_resp.at<float>(r+dr, c+dc) >= val)
+                            is_max = false;
+                if (!is_max) continue;
+
+                // Get gradient at corner for normal direction
+                float gx = (float)dx16.at<short>(r, c);
+                float gy = (float)dy16.at<short>(r, c);
+                float mag = std::sqrt(gx*gx + gy*gy);
+
+                FeatureSet::RefinePt rp;
+                rp.px = c - cx;
+                rp.py = r - cy;
+                rp.nx = (mag > 1e-6f) ? gx/mag : 0;
+                rp.ny = (mag > 1e-6f) ? gy/mag : 0;
+                rp.cornerness = std::min(1.0f, val / (float)max_resp);
+                rp.type = FeatureSet::RefinePt::CORNER;
+                fs.refine_points.push_back(rp);
             }
         }
     }
@@ -510,13 +559,16 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
             std::vector<icp_refine::EdgePoint> edges;
             bool use_cornerness = false;
 
-            if (cfg.refine == RefineMode::ICP && !fs.icp_edges.empty()) {
-                // Dense Canny edges — accurate normals, ~200 points, <0.5 deg
-                edges.resize(fs.icp_edges.size());
-                for (size_t ei = 0; ei < fs.icp_edges.size(); ++ei) {
-                    edges[ei].pos = cv::Point2f(fs.icp_edges[ei].px, fs.icp_edges[ei].py);
-                    edges[ei].normal = cv::Point2f(fs.icp_edges[ei].nx, fs.icp_edges[ei].ny);
+            if (cfg.refine == RefineMode::ICP && !fs.refine_points.empty()) {
+                // All refine points (edges + corners) with proper normals + cornerness
+                for (auto& rp : fs.refine_points) {
+                    icp_refine::EdgePoint ep;
+                    ep.pos = cv::Point2f(rp.px, rp.py);
+                    ep.normal = cv::Point2f(rp.nx, rp.ny);
+                    ep.cornerness = rp.cornerness;
+                    edges.push_back(ep);
                 }
+                use_cornerness = true;  // corners get point-to-point
             } else {
                 // Sparse matching features with cornerness-aware ICP weight.
                 // Corner features (cornerness > 0.3) use higher point_to_point_weight

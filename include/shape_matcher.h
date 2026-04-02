@@ -39,13 +39,19 @@ struct FeatureSet {
     int templ_width;                     ///< Original template image width
     int templ_height;                    ///< Original template image height
 
-    /// Dense edge points for ICP refinement (from Canny, not from sparse features).
-    /// Positions relative to template center, normals from actual gradient direction.
-    struct EdgePoint {
-        float px, py;   ///< Position relative to template center
-        float nx, ny;   ///< Normal direction (unit vector)
+    /// Refinement point: edge or corner, for ICP.
+    /// Positions relative to template center.
+    struct RefinePt {
+        float px, py;       ///< Position relative to template center
+        float nx, ny;       ///< Normal direction (unit vector, for point-to-plane)
+        float cornerness;   ///< 0 = pure edge, 1 = strong corner
+        enum Type : uint8_t { EDGE = 0, CORNER = 1 } type;
     };
-    std::vector<EdgePoint> icp_edges;
+
+    /// All refinement points: dense Canny edges + Harris corners.
+    /// Users can filter by type or cornerness to select which regions
+    /// contribute to ICP alignment.
+    std::vector<RefinePt> refine_points;
 
     // --- User-defined reference frame ---
 

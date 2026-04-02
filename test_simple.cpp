@@ -44,16 +44,14 @@ int main() {
     };
 
     auto loaded = sbm::FeatureSet::load("rect.feat");
-    int n_corner = 0, n_edge = 0;
-    float max_c = 0, sum_c = 0;
-    for (auto& f : loaded.levels[0].features) {
-        if (f.cornerness > 0.1f) n_corner++; else n_edge++;
-        max_c = std::max(max_c, f.cornerness);
-        sum_c += f.cornerness;
+    int n_edge_rp = 0, n_corner_rp = 0;
+    for (auto& rp : loaded.refine_points) {
+        if (rp.type == sbm::FeatureSet::RefinePt::CORNER) n_corner_rp++;
+        else n_edge_rp++;
     }
-    printf("ICP edges: %d (dense), %d (sparse: %d edges + %d corners, max_c=%.3f avg_c=%.3f)\n\n",
-           (int)loaded.icp_edges.size(), loaded.numFeatures(), n_edge, n_corner,
-           max_c, sum_c / loaded.numFeatures());
+    printf("Matching features: %d (sparse)\n", loaded.numFeatures());
+    printf("Refine points:     %d edges + %d corners = %d total\n\n",
+           n_edge_rp, n_corner_rp, n_edge_rp + n_corner_rp);
 
     printf("GT:  (160,120)@25   (320,240)@90   (480,360)@200\n\n");
 

@@ -61,6 +61,10 @@ struct FeatureSet {
     /// Default: template center (templ_width/2, templ_height/2).
     cv::Point2f origin;
 
+    /// Cached optimized sample points (computed once, reused for matching).
+    /// Populated by selectOptimizedPoints() or precomputeOptimizedPoints().
+    mutable std::vector<cv::Point2f> cached_opt_points;
+
     /// Angle offset in degrees. Added to the raw matched angle.
     /// Example: if template was captured at 45° but you want 0° to mean
     /// "pointing right", set angle_offset = -45.
@@ -97,15 +101,12 @@ struct FeatureSet {
     /// measures how much the solved pose changes.
     /// Returns: per-point sensitivity (deg/px and px/px).
     struct FeatureSensitivity {
-        cv::Point2f pos;           ///< Feature position (relative to center)
-        float angle_sens_x;       ///< Angle change (deg) per 1px X perturbation (diluted)
-        float angle_sens_y;       ///< Angle change (deg) per 1px Y perturbation (diluted)
-        float pos_sens_x;         ///< Position change (px) per 1px X perturbation (diluted)
-        float pos_sens_y;         ///< Position change (px) per 1px Y perturbation (diluted)
-        float leverage;           ///< Undiluted: how much damage this feature alone can do.
-                                  ///< Solved with only this feature removed, measures
-                                  ///< how much the pose changes. High = critical feature.
-        float max_sensitivity;    ///< max of diluted sensitivities
+        cv::Point2f pos;          ///< Feature position (relative to center)
+        float d_ang;              ///< Total angle sensitivity: |ang_from_dx| + |ang_from_dy|
+                                  ///< How much the angle breaks from 1px error (deg/px)
+        float d_pos;              ///< Total position sensitivity: hypot(pos_from_dx, pos_from_dy)
+                                  ///< How much the position breaks from 1px error (px/px)
+        float leverage;           ///< Distance from rotation center (angular torque arm)
     };
 
     struct SensitivityReport {
@@ -118,9 +119,17 @@ struct FeatureSet {
         std::string diagnosis;
     };
 
+    /// Select optimized sample points for ROI refinement.
+    /// Uses sensitivity-balanced iterative optimization:
+    /// greedy initial selection, then swap least/best to equalize sensitivity.
+    /// @param max_points  Target number of points.
+    /// @return Positions relative to template center.
+    std::vector<cv::Point2f> selectOptimizedPoints(int max_points = 15) const;
+
     /// Run sensitivity analysis on auto-selected sample points.
     /// Simulates the ROI rigid solve with perturbed correspondences.
-    SensitivityReport analyzeSensitivity() const;
+    /// @param skip_index  If >= 0, exclude this feature index from the solve.
+    SensitivityReport analyzeSensitivity(int skip_index = -1) const;
 };
 
 /// Extract features from a template image.

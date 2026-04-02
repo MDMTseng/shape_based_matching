@@ -459,7 +459,215 @@ FeatureSet::QualityReport FeatureSet::evaluateQuality_OLD() const {
 // Sensitivity analysis
 // ============================================================
 
-FeatureSet::SensitivityReport FeatureSet::analyzeSensitivity() const {
+// Internal constraint for sensitivity analysis
+struct SensConstraint {
+    cv::Point2f src, dst, normal;
+};
+
+// Solve rigid transform from constraints: returns (theta_deg, tx, ty)
+static cv::Vec3f solveSens(const std::vector<SensConstraint>& cs) {
+    float ATA[3][3]={}, ATb[3]={};
+    for (auto& c : cs) {
+        float dx=c.src.x-c.dst.x, dy=c.src.y-c.dst.y;
+        float nx=c.normal.x, ny=c.normal.y;
+        float e = dx*nx + dy*ny;
+        float j0=-c.src.y*nx+c.src.x*ny, j1=nx, j2=ny;
+        ATA[0][0]+=j0*j0; ATA[0][1]+=j0*j1; ATA[0][2]+=j0*j2;
+        ATA[1][1]+=j1*j1; ATA[1][2]+=j1*j2;
+        ATA[2][2]+=j2*j2;
+        ATb[0]-=j0*e; ATb[1]-=j1*e; ATb[2]-=j2*e;
+    }
+    ATA[1][0]=ATA[0][1]; ATA[2][0]=ATA[0][2]; ATA[2][1]=ATA[1][2];
+    for(int i=0;i<3;i++) ATA[i][i]+=0.001f;
+    cv::Mat A(3,3,CV_32F,ATA), b(3,1,CV_32F,ATb), x;
+    cv::solve(A,b,x);
+    return cv::Vec3f(x.at<float>(0)*180/(float)CV_PI, x.at<float>(1), x.at<float>(2));
+}
+
+// Build a constraint from a refine point (extract normal via Sobel)
+static bool buildConstraint(const FeatureSet& fs, int rp_idx, SensConstraint& out) {
+    auto& rp = fs.refine_points[rp_idx];
+    float tcx = fs.templ_width / 2.0f, tcy = fs.templ_height / 2.0f;
+    int tx=(int)(rp.px+tcx+0.5f), ty=(int)(rp.py+tcy+0.5f);
+    int h=15;
+    if(tx-h<0||tx+h>=fs.templ_image.cols||ty-h<0||ty+h>=fs.templ_image.rows)
+        h=std::min({tx,ty,fs.templ_image.cols-1-tx,fs.templ_image.rows-1-ty});
+    if(h<5) return false;
+    cv::Mat roi2=fs.templ_image(cv::Rect(tx-h,ty-h,2*h,2*h));
+    cv::Mat dx2,dy2,mag2;
+    cv::Sobel(roi2,dx2,CV_32F,1,0,3);
+    cv::Sobel(roi2,dy2,CV_32F,0,1,3);
+    cv::magnitude(dx2,dy2,mag2);
+    double max_mag; cv::Point max_loc;
+    cv::minMaxLoc(mag2, nullptr, &max_mag, nullptr, &max_loc);
+    float gx=dx2.at<float>(max_loc.y,max_loc.x);
+    float gy=dy2.at<float>(max_loc.y,max_loc.x);
+    float gm=std::sqrt(gx*gx+gy*gy);
+    if (gm < 1e-6f) return false;
+    out.src = cv::Point2f(rp.px, rp.py);
+    out.dst = out.src;
+    out.normal = cv::Point2f(gx/gm, gy/gm);
+    return true;
+}
+
+// Compute max sensitivity (max of d_ang and d_pos across all features)
+static float computeMaxSens(const std::vector<SensConstraint>& baseline) {
+    cv::Vec3f base_pose = solveSens(baseline);
+    float worst = 0;
+    for (size_t fi = 0; fi < baseline.size(); ++fi) {
+        auto perturbed = baseline;
+        perturbed[fi].dst.x += 1.0f;
+        cv::Vec3f pdx = solveSens(perturbed);
+        float ang_dx = std::abs(pdx[0] - base_pose[0]);
+        float pos_dx = std::sqrt((pdx[1]-base_pose[1])*(pdx[1]-base_pose[1]) +
+                                  (pdx[2]-base_pose[2])*(pdx[2]-base_pose[2]));
+        perturbed = baseline;
+        perturbed[fi].dst.y += 1.0f;
+        cv::Vec3f pdy = solveSens(perturbed);
+        float ang_dy = std::abs(pdy[0] - base_pose[0]);
+        float pos_dy = std::sqrt((pdy[1]-base_pose[1])*(pdy[1]-base_pose[1]) +
+                                  (pdy[2]-base_pose[2])*(pdy[2]-base_pose[2]));
+        float d_ang = ang_dx + ang_dy;
+        float d_pos = std::sqrt(pos_dx*pos_dx + pos_dy*pos_dy);
+        worst = std::max(worst, std::max(d_ang, d_pos));
+    }
+    return worst;
+}
+
+std::vector<cv::Point2f> FeatureSet::selectOptimizedPoints(int max_points) const {
+    // Return cached result if available and same size
+    if (!cached_opt_points.empty() && (int)cached_opt_points.size() <= max_points)
+        return cached_opt_points;
+
+    std::vector<cv::Point2f> result;
+    if (refine_points.empty() || templ_image.empty())
+        return result;
+
+    // Collect all valid candidate points with margin check
+    struct CandPt { int rp_idx; float corn; };
+    std::vector<CandPt> all_cands;
+    for (size_t i = 0; i < refine_points.size(); i++) {
+        auto& rp = refine_points[i];
+        if (std::abs(rp.px) > templ_width/2.0f - 5 || std::abs(rp.py) > templ_height/2.0f - 5)
+            continue;
+        all_cands.push_back({(int)i, rp.cornerness});
+    }
+
+    // Initial greedy selection: corners first, then well-spaced
+    float min_dist = std::max(templ_width, templ_height) / 16.0f * 1.5f;
+    float min_dist_sq = min_dist * min_dist;
+    std::sort(all_cands.begin(), all_cands.end(),
+              [](const CandPt& a, const CandPt& b){ return a.corn > b.corn; });
+
+    std::vector<int> selected;  // indices into refine_points
+    for (auto& c : all_cands) {
+        if ((int)selected.size() >= max_points) break;
+        auto& rp = refine_points[c.rp_idx];
+        cv::Point2f p(rp.px, rp.py);
+        bool too_close = false;
+        for (int si : selected) {
+            float dx = p.x - refine_points[si].px, dy = p.y - refine_points[si].py;
+            if (dx*dx + dy*dy < min_dist_sq) { too_close = true; break; }
+        }
+        if (too_close) continue;
+        selected.push_back(c.rp_idx);
+    }
+
+    if ((int)selected.size() < 3) {
+        for (int idx : selected)
+            result.push_back(cv::Point2f(refine_points[idx].px, refine_points[idx].py));
+        return result;
+    }
+
+    // Build constraints for selected points
+    auto buildSet = [&](const std::vector<int>& sel) -> std::vector<SensConstraint> {
+        std::vector<SensConstraint> cs;
+        for (int idx : sel) {
+            SensConstraint c;
+            if (buildConstraint(*this, idx, c))
+                cs.push_back(c);
+        }
+        return cs;
+    };
+
+    auto inSelected = [&](int idx) {
+        for (int s : selected) if (s == idx) return true;
+        return false;
+    };
+
+    // Iterative optimization: swap least sensitive with best candidate
+    float opt_min_dist_sq = (min_dist * 0.5f) * (min_dist * 0.5f);
+
+    for (int opt_iter = 0; opt_iter < 20; ++opt_iter) {
+        auto baseline = buildSet(selected);
+        if ((int)baseline.size() < 3) break;
+
+        cv::Vec3f base_pose = solveSens(baseline);
+        std::vector<float> sens(baseline.size());
+        int least_idx = 0;
+        float least_sens = 1e9f;
+        float worst_sens = 0;
+        for (size_t fi = 0; fi < baseline.size(); ++fi) {
+            auto perturbed = baseline;
+            perturbed[fi].dst.x += 1.0f;
+            cv::Vec3f pdx = solveSens(perturbed);
+            float ang_dx = std::abs(pdx[0] - base_pose[0]);
+            float pos_dx = std::sqrt((pdx[1]-base_pose[1])*(pdx[1]-base_pose[1]) +
+                                      (pdx[2]-base_pose[2])*(pdx[2]-base_pose[2]));
+            perturbed = baseline;
+            perturbed[fi].dst.y += 1.0f;
+            cv::Vec3f pdy = solveSens(perturbed);
+            float ang_dy = std::abs(pdy[0] - base_pose[0]);
+            float pos_dy = std::sqrt((pdy[1]-base_pose[1])*(pdy[1]-base_pose[1]) +
+                                      (pdy[2]-base_pose[2])*(pdy[2]-base_pose[2]));
+            float d_ang = ang_dx + ang_dy;
+            float d_pos = std::sqrt(pos_dx*pos_dx + pos_dy*pos_dy);
+            sens[fi] = d_ang + d_pos;
+            if (sens[fi] < least_sens) { least_sens = sens[fi]; least_idx = (int)fi; }
+            worst_sens = std::max(worst_sens, sens[fi]);
+        }
+
+        if (least_sens > 1e-6f && worst_sens / least_sens < 2.0f) break;
+
+        int remove_rp_idx = selected[least_idx];
+        float best_worst = worst_sens;
+        int best_cand = -1;
+
+        for (auto& c : all_cands) {
+            if (inSelected(c.rp_idx)) continue;
+            auto& rp = refine_points[c.rp_idx];
+            cv::Point2f p(rp.px, rp.py);
+            bool too_close = false;
+            for (int si : selected) {
+                if (si == remove_rp_idx) continue;
+                float dx = p.x - refine_points[si].px, dy = p.y - refine_points[si].py;
+                if (dx*dx + dy*dy < opt_min_dist_sq) { too_close = true; break; }
+            }
+            if (too_close) continue;
+
+            auto trial = selected;
+            trial[least_idx] = c.rp_idx;
+            auto trial_cs = buildSet(trial);
+            if ((int)trial_cs.size() < 3) continue;
+
+            float trial_worst = computeMaxSens(trial_cs);
+            if (trial_worst < best_worst) {
+                best_worst = trial_worst;
+                best_cand = c.rp_idx;
+            }
+        }
+
+        if (best_cand < 0 || best_worst >= worst_sens * 0.99f) break;
+        selected[least_idx] = best_cand;
+    }
+
+    for (int idx : selected)
+        result.push_back(cv::Point2f(refine_points[idx].px, refine_points[idx].py));
+    cached_opt_points = result;
+    return result;
+}
+
+FeatureSet::SensitivityReport FeatureSet::analyzeSensitivity(int skip_index) const {
     SensitivityReport sr;
     sr.worst_angle_sens = 0;
     sr.worst_pos_sens = 0;
@@ -467,155 +675,75 @@ FeatureSet::SensitivityReport FeatureSet::analyzeSensitivity() const {
     sr.mean_pos_sens = 0;
     sr.num_fragile = 0;
 
-    if (refine_points.empty() || templ_image.empty()) {
-        sr.diagnosis = "No data";
-        return sr;
-    }
-
-    float tcx = templ_width / 2.0f, tcy = templ_height / 2.0f;
-
-    // Select sample points (same as evaluateQuality)
-    std::vector<cv::Point2f> positions;
-    std::vector<float> cornerness;
-    for (auto& rp : refine_points) {
-        positions.push_back(cv::Point2f(rp.px, rp.py));
-        cornerness.push_back(rp.cornerness);
-    }
-
-    float min_dist = std::max(templ_width, templ_height) / 16.0f * 1.5f;
-    float min_dist_sq = min_dist * min_dist;
-    struct Cand { int idx; float corn; };
-    std::vector<Cand> cands(positions.size());
-    for (size_t i = 0; i < positions.size(); i++)
-        cands[i] = {(int)i, cornerness[i]};
-    std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b){ return a.corn > b.corn; });
-
-    std::vector<int> selected;
-    for (auto& c : cands) {
-        if ((int)selected.size() >= 15) break;
-        auto& p = positions[c.idx];
-        bool too_close = false;
-        for (int si : selected) {
-            float dx = p.x - positions[si].x, dy = p.y - positions[si].y;
-            if (dx*dx + dy*dy < min_dist_sq) { too_close = true; break; }
-        }
-        if (too_close) continue;
-        if (std::abs(p.x) > templ_width/2.0f - 5 || std::abs(p.y) > templ_height/2.0f - 5)
-            continue;
-        selected.push_back(c.idx);
-    }
-
-    if (selected.size() < 3) {
+    // Use optimized point selection
+    auto opt_points = selectOptimizedPoints(15);
+    if ((int)opt_points.size() < 3) {
         sr.diagnosis = "Too few points";
         return sr;
     }
 
-    int N = (int)selected.size();
-
-    // Build baseline constraints: src = feature pos, dst = same (perfect match)
-    // Normal = gradient direction at each point
-    struct Constraint {
-        cv::Point2f src, dst, normal;
+    // Build constraints from optimized points
+    // Find matching refine_point for each optimized point
+    auto buildSet = [&](const std::vector<cv::Point2f>& pts) -> std::vector<SensConstraint> {
+        std::vector<SensConstraint> cs;
+        for (auto& pt : pts) {
+            // Find closest refine_point
+            int best = -1; float best_d = 1e9f;
+            for (size_t i = 0; i < refine_points.size(); i++) {
+                float dx = pt.x - refine_points[i].px, dy = pt.y - refine_points[i].py;
+                float d = dx*dx + dy*dy;
+                if (d < best_d) { best_d = d; best = (int)i; }
+            }
+            if (best >= 0) {
+                SensConstraint c;
+                if (buildConstraint(*this, best, c))
+                    cs.push_back(c);
+            }
+        }
+        return cs;
     };
-    std::vector<Constraint> baseline;
-    int roi_half = 15;
 
-    for (int si : selected) {
-        auto& rp = refine_points[si];
-        int tx=(int)(rp.px+tcx+0.5f), ty=(int)(rp.py+tcy+0.5f);
-        int h=roi_half;
-        if(tx-h<0||tx+h>=templ_image.cols||ty-h<0||ty+h>=templ_image.rows)
-            h=std::min({tx,ty,templ_image.cols-1-tx,templ_image.rows-1-ty});
-        if(h<5) continue;
-        cv::Mat roi2=templ_image(cv::Rect(tx-h,ty-h,2*h,2*h));
-        cv::Mat dx2,dy2,mag2;
-        cv::Sobel(roi2,dx2,CV_32F,1,0,3);
-        cv::Sobel(roi2,dy2,CV_32F,0,1,3);
-        cv::magnitude(dx2,dy2,mag2);
-        double max_mag; cv::Point max_loc;
-        cv::minMaxLoc(mag2, nullptr, &max_mag, nullptr, &max_loc);
-        float gx=dx2.at<float>(max_loc.y,max_loc.x);
-        float gy=dy2.at<float>(max_loc.y,max_loc.x);
-        float gm=std::sqrt(gx*gx+gy*gy);
-        cv::Point2f normal = (gm>1e-6f) ? cv::Point2f(gx/gm, gy/gm) : cv::Point2f(1,0);
+    auto points = opt_points;
+    if (skip_index >= 0 && skip_index < (int)points.size())
+        points.erase(points.begin() + skip_index);
 
-        Constraint c;
-        c.src = cv::Point2f(rp.px, rp.py);
-        c.dst = c.src;  // perfect match baseline
-        c.normal = normal;
-        baseline.push_back(c);
-    }
-
-    if (baseline.size() < 3) {
+    auto baseline = buildSet(points);
+    if ((int)baseline.size() < 3) {
         sr.diagnosis = "Too few valid points";
         return sr;
     }
 
-    // Solve function: given constraints, return (theta, tx, ty)
-    auto solve = [](const std::vector<Constraint>& cs) -> cv::Vec3f {
-        float ATA[3][3]={}, ATb[3]={};
-        for (auto& c : cs) {
-            float dx=c.src.x-c.dst.x, dy=c.src.y-c.dst.y;
-            float nx=c.normal.x, ny=c.normal.y;
-            float e = dx*nx + dy*ny;
-            float j0=-c.src.y*nx+c.src.x*ny, j1=nx, j2=ny;
-            ATA[0][0]+=j0*j0; ATA[0][1]+=j0*j1; ATA[0][2]+=j0*j2;
-            ATA[1][1]+=j1*j1; ATA[1][2]+=j1*j2;
-            ATA[2][2]+=j2*j2;
-            ATb[0]-=j0*e; ATb[1]-=j1*e; ATb[2]-=j2*e;
-        }
-        ATA[1][0]=ATA[0][1]; ATA[2][0]=ATA[0][2]; ATA[2][1]=ATA[1][2];
-        for(int i=0;i<3;i++) ATA[i][i]+=0.001f;
-        cv::Mat A(3,3,CV_32F,ATA), b(3,1,CV_32F,ATb), x;
-        cv::solve(A,b,x);
-        return cv::Vec3f(x.at<float>(0)*180/(float)CV_PI, x.at<float>(1), x.at<float>(2));
-    };
-
-    // Baseline pose (should be ~zero since dst == src)
-    cv::Vec3f base_pose = solve(baseline);
+    cv::Vec3f base_pose = solveSens(baseline);
 
     // Perturb each feature's dst by +1px in X and Y, measure pose change
     for (size_t fi = 0; fi < baseline.size(); ++fi) {
         FeatureSensitivity fs;
         fs.pos = baseline[fi].src;
 
-        // Perturb X
         auto perturbed = baseline;
         perturbed[fi].dst.x += 1.0f;
-        cv::Vec3f pose_dx = solve(perturbed);
-        fs.angle_sens_x = std::abs(pose_dx[0] - base_pose[0]);
-        fs.pos_sens_x = std::sqrt((pose_dx[1]-base_pose[1])*(pose_dx[1]-base_pose[1]) +
-                                   (pose_dx[2]-base_pose[2])*(pose_dx[2]-base_pose[2]));
+        cv::Vec3f pose_dx = solveSens(perturbed);
+        float ang_from_dx = std::abs(pose_dx[0] - base_pose[0]);
+        float px_from_dx = std::sqrt((pose_dx[1]-base_pose[1])*(pose_dx[1]-base_pose[1]) +
+                                      (pose_dx[2]-base_pose[2])*(pose_dx[2]-base_pose[2]));
 
-        // Perturb Y
         perturbed = baseline;
         perturbed[fi].dst.y += 1.0f;
-        cv::Vec3f pose_dy = solve(perturbed);
-        fs.angle_sens_y = std::abs(pose_dy[0] - base_pose[0]);
-        fs.pos_sens_y = std::sqrt((pose_dy[1]-base_pose[1])*(pose_dy[1]-base_pose[1]) +
-                                   (pose_dy[2]-base_pose[2])*(pose_dy[2]-base_pose[2]));
+        cv::Vec3f pose_dy = solveSens(perturbed);
+        float ang_from_dy = std::abs(pose_dy[0] - base_pose[0]);
+        float px_from_dy = std::sqrt((pose_dy[1]-base_pose[1])*(pose_dy[1]-base_pose[1]) +
+                                      (pose_dy[2]-base_pose[2])*(pose_dy[2]-base_pose[2]));
 
-        // Leverage: angular torque from 1px error at this feature.
-        // A feature at distance r from rotation center, with 1px normal error,
-        // creates angular torque proportional to r.
-        // leverage = r (in pixels) — features far from center have more angular influence.
-        {
-            float r = std::sqrt(fs.pos.x * fs.pos.x + fs.pos.y * fs.pos.y);
-            fs.leverage = r;
-        }
-
-        fs.max_sensitivity = std::max({fs.angle_sens_x, fs.angle_sens_y,
-                                        fs.pos_sens_x, fs.pos_sens_y});
+        fs.d_ang = ang_from_dx + ang_from_dy;
+        fs.d_pos = std::sqrt(px_from_dx*px_from_dx + px_from_dy*px_from_dy);
+        fs.leverage = std::sqrt(fs.pos.x * fs.pos.x + fs.pos.y * fs.pos.y);
 
         sr.features.push_back(fs);
-        sr.worst_angle_sens = std::max(sr.worst_angle_sens,
-                                        std::max(fs.angle_sens_x, fs.angle_sens_y));
-        sr.worst_pos_sens = std::max(sr.worst_pos_sens,
-                                      std::max(fs.pos_sens_x, fs.pos_sens_y));
-        sr.mean_angle_sens += (fs.angle_sens_x + fs.angle_sens_y) / 2;
-        sr.mean_pos_sens += (fs.pos_sens_x + fs.pos_sens_y) / 2;
-        if (std::max(fs.angle_sens_x, fs.angle_sens_y) > 1.0f)
-            sr.num_fragile++;
+        sr.worst_angle_sens = std::max(sr.worst_angle_sens, fs.d_ang);
+        sr.worst_pos_sens = std::max(sr.worst_pos_sens, fs.d_pos);
+        sr.mean_angle_sens += fs.d_ang;
+        sr.mean_pos_sens += fs.d_pos;
+        if (fs.d_ang > 1.0f) sr.num_fragile++;
     }
 
     sr.mean_angle_sens /= sr.features.size();
@@ -793,6 +921,7 @@ int ShapeMatcher::addModel(const std::string& name,
     ModelInfo info;
     info.name = name;
     info.features = features;
+    info.features.selectOptimizedPoints(8);  // precompute + cache
     info.config = config;
     info.class_id = "sbm_" + name;
     info.class_id_flip = "sbm_" + name + "_flip";
@@ -995,21 +1124,20 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
 
         // ROI-based refinement
         if (cfg.refine == RefineMode::ROI && !fs.templ_image.empty() && !scene.empty()) {
-            // Select critical points from refine_points
-            std::vector<cv::Point2f> positions;
-            std::vector<float> corner_scores;
-            for (auto& rp : fs.refine_points) {
-                positions.push_back(cv::Point2f(rp.px, rp.py));
-                corner_scores.push_back(rp.cornerness);
+            // Use sensitivity-optimized point selection
+            auto opt_points = fs.selectOptimizedPoints(8);
+            std::vector<roi_refine::SamplePoint> sample_pts;
+            for (auto& p : opt_points) {
+                roi_refine::SamplePoint sp;
+                sp.pos = p;
+                sample_pts.push_back(sp);
             }
-
-            auto sample_pts = roi_refine::selectCriticalPoints(
-                positions, corner_scores, 15, fs.templ_width, fs.templ_height);
 
             if (!sample_pts.empty()) {
                 roi_refine::ROIConfig roi_cfg;
                 roi_cfg.roi_half = 15;
                 roi_cfg.search_half = 15;
+                roi_cfg.max_iters = 3;
 
                 cv::Vec3f init_pose(scene_x, scene_y, raw_angle);
                 auto refined_pose = roi_refine::refineROI(

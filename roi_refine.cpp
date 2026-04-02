@@ -82,6 +82,7 @@ static cv::Point2f matchROI_subpixel(const cv::Mat& templ_roi,
         return expected;
 
     cv::Mat search_roi = scene_img(cv::Rect(x0, y0, x1 - x0, y1 - y0));
+
     cv::Mat result;
     cv::matchTemplate(search_roi, templ_roi, result, cv::TM_CCORR_NORMED);
 

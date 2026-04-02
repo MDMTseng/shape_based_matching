@@ -27,7 +27,7 @@ static void draw_L(Mat& img, int cx, int cy, double angle, int color) {
 int main() {
     // 1. Create template — try different shapes
     Mat templ(80, 80, CV_8U, Scalar(0));
-#define TEMPLATE_SHAPE 1
+#define TEMPLATE_SHAPE 4
 #if TEMPLATE_SHAPE == 0
     draw_L(templ, 40, 40, 0, 200);
     printf("Template: L-shape\n");
@@ -209,16 +209,25 @@ int main() {
     }
     printf("  Edge-only sample points: %d\n", (int)sample_pts_edge.size());
 
+    // Optimized feature selection timing
+    auto t_sel0 = std::chrono::high_resolution_clock::now();
+    auto opt_pts = loaded.selectOptimizedPoints(15);
+    auto t_sel1 = std::chrono::high_resolution_clock::now();
+    double sel_ms = std::chrono::duration<double,std::milli>(t_sel1-t_sel0).count();
+    auto opt_pts2 = loaded.selectOptimizedPoints(15);  // cached
+    auto t_sel2 = std::chrono::high_resolution_clock::now();
+    double sel_cached_ms = std::chrono::duration<double,std::milli>(t_sel2-t_sel1).count();
+    printf("  selectOptimizedPoints(15): %d pts — compute=%.1fms, cached=%.3fms\n",
+           (int)opt_pts.size(), sel_ms, sel_cached_ms);
+
     // Sensitivity analysis
     auto sens = loaded.analyzeSensitivity();
     printf("  Sensitivity: worst_ang=%.2f deg/px  worst_pos=%.2f px/px  fragile=%d — %s\n",
            sens.worst_angle_sens, sens.worst_pos_sens, sens.num_fragile, sens.diagnosis.c_str());
-    printf("    Per-feature (pos -> ang_x ang_y | leverage):\n");
+    printf("    Per-feature sensitivity:\n");
     for (auto& f : sens.features)
-        printf("      (%+5.1f,%+5.1f) → %.2f %.2f | lev=%.2f%s\n",
-               f.pos.x, f.pos.y, f.angle_sens_x, f.angle_sens_y,
-               f.leverage,
-               f.leverage > 2.0f ? " !" : "");
+        printf("      (%+5.1f,%+5.1f) → d_ang=%.2f d_pos=%.2f lev=%.0f\n",
+               f.pos.x, f.pos.y, f.d_ang, f.d_pos, f.leverage);
     printf("\n");
 
     printf("%-22s  %-22s  %-22s  %-22s  %-22s\n",
@@ -238,8 +247,14 @@ int main() {
         { 0, 20,  0, 0, 0, "slide Y +20px"},
         // Noise/blur
         { 0,  0,  0, 30, 0, "noise s=30"},
+        { 0,  0,  0, 50, 0, "noise s=50"},
+        { 0,  0,  0, 80, 0, "noise s=80"},
         { 0,  0,  0,  0,11, "blur k=11"},
+        { 0,  0,  0,  0,21, "blur k=21"},
+        { 0,  0,  0, 30,11, "n=30+b=11"},
+        { 0,  0,  0, 50,11, "n=50+b=11"},
         { 5,  3,  5, 20, 3, "+5px+5deg+n+b"},
+        { 5,  3,  5, 50,11, "+5px+5deg+n50+b11"},
     };
 
     for (auto& pe : errors) {
@@ -357,10 +372,14 @@ int main() {
 
         auto t0 = std::chrono::high_resolution_clock::now();
         auto results = matcher.match(scene);
-        double ms = std::chrono::duration<double, std::milli>(
+        double ms1 = std::chrono::duration<double, std::milli>(
+            std::chrono::high_resolution_clock::now() - t0).count();
+        t0 = std::chrono::high_resolution_clock::now();
+        auto results2 = matcher.match(scene);
+        double ms2 = std::chrono::duration<double, std::milli>(
             std::chrono::high_resolution_clock::now() - t0).count();
 
-        printf("%-20s (%.1fms): ", mode.name, ms);
+        printf("%-20s (1st=%.1fms 2nd=%.1fms): ", mode.name, ms1, ms2);
         for (auto& r : results)
             printf("(%3.0f,%3.0f)@%5.1f  ", r.x, r.y, r.angle);
         printf("\n");

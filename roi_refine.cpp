@@ -229,7 +229,19 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
 
     cv::Vec3f pose = initial_pose;
 
-    // Iterate: match → solve → update pose → re-match
+    // Iterate: match on iter 0, reuse correspondences for iter 1+
+    // Matched dst positions are fixed after iter 0 — only the rigid
+    // solve is re-run with updated src positions from the new pose.
+    struct MatchedPoint {
+        cv::Point2f dst;           // scene match (fixed after iter 0)
+        cv::Point2f normal;        // PCA normal (fixed after iter 0, pre-rotation)
+        cv::Point2f tangent;       // PCA tangent (for corners)
+        bool is_corner;
+        int sample_idx;
+    };
+    std::vector<MatchedPoint> matched_points;
+    float last_match_angle = -999;
+
     for (int iteration = 0; iteration < config.max_iters; ++iteration) {
 
     float cx = pose[0], cy = pose[1];
@@ -241,72 +253,82 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
 
     std::vector<Constraint> constraints;
 
-    for (auto& sp : sample_points) {
-        // Template ROI around this point
-        int tx = (int)(sp.pos.x + tcx + 0.5f);
-        int ty = (int)(sp.pos.y + tcy + 0.5f);
-        int h = config.roi_half;
+    // Re-match if first iteration OR if angle changed > 2° since last match
+    bool do_match = (std::abs(angle_deg - last_match_angle) > 2.0f);
 
-        if (tx-h < 0 || tx+h >= templ_img.cols || ty-h < 0 || ty+h >= templ_img.rows) {
-            // Shrink ROI to fit
-            h = std::min({tx, ty, templ_img.cols - 1 - tx, templ_img.rows - 1 - ty});
-            if (h < 5) continue;  // too small
+    if (do_match) {
+        last_match_angle = angle_deg;
+        matched_points.clear();
+
+        for (size_t si = 0; si < sample_points.size(); ++si) {
+            auto& sp = sample_points[si];
+            int tx = (int)(sp.pos.x + tcx + 0.5f);
+            int ty = (int)(sp.pos.y + tcy + 0.5f);
+            int h = config.roi_half;
+
+            if (tx-h < 0 || tx+h >= templ_img.cols || ty-h < 0 || ty+h >= templ_img.rows) {
+                h = std::min({tx, ty, templ_img.cols - 1 - tx, templ_img.rows - 1 - ty});
+                if (h < 5) continue;
+            }
+
+            cv::Mat roi_unrotated = templ_img(cv::Rect(tx-h, ty-h, 2*h, 2*h));
+            cv::Mat roi;
+            if (std::abs(angle_deg) > 0.5f) {
+                cv::Mat M = cv::getRotationMatrix2D(cv::Point2f((float)h, (float)h), -angle_deg, 1.0);
+                cv::warpAffine(roi_unrotated, roi, M, roi_unrotated.size(),
+                               cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+            } else {
+                roi = roi_unrotated;
+            }
+
+            float ex = cs * sp.pos.x - sn * sp.pos.y + cx;
+            float ey = sn * sp.pos.x + cs * sp.pos.y + cy;
+
+            cv::Point2f matched = matchROI_subpixel(roi, scene_img,
+                                                     cv::Point2f(ex, ey),
+                                                     config.search_half);
+
+            float eigvals[2];
+            cv::Point2f eigvecs[2];
+            roiPCA(roi, eigvals, eigvecs);
+
+            MatchedPoint mp;
+            mp.dst = matched;
+            mp.normal = eigvecs[1];   // store unrotated — rotate per iteration
+            mp.tangent = eigvecs[0];
+            mp.is_corner = (eigvals[0] > 1e-6f && eigvals[1] > 1e-6f &&
+                            eigvals[0] / eigvals[1] < config.corner_eigen_ratio);
+            mp.sample_idx = (int)si;
+            matched_points.push_back(mp);
         }
+    }
 
-        // Extract ROI and rotate it by the coarse angle to match the scene
-        cv::Mat roi_unrotated = templ_img(cv::Rect(tx-h, ty-h, 2*h, 2*h));
-        cv::Mat roi;
-        if (std::abs(angle_deg) > 0.5f) {
-            cv::Mat M = cv::getRotationMatrix2D(cv::Point2f((float)h, (float)h), -angle_deg, 1.0);
-            cv::warpAffine(roi_unrotated, roi, M, roi_unrotated.size(),
-                           cv::INTER_LINEAR, cv::BORDER_REPLICATE);
-        } else {
-            roi = roi_unrotated;
-        }
-
-        // Expected position in scene (transform by current pose)
+    // Build constraints from matched points (reused across iterations)
+    for (auto& mp : matched_points) {
+        auto& sp = sample_points[mp.sample_idx];
         float ex = cs * sp.pos.x - sn * sp.pos.y + cx;
         float ey = sn * sp.pos.x + cs * sp.pos.y + cy;
 
-        // Match ROI in scene with subpixel
-        cv::Point2f matched = matchROI_subpixel(roi, scene_img,
-                                                 cv::Point2f(ex, ey),
-                                                 config.search_half);
-
-        // PCA on ROI gradient
-        float eigvals[2];
-        cv::Point2f eigvecs[2];
-        roiPCA(roi, eigvals, eigvecs);
-
-        // Source point in scene coords (at current pose)
-        cv::Point2f src(ex, ey);
-
-        // Normal constraint (smallest eigenvalue direction = edge normal)
         // Rotate normal by current pose angle
-        cv::Point2f normal(cs*eigvecs[1].x - sn*eigvecs[1].y,
-                           sn*eigvecs[1].x + cs*eigvecs[1].y);
+        cv::Point2f normal(cs*mp.normal.x - sn*mp.normal.y,
+                           sn*mp.normal.x + cs*mp.normal.y);
 
         Constraint c1;
-        c1.src = src;
-        c1.dst = matched;
+        c1.src = cv::Point2f(ex, ey);
+        c1.dst = mp.dst;
         c1.normal = normal;
         c1.weight = 1.0f;
         constraints.push_back(c1);
 
-        // If corner-like (eigenvalue ratio < threshold), add tangent constraint too
-        if (eigvals[0] > 1e-6f && eigvals[1] > 1e-6f) {
-            float ratio = eigvals[0] / eigvals[1];
-            if (ratio < config.corner_eigen_ratio) {
-                // Corner: add tangent direction as second constraint
-                cv::Point2f tangent(cs*eigvecs[0].x - sn*eigvecs[0].y,
-                                    sn*eigvecs[0].x + cs*eigvecs[0].y);
-                Constraint c2;
-                c2.src = src;
-                c2.dst = matched;
-                c2.normal = tangent;
-                c2.weight = 1.0f;
-                constraints.push_back(c2);
-            }
+        if (mp.is_corner) {
+            cv::Point2f tangent(cs*mp.tangent.x - sn*mp.tangent.y,
+                                sn*mp.tangent.x + cs*mp.tangent.y);
+            Constraint c2;
+            c2.src = cv::Point2f(ex, ey);
+            c2.dst = mp.dst;
+            c2.normal = tangent;
+            c2.weight = 1.0f;
+            constraints.push_back(c2);
         }
     }
 

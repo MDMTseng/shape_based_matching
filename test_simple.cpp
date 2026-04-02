@@ -205,12 +205,6 @@ int main() {
     }
     printf("  Edge-only sample points: %d\n", (int)sample_pts_edge.size());
 
-    // Quality evaluation (user-facing API)
-    auto quality = loaded.evaluateQuality();
-    printf("\n  Quality: balance=%d  strength=%d  score=%d  — %s\n",
-           quality.balance, quality.strength, quality.score, quality.diagnosis.c_str());
-    printf("    cross=%.0f  sin=%.2f\n", quality.best_cross, quality.best_cross_sin);
-
     // Sensitivity analysis
     auto sens = loaded.analyzeSensitivity();
     printf("  Sensitivity: worst_ang=%.2f deg/px  worst_pos=%.2f px/px  fragile=%d — %s\n",

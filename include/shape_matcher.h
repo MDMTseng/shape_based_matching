@@ -92,27 +92,6 @@ struct FeatureSet {
     ///   70-89:  Good — reliable for most conditions
     ///   50-69:  Marginal — may fail under large perturbation or blur
     ///   0-49:   Poor — near-degenerate geometry, unreliable results
-    struct QualityReport {
-        int balance;                ///< 0-100: angular diversity of constraint directions.
-                                    ///< From max cross product of normal pairs: sin(angle).
-                                    ///< 100 = perpendicular edges, 0 = all parallel.
-        int strength;               ///< 0-100: gradient strength of the weakest useful pair.
-                                    ///< From cross product magnitude: |n1|×|n2|×sin(angle).
-                                    ///< 100 = strong edges in multiple directions.
-        int score;                  ///< Combined: balance × strength / 100
-        float best_cross;           ///< Best cross product magnitude (unnormalized)
-        float best_cross_sin;       ///< sin(angle) of the best pair (0-1)
-        int num_edge, num_corner;
-        float corner_spread;        ///< 0-1: how spread out corners are across template.
-                                    ///< 1.0 = corners cover full template extent.
-                                    ///< 0 = all corners clustered together or no corners.
-                                    ///< Clustered corners are noise-sensitive.
-        std::string diagnosis;
-    };
-
-    /// Evaluate refinement quality of current refine_points.
-    QualityReport evaluateQuality() const;
-
     /// Per-feature sensitivity analysis.
     /// Perturbs each sample point's match by ±1px in X and Y,
     /// measures how much the solved pose changes.

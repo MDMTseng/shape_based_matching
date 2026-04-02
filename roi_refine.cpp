@@ -419,10 +419,9 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
     return pose;
 }
 
-// -----------------------------------------------------------------------
-// Constraint quality validation
-// -----------------------------------------------------------------------
-ConstraintQuality validateConstraints(
+// (validateConstraints removed — replaced by FeatureSet::analyzeSensitivity)
+#if 0
+ConstraintQuality validateConstraints_OLD(
     const std::vector<SamplePoint>& sample_points,
     const cv::Mat& templ_img,
     const ROIConfig& config) {
@@ -581,5 +580,6 @@ ConstraintQuality validateConstraints(
 
     return q;
 }
+#endif
 
 } // namespace roi_refine

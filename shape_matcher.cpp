@@ -286,11 +286,10 @@ FeatureSet extractFeatures(const cv::Mat& templ_gray,
     return fs;
 }
 
-// ============================================================
-// FeatureSet quality evaluation
-// ============================================================
+// (evaluateQuality removed — replaced by analyzeSensitivity)
 
-FeatureSet::QualityReport FeatureSet::evaluateQuality() const {
+#if 0  // OLD evaluateQuality
+FeatureSet::QualityReport FeatureSet::evaluateQuality_OLD() const {
     QualityReport r;
     r.balance = 0;
     r.strength = 0;
@@ -454,6 +453,7 @@ FeatureSet::QualityReport FeatureSet::evaluateQuality() const {
 
     return r;
 }
+#endif
 
 // ============================================================
 // Sensitivity analysis

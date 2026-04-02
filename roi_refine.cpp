@@ -230,7 +230,7 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
     cv::Vec3f pose = initial_pose;
 
     // Iterate: match → solve → update pose → re-match
-    for (int iteration = 0; iteration < 5; ++iteration) {
+    for (int iteration = 0; iteration < config.max_iters; ++iteration) {
 
     float cx = pose[0], cy = pose[1];
     float angle_deg = pose[2];

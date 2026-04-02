@@ -105,11 +105,13 @@ int main() {
         positions.push_back(cv::Point2f(rp.px, rp.py));
         corner_scores.push_back(rp.cornerness);
     }
-    auto sample_pts = roi_refine::selectCriticalPoints(
+    auto sample_pts_15 = roi_refine::selectCriticalPoints(
         positions, corner_scores, 15, loaded.templ_width, loaded.templ_height);
+    auto sample_pts_8 = roi_refine::selectCriticalPoints(
+        positions, corner_scores, 8, loaded.templ_width, loaded.templ_height);
 
-    printf("%-22s  %-22s  %-22s\n", "Init perturbation", "ICP (dense)", "ROI (5 iter)");
-    printf("%-22s  %-22s  %-22s\n", "-----------------", "----------", "-----------");
+    printf("%-22s  %-22s  %-22s  %-22s\n", "Init perturbation", "ICP (dense)", "ROI 15pt×5", "ROI 8pt×3");
+    printf("%-22s  %-22s  %-22s  %-22s\n", "-----------------", "----------", "----------", "---------");
 
     struct PoseError { float dx, dy, da; const char* name; };
     PoseError errors[] = {
@@ -154,7 +156,7 @@ int main() {
             printf("@%+5.1f %4.1fpx %4.1fms  ", ae, pd, icp_ms);
         }
 
-        // ROI (with timing)
+        // ROI 15pt×5iter
         {
             auto t0 = std::chrono::high_resolution_clock::now();
             roi_refine::ROIConfig rcfg;
@@ -163,7 +165,26 @@ int main() {
 
             cv::Vec3f ip(init_x, init_y, init_a);
             auto ref = roi_refine::refineROI(
-                loaded.templ_image, scene1, sample_pts, ip, rcfg);
+                loaded.templ_image, scene1, sample_pts_15, ip, rcfg);
+
+            double roi_ms = std::chrono::duration<double,std::milli>(
+                std::chrono::high_resolution_clock::now()-t0).count();
+            float ae = ref[2] - 25; if(ae>180)ae-=360; if(ae<-180)ae+=360;
+            float pd = std::sqrt((ref[0]-160)*(ref[0]-160)+(ref[1]-120)*(ref[1]-120));
+            printf("@%+5.1f %4.1fpx %4.1fms  ", ae, pd, roi_ms);
+        }
+
+        // ROI 8pt×3iter
+        {
+            auto t0 = std::chrono::high_resolution_clock::now();
+            roi_refine::ROIConfig rcfg;
+            rcfg.roi_half = 15;
+            rcfg.search_half = 20;
+            rcfg.max_iters = 3;
+
+            cv::Vec3f ip(init_x, init_y, init_a);
+            auto ref = roi_refine::refineROI(
+                loaded.templ_image, scene1, sample_pts_8, ip, rcfg);
 
             double roi_ms = std::chrono::duration<double,std::milli>(
                 std::chrono::high_resolution_clock::now()-t0).count();

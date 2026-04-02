@@ -30,6 +30,7 @@ struct Constraint {
 /// Configuration for ROI refinement.
 struct ROIConfig {
     int max_points = 20;          ///< Max sample points to use
+    int max_iters = 5;            ///< Number of match-solve iterations
     int roi_half = 15;            ///< Half-size of ROI patch (pixels)
     int search_half = 20;         ///< Half-size of search region around expected position
     float corner_eigen_ratio = 1.5f;  ///< PCA eigenvalue ratio threshold:

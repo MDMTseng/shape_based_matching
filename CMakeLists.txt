@@ -58,3 +58,7 @@ target_link_libraries(bench_profile ${OpenCV_LIBS})
 # Visual matching test with image output
 add_executable(test_visual line2Dup.cpp icp_refine.cpp test_visual.cpp)
 target_link_libraries(test_visual ${OpenCV_LIBS})
+
+# ICP accuracy sweep
+add_executable(test_icp_accuracy line2Dup.cpp icp_refine.cpp test_icp_accuracy.cpp)
+target_link_libraries(test_icp_accuracy ${OpenCV_LIBS})

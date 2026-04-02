@@ -118,19 +118,12 @@ int main() {
         cfg.max_dist = 10.0f;
         cfg.point_to_point_weight = 0.1f;
 
-        // Multi-start ICP with normal compatibility filtering.
-        // No need for divergence rejection - normal check prevents
-        // wrong correspondences that caused ICP to make things worse.
-        icp_refine::Pose2D refined;
-        refined.fitness = -1;
-        for (float angle_offset : {0.0f, angle_step, angle_step*2, angle_step*3}) {
-            float try_angle = coarse_angle + angle_offset;
-            icp_refine::Pose2D init_pose(mcx, mcy, try_angle);
-            auto result = icp_refine::refineWithNormals(
-                model_edges, scene_dx, scene_dy, init_pose, TW, 20, cfg);
-            if (result.fitness > refined.fitness)
-                refined = result;
-        }
+        // Single-start ICP with normal compatibility filtering.
+        // The normal check prevents wrong convergence, so multi-start
+        // is no longer needed for correctness.
+        icp_refine::Pose2D init_pose(mcx, mcy, coarse_angle);
+        auto refined = icp_refine::refineWithNormals(
+            model_edges, scene_dx, scene_dy, init_pose, TW, 20, cfg);
 
         // Compute angular errors (handle wraparound)
         float coarse_err = coarse_angle - gt_angle;

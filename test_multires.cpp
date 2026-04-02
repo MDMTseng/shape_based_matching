@@ -161,40 +161,48 @@ int main() {
             m.y = (int)(m.y / scale);
         }
 
-        // Step 4: ICP at full resolution
-        t0 = Clock::now();
-        Mat scene_smooth, scene_dx, scene_dy;
-        GaussianBlur(scene, scene_smooth, Size(7, 7), 0);
-        Sobel(scene_smooth, scene_dx, CV_16S, 1, 0, 3);
-        Sobel(scene_smooth, scene_dy, CV_16S, 0, 1, 3);
-        double t_sobel = ms_since(t0);
-
+        // Step 4: ICP at full resolution using LOCAL ROI Sobel
+        // No full-scene Sobel — compute Sobel only in patches around each match
         t0 = Clock::now();
         icp_refine::ICPConfig icp_cfg;
         icp_cfg.max_iterations = 30;
-        icp_cfg.max_dist = 15.0f;  // larger search for scaled positions
+        icp_cfg.max_dist = 15.0f;
 
         int refine_n = std::min((int)nms.size(), 50);
         for (int i = 0; i < refine_n; ++i) {
             auto& m = nms[i];
             auto& ti = det.getTemplates(m.class_id, m.template_id);
-            // Scale template center offset back to full resolution
             float icx = m.x + (TW/2.0f - ti[0].tl_x / scale);
             float icy = m.y + (TW/2.0f - ti[0].tl_y / scale);
             float coarse_angle = m.template_id * angle_step;
 
-            icp_refine::Pose2D init_pose(icx, icy, coarse_angle);
+            // Local ROI Sobel: crop patch, blur+sobel only that patch
+            int margin = TW/2 + 30;
+            int rx = std::max(0, (int)(icx - margin));
+            int ry = std::max(0, (int)(icy - margin));
+            int rw = std::min(W - rx, 2 * margin);
+            int rh = std::min(H - ry, 2 * margin);
+            if (rw <= 10 || rh <= 10) continue;
+
+            Mat roi = scene(Rect(rx, ry, rw, rh));
+            Mat roi_smooth, roi_dx, roi_dy;
+            GaussianBlur(roi, roi_smooth, Size(7, 7), 0);
+            Sobel(roi_smooth, roi_dx, CV_16S, 1, 0, 3);
+            Sobel(roi_smooth, roi_dy, CV_16S, 0, 1, 3);
+
+            // ICP in local coords, then shift back
+            icp_refine::Pose2D init_pose(icx - rx, icy - ry, coarse_angle);
             auto refined = icp_refine::refineWithNormals(
-                model_edges, scene_dx, scene_dy, init_pose, TW, 30, icp_cfg);
+                model_edges, roi_dx, roi_dy, init_pose, TW, 20, icp_cfg);
             m.refined_angle = refined.angle;
-            m.x = (int)(refined.x + 0.5f);
-            m.y = (int)(refined.y + 0.5f);
+            m.x = (int)(refined.x + rx + 0.5f);
+            m.y = (int)(refined.y + ry + 0.5f);
         }
         double t_icp = ms_since(t0);
         double t_total_ms = ms_since(t_total);
 
-        fprintf(stderr, "%-12s: resize=%.1f match=%.1f sobel=%.1f icp=%.1f total=%.1fms  (raw=%d nms=%d)",
-                cfg.name, t_resize, t_match, t_sobel, t_icp, t_total_ms,
+        fprintf(stderr, "%-12s: resize=%.1f match=%.1f icp=%.1f total=%.1fms  (raw=%d nms=%d)",
+                cfg.name, t_resize, t_match, t_icp, t_total_ms,
                 (int)matches.size(), (int)nms.size());
         if (scale == 1.0f)
             fprintf(stderr, "  [full-only: %.1fms]", time_full);

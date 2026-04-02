@@ -292,10 +292,13 @@ FeatureSet extractFeatures(const cv::Mat& templ_gray,
 
 FeatureSet::QualityReport FeatureSet::evaluateQuality() const {
     QualityReport r;
+    r.balance = 0;
+    r.strength = 0;
     r.score = 0;
     r.condition_number = 999;
     r.angle_coverage_deg = 0;
-    r.mean_edge_strength = 0;
+    r.min_dir_strength = 0;
+    r.max_dir_strength = 0;
     r.num_directions = 0;
     r.num_edge = 0;
     r.num_corner = 0;
@@ -413,8 +416,6 @@ FeatureSet::QualityReport FeatureSet::evaluateQuality() const {
         }
     }
 
-    r.mean_edge_strength = total_strength / selected.size();
-
     // Condition number
     int nrows = (int)J_rows.size() / 3;
     if (nrows >= 3) {
@@ -434,40 +435,63 @@ FeatureSet::QualityReport FeatureSet::evaluateQuality() const {
         r.angle_coverage_deg = 180.0f - max_gap;
     }
 
-    // Direction count
-    bool bins[12]={};
-    for(float a:normal_angles){int b=(int)(a/15);if(b>=12)b=11;bins[b]=true;}
-    for(int i=0;i<12;i++) if(bins[i]) r.num_directions++;
+    // Bin into 6 directional buckets (30 deg each, 0-180)
+    // Track BEST (max) per-point gradient strength per bucket
+    float dir_str[6] = {};
+    int dir_cnt[6] = {};
+    for (size_t i = 0; i < selected.size() && i < normal_angles.size(); ++i) {
+        int bin = std::min(5, (int)(normal_angles[i] / 30.0f));
+        int si = selected[i];
+        auto& rp = refine_points[si];
+        int tx=(int)(rp.px+tcx+0.5f), ty=(int)(rp.py+tcy+0.5f);
+        int h=roi_half;
+        if(tx-h<0||tx+h>=templ_image.cols||ty-h<0||ty+h>=templ_image.rows)
+            h=std::min({tx,ty,templ_image.cols-1-tx,templ_image.rows-1-ty});
+        if(h<5) continue;
+        cv::Mat roi2=templ_image(cv::Rect(tx-h,ty-h,2*h,2*h));
+        cv::Mat dx2,dy2,mag2;
+        cv::Sobel(roi2,dx2,CV_32F,1,0,3);
+        cv::Sobel(roi2,dy2,CV_32F,0,1,3);
+        cv::magnitude(dx2,dy2,mag2);
+        float pt_str = *std::max_element(mag2.begin<float>(),mag2.end<float>());
+        dir_str[bin] = std::max(dir_str[bin], pt_str);  // best point per direction
+        dir_cnt[bin]++;
+    }
+    r.num_directions = 0;
+    r.min_dir_strength = 1e9f;
+    r.max_dir_strength = 0;
+    for (int i = 0; i < 6; ++i) {
+        if (dir_cnt[i] > 0) {
+            r.num_directions++;
+            r.min_dir_strength = std::min(r.min_dir_strength, dir_str[i]);
+            r.max_dir_strength = std::max(r.max_dir_strength, dir_str[i]);
+        }
+    }
+    if (r.num_directions < 2) r.min_dir_strength = 0;
 
-    // Compute composite score (0-100)
-    // Condition number and coverage are GATES — if either is bad, score collapses.
-    // Edge strength and point count are quality multipliers.
-    // Gate: condition and coverage must both be acceptable.
-    // Based on empirical results:
-    //   cond < 40: works (<1 deg accuracy)   → gate = 1.0
-    //   cond 40-80: marginal                 → gate decays
-    //   cond > 80: degenerate                → gate = 0
-    float gate_cond = std::max(0.0f, std::min(1.0f, (80.0f - r.condition_number) / 40.0f));
-    // coverage > 50: good, < 30: degenerate
-    float gate_coverage = std::max(0.0f, std::min(1.0f, (r.angle_coverage_deg - 30.0f) / 20.0f));
-    float gate = std::min(gate_cond, gate_coverage);  // weakest link
+    // === BALANCE (0-100) ===
+    // How evenly are constraints spread? Uses min/max strength ratio + coverage.
+    float bal_ratio = (r.max_dir_strength > 1e-6f) ?
+        r.min_dir_strength / r.max_dir_strength : 0;
+    float bal_cov = std::max(0.0f, std::min(1.0f, r.angle_coverage_deg / 120.0f));
+    r.balance = (int)(100.0f * std::min(bal_ratio, bal_cov));
+    r.balance = std::max(0, std::min(100, r.balance));
 
-    float quality_strength = std::max(0.0f, std::min(1.0f, r.mean_edge_strength / 500.0f));
-    float quality_count = std::max(0.0f, std::min(1.0f, (float)selected.size() / 10.0f));
-    float quality = quality_strength * 0.6f + quality_count * 0.4f;
+    // === STRENGTH (0-100) ===
+    // Weakest direction's total gradient magnitude.
+    // ~800 per point is strong for 8-bit images.
+    r.strength = (int)(100.0f * std::max(0.0f, std::min(1.0f, r.min_dir_strength / 800.0f)));
+    r.strength = std::max(0, std::min(100, r.strength));
 
-    r.score = (int)(100.0f * gate * quality);
-    r.score = std::max(0, std::min(100, r.score));
+    // === COMBINED ===
+    r.score = std::min(r.balance, r.strength);
 
     // Diagnosis
-    if (r.score >= 90)
-        r.diagnosis = "Excellent";
-    else if (r.score >= 70)
-        r.diagnosis = "Good";
-    else if (r.score >= 50)
-        r.diagnosis = "Marginal — may fail under blur or large perturbation";
-    else
-        r.diagnosis = "Poor — near-degenerate geometry, add more diverse edges";
+    std::string bal_str = (r.balance >= 70) ? "balanced" :
+                          (r.balance >= 40) ? "imbalanced" : "near-parallel";
+    std::string str_str = (r.strength >= 70) ? "strong" :
+                          (r.strength >= 40) ? "moderate" : "weak";
+    r.diagnosis = bal_str + " / " + str_str;
 
     return r;
 }

@@ -93,13 +93,20 @@ struct FeatureSet {
     ///   50-69:  Marginal — may fail under large perturbation or blur
     ///   0-49:   Poor — near-degenerate geometry, unreliable results
     struct QualityReport {
-        int score;                  ///< Overall 0-100 score
-        float condition_number;     ///< Constraint matrix condition (lower = better)
-        float angle_coverage_deg;   ///< Edge normal direction spread (higher = better)
-        float mean_edge_strength;   ///< Average gradient magnitude at sample points
-        int num_directions;         ///< Distinct edge directions (binned 15 deg)
-        int num_edge, num_corner;   ///< Point classification counts
-        std::string diagnosis;      ///< Human-readable explanation
+        int balance;                ///< 0-100: how evenly spread are constraint directions?
+                                    ///< 100 = uniform coverage, 0 = all same direction.
+                                    ///< Based on SVD condition number + angular distribution.
+        int strength;               ///< 0-100: weakest direction's constraint strength.
+                                    ///< 100 = strong edges in all directions.
+                                    ///< Low = one direction has weak/few edges (bottleneck).
+        int score;                  ///< Combined: min(balance, strength)
+        float condition_number;     ///< Raw SVD condition number (lower = better)
+        float angle_coverage_deg;   ///< Normal direction spread in degrees
+        float min_dir_strength;     ///< Weakest direction's total gradient magnitude
+        float max_dir_strength;     ///< Strongest direction's total gradient magnitude
+        int num_directions;         ///< Distinct edge directions (binned 30 deg)
+        int num_edge, num_corner;
+        std::string diagnosis;
     };
 
     /// Evaluate refinement quality of current refine_points.

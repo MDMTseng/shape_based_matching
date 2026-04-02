@@ -27,7 +27,7 @@ static void draw_L(Mat& img, int cx, int cy, double angle, int color) {
 int main() {
     // 1. Create template — try different shapes
     Mat templ(80, 80, CV_8U, Scalar(0));
-#define TEMPLATE_SHAPE 3  // 0=L, 1=V, 2=parallel lines, 3=long pole
+#define TEMPLATE_SHAPE 1
 #if TEMPLATE_SHAPE == 0
     draw_L(templ, 40, 40, 0, 200);
     printf("Template: L-shape\n");
@@ -186,10 +186,11 @@ int main() {
 
     // Quality evaluation (user-facing API)
     auto quality = loaded.evaluateQuality();
-    printf("\n  Quality Score: %d/100 — %s\n", quality.score, quality.diagnosis.c_str());
-    printf("    cond=%.0f  coverage=%.0f deg  dirs=%d  strength=%.0f  %de+%dc\n\n",
+    printf("\n  Quality: balance=%d  strength=%d  score=%d  — %s\n",
+           quality.balance, quality.strength, quality.score, quality.diagnosis.c_str());
+    printf("    cond=%.0f  coverage=%.0f deg  dirs=%d  min/max_str=%.0f/%.0f  %de+%dc\n\n",
            quality.condition_number, quality.angle_coverage_deg,
-           quality.num_directions, quality.mean_edge_strength,
+           quality.num_directions, quality.min_dir_strength, quality.max_dir_strength,
            quality.num_edge, quality.num_corner);
 
     printf("%-22s  %-22s  %-22s  %-22s  %-22s\n",

@@ -367,8 +367,8 @@ Pose2D refineLocal(const std::vector<cv::Point2f>& templ_edges,
     if (rw <= 10 || rh <= 10) return initial_pose;
 
     cv::Rect roi(rx, ry, rw, rh);
-    cv::Mat local_dx = scene_dx(roi).clone();  // contiguous copy for cache locality
-    cv::Mat local_dy = scene_dy(roi).clone();
+    cv::Mat local_dx = scene_dx(roi);
+    cv::Mat local_dy = scene_dy(roi);
 
     // Build local edge scene
     EdgeScene local_scene;

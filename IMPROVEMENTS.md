@@ -219,6 +219,83 @@ ICP refine at full resolution
 - `line2Dup.h` — API additions (calibrateAngleBias, addRotatedTemplates, getClassTemplates)
 - `icp_refine.h` / `icp_refine.cpp` — edge-based ICP pose refinement
 
+---
+
+## Branch: `roi-refine` — ROI-Based Pose Refinement
+
+Alternative to ICP: uses template matching on small ROI patches with PCA-based
+constraint classification.
+
+### Architecture
+
+```
+Coarse match (LineMOD)
+    |
+    v
+Select ~8-15 critical points (corners first, then spaced edges)
+    |
+    v
+For each iteration (3-5x):
+    |  Rotate ROI patches from template (cached after first warp)
+    |  matchTemplate per point (subpixel parabolic interpolation)
+    |  PCA on each ROI gradient -> edge (1D) or corner (2D) constraint
+    |  Single rigid body solve
+    |  Update pose, re-match only if angle changed > 2 deg
+    v
+Refined pose
+```
+
+### Key Design Decisions
+
+- **matchTemplate per ROI** instead of closest-edge lookup — searches a 40x40 pixel
+  window per point, finding correct correspondences even when initial pose is far off
+- **PCA edge/corner classification** — eigenvalue ratio < 1.5 means corner (2D constraint),
+  otherwise edge (1D point-to-plane). Corners add tangent direction as second constraint.
+- **Cached warpAffine** — rotate all ROI patches once, reuse across iterations.
+  Only re-warp if angle drifts > 5 deg from cached angle.
+- **Adaptive re-match** — re-run matchTemplate only if pose changed > 2 deg since last match.
+  Small corrections reuse cached correspondences (just rigid solve).
+- **Outlier rejection** — remove correspondences with distance > 2x median before solve.
+
+### ICP vs ROI Comparison
+
+| | ICP (dense) | ROI 8pt x 3 | ROI 15pt x 5 |
+|---|---|---|---|
+| **Speed** | 1.3ms | **0.7ms** | 2-5ms |
+| **Accuracy** | **<0.2 deg** | <1 deg | <0.5 deg |
+| **Robustness** | +-8px/+-8deg | **+-20px/+-20deg** | **+-30px/+-30deg** |
+
+### Robustness Under Degradation
+
+| Condition | ICP | ROI 8pt x 3 |
+|---|---|---|
+| Noise sigma=10 | @-0.2 deg 0.1px | @-0.1 deg 0.1px |
+| Noise sigma=30 | @-0.2 deg 0.1px | @-0.1 deg 0.2px |
+| Noise sigma=50 | @+0.1 deg 0.2px | @+0.1 deg 0.2px |
+| Blur k=5 | @-0.1 deg 0.2px | @+0.1 deg 0.1px |
+| Blur k=11 | @+0.0 deg 0.1px | @+0.2 deg 0.3px |
+| Blur k=21 | **@-0.0 deg 0.1px** | @+0.9 deg 1.1px |
+| +10px +10deg | @+2.8 deg FAIL | **@+0.3 deg 0.1px** |
+| +20px +20deg | @+8.5 deg FAIL | **@+1.0 deg 1.4px** |
+| +10px+10deg+noise+blur | @-0.2 deg 0.2px | @+0.6 deg 0.7px |
+
+### When to Use Which
+
+| Scenario | Recommended |
+|----------|-------------|
+| Good coarse init, any noise/blur | **ICP** (1.3ms, <0.2 deg) |
+| Bad coarse init, moderate conditions | **ROI 8pt x 3** (0.7ms, <1 deg) |
+| Bad coarse init, need sub-degree | **ROI 15pt x 5** (2-5ms, <0.5 deg) |
+| Heavy blur (k > 15) | **ICP** (edge-based, blur-invariant) |
+| Real-time tracking (frame-to-frame) | **ROI 8pt x 3** (0.6ms with cache) |
+
+### Files
+- `roi_refine.h` / `roi_refine.cpp` — ROI refinement implementation
+- `shape_matcher.h` — RefineMode::ROI added
+- `shape_matcher.cpp` — ROI integration, template image serialization
+
+---
+
 ### Tests & Benchmarks
 - `bench_avx2.cpp` — speed benchmark (VGA/FHD/30MP)
 - `bench_profile.cpp` — per-stage timing under clean/noisy conditions
@@ -231,3 +308,5 @@ ICP refine at full resolution
 - `test_bias_final.cpp` — warpAffine vs feature rotation bias comparison
 - `test_rotate_bias.cpp` — feature rotation bias vs step size
 - `test_multires.cpp` — multi-resolution matching benchmark
+- `test_simple.cpp` — minimal API usage + ICP vs ROI robustness comparison
+- `test_api.cpp` — multi-model matching with visual output

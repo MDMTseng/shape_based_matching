@@ -98,11 +98,14 @@ struct FeatureSet {
     /// Returns: per-point sensitivity (deg/px and px/px).
     struct FeatureSensitivity {
         cv::Point2f pos;           ///< Feature position (relative to center)
-        float angle_sens_x;       ///< Angle change (deg) per 1px X perturbation
-        float angle_sens_y;       ///< Angle change (deg) per 1px Y perturbation
-        float pos_sens_x;         ///< Position change (px) per 1px X perturbation
-        float pos_sens_y;         ///< Position change (px) per 1px Y perturbation
-        float max_sensitivity;    ///< max of all four — the weakest link
+        float angle_sens_x;       ///< Angle change (deg) per 1px X perturbation (diluted)
+        float angle_sens_y;       ///< Angle change (deg) per 1px Y perturbation (diluted)
+        float pos_sens_x;         ///< Position change (px) per 1px X perturbation (diluted)
+        float pos_sens_y;         ///< Position change (px) per 1px Y perturbation (diluted)
+        float leverage;           ///< Undiluted: how much damage this feature alone can do.
+                                  ///< Solved with only this feature removed, measures
+                                  ///< how much the pose changes. High = critical feature.
+        float max_sensitivity;    ///< max of diluted sensitivities
     };
 
     struct SensitivityReport {

@@ -595,6 +595,35 @@ FeatureSet::SensitivityReport FeatureSet::analyzeSensitivity() const {
         fs.pos_sens_y = std::sqrt((pose_dy[1]-base_pose[1])*(pose_dy[1]-base_pose[1]) +
                                    (pose_dy[2]-base_pose[2])*(pose_dy[2]-base_pose[2]));
 
+        // Leverage: solve WITHOUT this feature, then with it perturbed.
+        // Shows how much damage this single feature can cause undiluted.
+        {
+            auto without = baseline;
+            without.erase(without.begin() + fi);
+            cv::Vec3f pose_without = solve(without);
+
+            // Now add the perturbed feature back
+            auto with_bad_x = without;
+            Constraint bad = baseline[fi];
+            bad.dst.x += 1.0f;
+            with_bad_x.push_back(bad);
+            cv::Vec3f pose_bad_x = solve(with_bad_x);
+
+            auto with_bad_y = without;
+            bad = baseline[fi];
+            bad.dst.y += 1.0f;
+            with_bad_y.push_back(bad);
+            cv::Vec3f pose_bad_y = solve(with_bad_y);
+
+            float lev_x = std::abs(pose_bad_x[0] - pose_without[0]) +
+                          std::sqrt((pose_bad_x[1]-pose_without[1])*(pose_bad_x[1]-pose_without[1]) +
+                                    (pose_bad_x[2]-pose_without[2])*(pose_bad_x[2]-pose_without[2]));
+            float lev_y = std::abs(pose_bad_y[0] - pose_without[0]) +
+                          std::sqrt((pose_bad_y[1]-pose_without[1])*(pose_bad_y[1]-pose_without[1]) +
+                                    (pose_bad_y[2]-pose_without[2])*(pose_bad_y[2]-pose_without[2]));
+            fs.leverage = std::max(lev_x, lev_y);
+        }
+
         fs.max_sensitivity = std::max({fs.angle_sens_x, fs.angle_sens_y,
                                         fs.pos_sens_x, fs.pos_sens_y});
 

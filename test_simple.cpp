@@ -209,12 +209,12 @@ int main() {
     auto sens = loaded.analyzeSensitivity();
     printf("  Sensitivity: worst_ang=%.2f deg/px  worst_pos=%.2f px/px  fragile=%d — %s\n",
            sens.worst_angle_sens, sens.worst_pos_sens, sens.num_fragile, sens.diagnosis.c_str());
-    printf("    Per-feature (pos → ang_x ang_y pos_x pos_y):\n");
+    printf("    Per-feature (pos -> ang_x ang_y | leverage):\n");
     for (auto& f : sens.features)
-        printf("      (%+5.1f,%+5.1f) → %.2f %.2f %.2f %.2f%s\n",
+        printf("      (%+5.1f,%+5.1f) → %.2f %.2f | lev=%.2f%s\n",
                f.pos.x, f.pos.y, f.angle_sens_x, f.angle_sens_y,
-               f.pos_sens_x, f.pos_sens_y,
-               f.max_sensitivity > 1.0f ? " !" : "");
+               f.leverage,
+               f.leverage > 2.0f ? " !" : "");
     printf("\n");
 
     printf("%-22s  %-22s  %-22s  %-22s  %-22s\n",

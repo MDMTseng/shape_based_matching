@@ -103,13 +103,42 @@ struct FeatureSet {
         float best_cross;           ///< Best cross product magnitude (unnormalized)
         float best_cross_sin;       ///< sin(angle) of the best pair (0-1)
         int num_edge, num_corner;
+        float corner_spread;        ///< 0-1: how spread out corners are across template.
+                                    ///< 1.0 = corners cover full template extent.
+                                    ///< 0 = all corners clustered together or no corners.
+                                    ///< Clustered corners are noise-sensitive.
         std::string diagnosis;
     };
 
     /// Evaluate refinement quality of current refine_points.
-    /// Call after extractFeatures() to check if the template is suitable
-    /// for sub-pixel refinement, before deploying to production.
     QualityReport evaluateQuality() const;
+
+    /// Per-feature sensitivity analysis.
+    /// Perturbs each sample point's match by ±1px in X and Y,
+    /// measures how much the solved pose changes.
+    /// Returns: per-point sensitivity (deg/px and px/px).
+    struct FeatureSensitivity {
+        cv::Point2f pos;           ///< Feature position (relative to center)
+        float angle_sens_x;       ///< Angle change (deg) per 1px X perturbation
+        float angle_sens_y;       ///< Angle change (deg) per 1px Y perturbation
+        float pos_sens_x;         ///< Position change (px) per 1px X perturbation
+        float pos_sens_y;         ///< Position change (px) per 1px Y perturbation
+        float max_sensitivity;    ///< max of all four — the weakest link
+    };
+
+    struct SensitivityReport {
+        std::vector<FeatureSensitivity> features;
+        float worst_angle_sens;   ///< Worst single-feature angle sensitivity
+        float worst_pos_sens;     ///< Worst single-feature position sensitivity
+        float mean_angle_sens;
+        float mean_pos_sens;
+        int num_fragile;          ///< Features with sensitivity > 1.0 deg/px
+        std::string diagnosis;
+    };
+
+    /// Run sensitivity analysis on auto-selected sample points.
+    /// Simulates the ROI rigid solve with perturbed correspondences.
+    SensitivityReport analyzeSensitivity() const;
 };
 
 /// Extract features from a template image.

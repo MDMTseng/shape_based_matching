@@ -209,10 +209,19 @@ int main() {
     auto quality = loaded.evaluateQuality();
     printf("\n  Quality: balance=%d  strength=%d  score=%d  — %s\n",
            quality.balance, quality.strength, quality.score, quality.diagnosis.c_str());
-    printf("    cross=%.0f  sin=%.2f\n\n",
-           quality.best_cross, quality.best_cross_sin);
-           
-           
+    printf("    cross=%.0f  sin=%.2f\n", quality.best_cross, quality.best_cross_sin);
+
+    // Sensitivity analysis
+    auto sens = loaded.analyzeSensitivity();
+    printf("  Sensitivity: worst_ang=%.2f deg/px  worst_pos=%.2f px/px  fragile=%d — %s\n",
+           sens.worst_angle_sens, sens.worst_pos_sens, sens.num_fragile, sens.diagnosis.c_str());
+    printf("    Per-feature (pos → ang_x ang_y pos_x pos_y):\n");
+    for (auto& f : sens.features)
+        printf("      (%+5.1f,%+5.1f) → %.2f %.2f %.2f %.2f%s\n",
+               f.pos.x, f.pos.y, f.angle_sens_x, f.angle_sens_y,
+               f.pos_sens_x, f.pos_sens_y,
+               f.max_sensitivity > 1.0f ? " !" : "");
+    printf("\n");
 
     printf("%-22s  %-22s  %-22s  %-22s  %-22s\n",
            "Init perturbation", "ICP (dense)", "ROI 15pt×5", "ROI 8pt×3", "ROI 8edge-only");

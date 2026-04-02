@@ -456,6 +456,174 @@ FeatureSet::QualityReport FeatureSet::evaluateQuality() const {
 }
 
 // ============================================================
+// Sensitivity analysis
+// ============================================================
+
+FeatureSet::SensitivityReport FeatureSet::analyzeSensitivity() const {
+    SensitivityReport sr;
+    sr.worst_angle_sens = 0;
+    sr.worst_pos_sens = 0;
+    sr.mean_angle_sens = 0;
+    sr.mean_pos_sens = 0;
+    sr.num_fragile = 0;
+
+    if (refine_points.empty() || templ_image.empty()) {
+        sr.diagnosis = "No data";
+        return sr;
+    }
+
+    float tcx = templ_width / 2.0f, tcy = templ_height / 2.0f;
+
+    // Select sample points (same as evaluateQuality)
+    std::vector<cv::Point2f> positions;
+    std::vector<float> cornerness;
+    for (auto& rp : refine_points) {
+        positions.push_back(cv::Point2f(rp.px, rp.py));
+        cornerness.push_back(rp.cornerness);
+    }
+
+    float min_dist = std::max(templ_width, templ_height) / 16.0f * 1.5f;
+    float min_dist_sq = min_dist * min_dist;
+    struct Cand { int idx; float corn; };
+    std::vector<Cand> cands(positions.size());
+    for (size_t i = 0; i < positions.size(); i++)
+        cands[i] = {(int)i, cornerness[i]};
+    std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b){ return a.corn > b.corn; });
+
+    std::vector<int> selected;
+    for (auto& c : cands) {
+        if ((int)selected.size() >= 15) break;
+        auto& p = positions[c.idx];
+        bool too_close = false;
+        for (int si : selected) {
+            float dx = p.x - positions[si].x, dy = p.y - positions[si].y;
+            if (dx*dx + dy*dy < min_dist_sq) { too_close = true; break; }
+        }
+        if (too_close) continue;
+        if (std::abs(p.x) > templ_width/2.0f - 5 || std::abs(p.y) > templ_height/2.0f - 5)
+            continue;
+        selected.push_back(c.idx);
+    }
+
+    if (selected.size() < 3) {
+        sr.diagnosis = "Too few points";
+        return sr;
+    }
+
+    int N = (int)selected.size();
+
+    // Build baseline constraints: src = feature pos, dst = same (perfect match)
+    // Normal = gradient direction at each point
+    struct Constraint {
+        cv::Point2f src, dst, normal;
+    };
+    std::vector<Constraint> baseline;
+    int roi_half = 15;
+
+    for (int si : selected) {
+        auto& rp = refine_points[si];
+        int tx=(int)(rp.px+tcx+0.5f), ty=(int)(rp.py+tcy+0.5f);
+        int h=roi_half;
+        if(tx-h<0||tx+h>=templ_image.cols||ty-h<0||ty+h>=templ_image.rows)
+            h=std::min({tx,ty,templ_image.cols-1-tx,templ_image.rows-1-ty});
+        if(h<5) continue;
+        cv::Mat roi2=templ_image(cv::Rect(tx-h,ty-h,2*h,2*h));
+        cv::Mat dx2,dy2,mag2;
+        cv::Sobel(roi2,dx2,CV_32F,1,0,3);
+        cv::Sobel(roi2,dy2,CV_32F,0,1,3);
+        cv::magnitude(dx2,dy2,mag2);
+        double max_mag; cv::Point max_loc;
+        cv::minMaxLoc(mag2, nullptr, &max_mag, nullptr, &max_loc);
+        float gx=dx2.at<float>(max_loc.y,max_loc.x);
+        float gy=dy2.at<float>(max_loc.y,max_loc.x);
+        float gm=std::sqrt(gx*gx+gy*gy);
+        cv::Point2f normal = (gm>1e-6f) ? cv::Point2f(gx/gm, gy/gm) : cv::Point2f(1,0);
+
+        Constraint c;
+        c.src = cv::Point2f(rp.px, rp.py);
+        c.dst = c.src;  // perfect match baseline
+        c.normal = normal;
+        baseline.push_back(c);
+    }
+
+    if (baseline.size() < 3) {
+        sr.diagnosis = "Too few valid points";
+        return sr;
+    }
+
+    // Solve function: given constraints, return (theta, tx, ty)
+    auto solve = [](const std::vector<Constraint>& cs) -> cv::Vec3f {
+        float ATA[3][3]={}, ATb[3]={};
+        for (auto& c : cs) {
+            float dx=c.src.x-c.dst.x, dy=c.src.y-c.dst.y;
+            float nx=c.normal.x, ny=c.normal.y;
+            float e = dx*nx + dy*ny;
+            float j0=-c.src.y*nx+c.src.x*ny, j1=nx, j2=ny;
+            ATA[0][0]+=j0*j0; ATA[0][1]+=j0*j1; ATA[0][2]+=j0*j2;
+            ATA[1][1]+=j1*j1; ATA[1][2]+=j1*j2;
+            ATA[2][2]+=j2*j2;
+            ATb[0]-=j0*e; ATb[1]-=j1*e; ATb[2]-=j2*e;
+        }
+        ATA[1][0]=ATA[0][1]; ATA[2][0]=ATA[0][2]; ATA[2][1]=ATA[1][2];
+        for(int i=0;i<3;i++) ATA[i][i]+=0.001f;
+        cv::Mat A(3,3,CV_32F,ATA), b(3,1,CV_32F,ATb), x;
+        cv::solve(A,b,x);
+        return cv::Vec3f(x.at<float>(0)*180/(float)CV_PI, x.at<float>(1), x.at<float>(2));
+    };
+
+    // Baseline pose (should be ~zero since dst == src)
+    cv::Vec3f base_pose = solve(baseline);
+
+    // Perturb each feature's dst by +1px in X and Y, measure pose change
+    for (size_t fi = 0; fi < baseline.size(); ++fi) {
+        FeatureSensitivity fs;
+        fs.pos = baseline[fi].src;
+
+        // Perturb X
+        auto perturbed = baseline;
+        perturbed[fi].dst.x += 1.0f;
+        cv::Vec3f pose_dx = solve(perturbed);
+        fs.angle_sens_x = std::abs(pose_dx[0] - base_pose[0]);
+        fs.pos_sens_x = std::sqrt((pose_dx[1]-base_pose[1])*(pose_dx[1]-base_pose[1]) +
+                                   (pose_dx[2]-base_pose[2])*(pose_dx[2]-base_pose[2]));
+
+        // Perturb Y
+        perturbed = baseline;
+        perturbed[fi].dst.y += 1.0f;
+        cv::Vec3f pose_dy = solve(perturbed);
+        fs.angle_sens_y = std::abs(pose_dy[0] - base_pose[0]);
+        fs.pos_sens_y = std::sqrt((pose_dy[1]-base_pose[1])*(pose_dy[1]-base_pose[1]) +
+                                   (pose_dy[2]-base_pose[2])*(pose_dy[2]-base_pose[2]));
+
+        fs.max_sensitivity = std::max({fs.angle_sens_x, fs.angle_sens_y,
+                                        fs.pos_sens_x, fs.pos_sens_y});
+
+        sr.features.push_back(fs);
+        sr.worst_angle_sens = std::max(sr.worst_angle_sens,
+                                        std::max(fs.angle_sens_x, fs.angle_sens_y));
+        sr.worst_pos_sens = std::max(sr.worst_pos_sens,
+                                      std::max(fs.pos_sens_x, fs.pos_sens_y));
+        sr.mean_angle_sens += (fs.angle_sens_x + fs.angle_sens_y) / 2;
+        sr.mean_pos_sens += (fs.pos_sens_x + fs.pos_sens_y) / 2;
+        if (std::max(fs.angle_sens_x, fs.angle_sens_y) > 1.0f)
+            sr.num_fragile++;
+    }
+
+    sr.mean_angle_sens /= sr.features.size();
+    sr.mean_pos_sens /= sr.features.size();
+
+    if (sr.worst_angle_sens < 0.5f)
+        sr.diagnosis = "Robust — all features stable";
+    else if (sr.worst_angle_sens < 1.0f)
+        sr.diagnosis = "Good — minor sensitivity in " + std::to_string(sr.num_fragile) + " features";
+    else
+        sr.diagnosis = "Fragile — " + std::to_string(sr.num_fragile) +
+                       " features cause >" + std::to_string((int)sr.worst_angle_sens) + " deg/px";
+
+    return sr;
+}
+
+// ============================================================
 // ShapeMatcher::Impl
 // ============================================================
 

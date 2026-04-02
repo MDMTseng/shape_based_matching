@@ -2,6 +2,7 @@
 // Draws match rectangles + scores on scenes under various conditions.
 
 #include "line2Dup.h"
+#include "icp_refine.h"
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -79,40 +80,7 @@ static Mat draw_matches(const Mat& scene_gray, const vector<line2Dup::Match>& ra
     // Spatial NMS to deduplicate overlapping detections
     auto matches = spatial_nms(raw_matches, (float)TW * 0.8f);
 
-    // Refine orientations: search raw_matches for angular neighbor scores,
-    // then parabolic interpolation for sub-step precision
-    int num_tmpl = det.numTemplates("L");
-    if (num_tmpl >= 3) {
-        // For each NMS match, find neighbor scores from raw matches
-        for (auto& m : matches) {
-            int tid = m.template_id;
-            int tid_prev = (tid - 1 + num_tmpl) % num_tmpl;
-            int tid_next = (tid + 1) % num_tmpl;
-            float s_center = m.similarity;
-            float s_prev = s_center * 0.9f;  // default if not found
-            float s_next = s_center * 0.9f;
-
-            for (auto& other : raw_matches) {
-                if (other.class_id != m.class_id) continue;
-                if (abs(other.x - m.x) > 16 || abs(other.y - m.y) > 16) continue;
-                if (other.template_id == tid_prev && other.similarity > s_prev)
-                    s_prev = other.similarity;
-                if (other.template_id == tid_next && other.similarity > s_next)
-                    s_next = other.similarity;
-            }
-
-            float a = (s_prev + s_next) / 2.0f - s_center;
-            float b = (s_next - s_prev) / 2.0f;
-            float offset = 0;
-            if (a < -0.001f) {
-                offset = -b / (2.0f * a);
-                offset = std::max(-0.5f, std::min(0.5f, offset));
-            }
-            m.refined_angle = (tid + offset) * (float)angle_step;
-            if (m.refined_angle < 0) m.refined_angle += 360.0f;
-            if (m.refined_angle >= 360.0f) m.refined_angle -= 360.0f;
-        }
-    }
+    // (ICP refinement done externally before calling this function)
 
     int draw_n = std::min((int)matches.size(), 50);
     double arrow_len = TW * 0.45;
@@ -168,6 +136,51 @@ static Mat draw_matches(const Mat& scene_gray, const vector<line2Dup::Match>& ra
     return vis;
 }
 
+// Draw pre-NMS'd matches directly (no additional NMS)
+static Mat draw_matches_direct(const Mat& scene_gray, const vector<line2Dup::Match>& matches,
+                               const line2Dup::Detector& det, int TW, double match_ms = -1,
+                               double angle_step = 2.0) {
+    Mat vis;
+    cvtColor(scene_gray, vis, cv::COLOR_GRAY2BGR);
+
+    int draw_n = std::min((int)matches.size(), 50);
+    double arrow_len = TW * 0.45;
+
+    for (int i = 0; i < draw_n; ++i) {
+        auto& m = matches[i];
+        Scalar color;
+        if (m.similarity >= 80) color = Scalar(0, 255, 0);
+        else if (m.similarity >= 60) color = Scalar(0, 255, 255);
+        else color = Scalar(0, 0, 255);
+
+        auto& tmpl = det.getTemplates(m.class_id, m.template_id);
+        int cx = m.x + tmpl[0].width / 2;
+        int cy = m.y + tmpl[0].height / 2;
+        Point center(cx, cy);
+
+        double angle_deg = (m.refined_angle >= 0) ? m.refined_angle
+                                                   : m.template_id * angle_step;
+        double angle_rad = angle_deg * CV_PI / 180.0;
+        Point arrow_tip(cx + (int)(arrow_len * cos(angle_rad)),
+                        cy + (int)(arrow_len * sin(angle_rad)));
+
+        circle(vis, center, 3, color, -1);
+        arrowedLine(vis, center, arrow_tip, color, 2, cv::LINE_AA, 0, 0.25);
+
+        char buf[48];
+        snprintf(buf, sizeof(buf), "%.0f @%.1f", m.similarity, angle_deg);
+        putText(vis, buf, Point(cx + 5, cy - 8), FONT_HERSHEY_SIMPLEX, 0.35, Scalar(0,0,0), 2);
+        putText(vis, buf, Point(cx + 5, cy - 8), FONT_HERSHEY_SIMPLEX, 0.35, color, 1);
+    }
+
+    char buf[128];
+    snprintf(buf, sizeof(buf), "NMS: %d  Time: %.1fms", (int)matches.size(), match_ms);
+    putText(vis, buf, Point(10, 25), FONT_HERSHEY_SIMPLEX, 0.7, Scalar(0, 0, 0), 3);
+    putText(vis, buf, Point(10, 25), FONT_HERSHEY_SIMPLEX, 0.7, Scalar(255, 255, 255), 2);
+
+    return vis;
+}
+
 int main() {
     const string out_dir = "C:/Users/TRS001/Documents/workspace/templmatch/test_imgs/";
     const int W = 1920, H = 1080;
@@ -189,6 +202,21 @@ int main() {
         det.addTemplate(rot_templ, "L", rot_mask);
     }
     printf("Templates: %d\n", det.numTemplates("L"));
+
+    // Extract template edge points (relative to center) for ICP
+    std::vector<cv::Point2f> templ_edge_pts;
+    {
+        Mat templ_smooth, templ_dx, templ_dy, templ_edge;
+        GaussianBlur(templ, templ_smooth, Size(5, 5), 0);
+        Sobel(templ_smooth, templ_dx, CV_16S, 1, 0, 3);
+        Sobel(templ_smooth, templ_dy, CV_16S, 0, 1, 3);
+        Canny(templ_dx, templ_dy, templ_edge, 30, 60);
+        for (int r = 0; r < TW; ++r)
+            for (int c = 0; c < TW; ++c)
+                if (templ_edge.at<uchar>(r, c) > 0)
+                    templ_edge_pts.push_back(Point2f((float)(c - TW/2), (float)(r - TW/2)));
+        printf("Template edge points: %d\n", (int)templ_edge_pts.size());
+    }
 
     // Save template image
     {
@@ -268,13 +296,46 @@ int main() {
         double ms = chrono::duration<double, std::milli>(
             chrono::high_resolution_clock::now() - t0).count();
 
+        // ICP refinement on NMS'd matches
+        auto nms_matches = spatial_nms(matches, (float)TW * 0.8f);
+        {
+            // Build edge scene from this image
+            Mat scene_smooth, scene_dx, scene_dy;
+            GaussianBlur(scene, scene_smooth, Size(7, 7), 0);
+            Sobel(scene_smooth, scene_dx, CV_16S, 1, 0, 3);
+            Sobel(scene_smooth, scene_dy, CV_16S, 0, 1, 3);
+
+            icp_refine::EdgeScene edge_scene;
+            edge_scene.build(scene_dx, scene_dy, 30, 60, 10);
+
+            icp_refine::ICPConfig icp_cfg;
+            icp_cfg.max_iterations = 30;
+            icp_cfg.max_dist = 10.0f;
+
+            int refine_n = std::min((int)nms_matches.size(), 50);
+            for (int i = 0; i < refine_n; ++i) {
+                auto& m = nms_matches[i];
+                auto& tmpl_info = det.getTemplates(m.class_id, m.template_id);
+                float cx = m.x + tmpl_info[0].width / 2.0f;
+                float cy = m.y + tmpl_info[0].height / 2.0f;
+                float coarse_angle = m.template_id * 2.0f;  // 2-degree step
+
+                icp_refine::Pose2D init_pose(cx, cy, coarse_angle);
+                auto refined = icp_refine::refine(templ_edge_pts, edge_scene, init_pose, icp_cfg);
+                m.refined_angle = refined.angle;
+                // Update position too
+                m.x = (int)(refined.x - tmpl_info[0].width / 2.0f + 0.5f);
+                m.y = (int)(refined.y - tmpl_info[0].height / 2.0f + 0.5f);
+            }
+        }
+
         printf("%-20s: %5d matches  %6.1fms", tc.name.c_str(), (int)matches.size(), ms);
-        if (!matches.empty())
-            printf("  best=%.0f", matches[0].similarity);
+        if (!nms_matches.empty())
+            printf("  best=%.0f", nms_matches[0].similarity);
         printf("\n");
 
-        // Draw and save
-        Mat vis = draw_matches(scene, matches, det, TW, ms);
+        // Draw refined matches (pass pre-NMS'd + refined matches)
+        Mat vis = draw_matches_direct(scene, nms_matches, det, TW, ms);
         imwrite(out_dir + "result_" + tc.name + ".jpg", vis);
     }
 

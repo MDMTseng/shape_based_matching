@@ -56,5 +56,5 @@ add_executable(bench_profile line2Dup.cpp bench_profile.cpp)
 target_link_libraries(bench_profile ${OpenCV_LIBS})
 
 # Visual matching test with image output
-add_executable(test_visual line2Dup.cpp test_visual.cpp)
+add_executable(test_visual line2Dup.cpp icp_refine.cpp test_visual.cpp)
 target_link_libraries(test_visual ${OpenCV_LIBS})

@@ -89,6 +89,9 @@ int main() {
         {1920, 1080, 0,  "FHD clean"},
         {1920, 1080, 30, "FHD sigma=30"},
         {1920, 1080, 50, "FHD sigma=50"},
+        {6000, 5000, 0,  "30MP clean"},
+        {6000, 5000, 30, "30MP sigma=30"},
+        {6000, 5000, 50, "30MP sigma=50"},
     };
 
     line2Dup::enableProfiling(true);

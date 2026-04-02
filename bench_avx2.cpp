@@ -68,6 +68,7 @@ int main() {
     TestSize sizes[] = {
         {640, 480, "VGA"},
         {1920, 1080, "FHD"},
+        {6000, 5000, "30MP"},
     };
 
     const int RUNS = 5;

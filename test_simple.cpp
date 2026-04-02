@@ -71,7 +71,49 @@ int main() {
         double ms = std::chrono::duration<double, std::milli>(
             std::chrono::high_resolution_clock::now() - t0).count();
 
-        printf("%-12s (%.1fms): ", mode.name, ms);
+        printf("%-20s (%.1fms): ", mode.name, ms);
+        for (auto& r : results)
+            printf("(%3.0f,%3.0f)@%5.1f  ", r.x, r.y, r.angle);
+        printf("\n");
+    }
+
+    // Ablation: edges only vs edges+corners vs corners only
+    printf("\n--- Ablation: edge/corner contribution ---\n");
+    struct Filter { const char* name; bool use_edge; bool use_corner; };
+    Filter filters[] = {
+        {"edges only",   true,  false},
+        {"edges+corners",true,  true},
+        {"corners only", false, true},
+    };
+
+    for (auto& flt : filters) {
+        // Create filtered feature set
+        auto filtered = loaded;
+        std::vector<sbm::FeatureSet::RefinePt> kept;
+        for (auto& rp : filtered.refine_points) {
+            if (rp.type == sbm::FeatureSet::RefinePt::EDGE && flt.use_edge)
+                kept.push_back(rp);
+            if (rp.type == sbm::FeatureSet::RefinePt::CORNER && flt.use_corner)
+                kept.push_back(rp);
+        }
+        filtered.refine_points = kept;
+
+        sbm::MatchConfig cfg;
+        cfg.min_score = 50;
+        cfg.nms_radius = 50;
+        cfg.refine = sbm::RefineMode::ICP;
+
+        sbm::ShapeMatcher matcher(cfg);
+        sbm::ModelConfig mcfg;
+        mcfg.angle = {0, 360, 2};
+        matcher.addModel("rect", filtered, mcfg);
+
+        auto t0 = std::chrono::high_resolution_clock::now();
+        auto results = matcher.match(scene);
+        double ms = std::chrono::duration<double, std::milli>(
+            std::chrono::high_resolution_clock::now() - t0).count();
+
+        printf("%-20s (%3d pts, %.1fms): ", flt.name, (int)kept.size(), ms);
         for (auto& r : results)
             printf("(%3.0f,%3.0f)@%5.1f  ", r.x, r.y, r.angle);
         printf("\n");

@@ -470,16 +470,24 @@ FeatureSet::QualityReport FeatureSet::evaluateQuality() const {
     if (r.num_directions < 2) r.min_dir_strength = 0;
 
     // === BALANCE (0-100) ===
-    // How evenly are constraints spread? Uses min/max strength ratio + coverage.
-    float bal_ratio = (r.max_dir_strength > 1e-6f) ?
-        r.min_dir_strength / r.max_dir_strength : 0;
-    float bal_cov = std::max(0.0f, std::min(1.0f, r.angle_coverage_deg / 120.0f));
-    r.balance = (int)(100.0f * std::min(bal_ratio, bal_cov));
+    // From SVD condition number: how well can the solve determine all 3 DOF?
+    // cond=1: perfect (all directions equally constrained)
+    // cond=40: acceptable (one direction 40x weaker)
+    // cond>60: poor (near-degenerate)
+    // Scale: 100/cond, capped at 100, floor at 0 for cond>100
+    // Direct mapping from condition number:
+    // cond < 10: 100, cond 10-70: linear 100→0, cond > 70: 0
+    if (r.condition_number < 10) r.balance = 100;
+    else if (r.condition_number > 70) r.balance = 0;
+    else r.balance = (int)(100.0f * (70.0f - r.condition_number) / 60.0f);
+    // Multiply by coverage gate
+    float cov_gate = std::max(0.0f, std::min(1.0f, r.angle_coverage_deg / 90.0f));
+    r.balance = (int)(r.balance * cov_gate);
     r.balance = std::max(0, std::min(100, r.balance));
 
     // === STRENGTH (0-100) ===
-    // Weakest direction's total gradient magnitude.
-    // ~800 per point is strong for 8-bit images.
+    // Weakest direction's best-point gradient magnitude.
+    // One strong edge point (~800 for 8-bit) is enough for a direction.
     r.strength = (int)(100.0f * std::max(0.0f, std::min(1.0f, r.min_dir_strength / 800.0f)));
     r.strength = std::max(0, std::min(100, r.strength));
 

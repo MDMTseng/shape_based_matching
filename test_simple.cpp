@@ -130,8 +130,9 @@ int main() {
 
         printf("%-22s  ", pe.name);
 
-        // ICP
+        // ICP (with timing)
         {
+            auto t0 = std::chrono::high_resolution_clock::now();
             Mat ss, sdx, sdy;
             GaussianBlur(scene1, ss, Size(7,7), 0);
             Sobel(ss, sdx, CV_16S, 1, 0, 3);
@@ -146,13 +147,16 @@ int main() {
             auto ref = icp_refine::refineWithNormals(
                 icp_edges, sdx, sdy, ip, loaded.templ_width, 30, icfg);
 
+            double icp_ms = std::chrono::duration<double,std::milli>(
+                std::chrono::high_resolution_clock::now()-t0).count();
             float ae = ref.angle - 25; if(ae>180)ae-=360; if(ae<-180)ae+=360;
             float pd = std::sqrt((ref.x-160)*(ref.x-160)+(ref.y-120)*(ref.y-120));
-            printf("@%+5.1f %4.1fpx         ", ae, pd);
+            printf("@%+5.1f %4.1fpx %4.1fms  ", ae, pd, icp_ms);
         }
 
-        // ROI
+        // ROI (with timing)
         {
+            auto t0 = std::chrono::high_resolution_clock::now();
             roi_refine::ROIConfig rcfg;
             rcfg.roi_half = 15;
             rcfg.search_half = 20;
@@ -161,9 +165,11 @@ int main() {
             auto ref = roi_refine::refineROI(
                 loaded.templ_image, scene1, sample_pts, ip, rcfg);
 
+            double roi_ms = std::chrono::duration<double,std::milli>(
+                std::chrono::high_resolution_clock::now()-t0).count();
             float ae = ref[2] - 25; if(ae>180)ae-=360; if(ae<-180)ae+=360;
             float pd = std::sqrt((ref[0]-160)*(ref[0]-160)+(ref[1]-120)*(ref[1]-120));
-            printf("@%+5.1f %4.1fpx", ae, pd);
+            printf("@%+5.1f %4.1fpx %4.1fms", ae, pd, roi_ms);
         }
 
         printf("\n");

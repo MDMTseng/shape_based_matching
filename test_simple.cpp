@@ -545,6 +545,45 @@ int main() {
         for (int i = 0; i < 14 + 4*30; i++) printf("-");
         printf("\n");
 
+        // Per-object detail for ICP clean case
+        {
+            sbm::MatchConfig cfg;
+            cfg.min_score = 40;
+            cfg.nms_radius = 80;
+            cfg.refine = sbm::RefineMode::ICP;
+
+            sbm::ShapeMatcher matcher(cfg);
+            sbm::ModelConfig mcfg;
+            mcfg.angle = {0, 360, 2};
+
+            std::ostringstream ns; auto ob = std::cout.rdbuf(ns.rdbuf());
+            matcher.addModel("L", feat_fhd, mcfg);
+            auto results = matcher.match(scene_fhd);
+            std::cout.rdbuf(ob);
+
+            printf("Per-object ICP detail (clean, 10 objects):\n");
+            for (auto& r : results) {
+                float best_d = 1e9f; int best_j = -1;
+                for (int j = 0; j < n_objs; j++) {
+                    float ox2 = 100 - 100, oy2 = 75 - 100;
+                    float rad2 = -(float)fhd_objs[j].angle * (float)CV_PI / 180.0f;
+                    float rx2 = std::cos(rad2)*ox2 - std::sin(rad2)*oy2;
+                    float ry2 = std::sin(rad2)*ox2 + std::cos(rad2)*oy2;
+                    float gt_x2 = fhd_objs[j].x + rx2;
+                    float gt_y2 = fhd_objs[j].y + ry2;
+                    float dx2 = r.x - gt_x2, dy2 = r.y - gt_y2;
+                    float d2 = std::sqrt(dx2*dx2 + dy2*dy2);
+                    if (d2 < best_d) { best_d = d2; best_j = j; }
+                }
+                float ae = r.angle - (float)fhd_objs[best_j].angle;
+                if (ae > 180) ae -= 360; if (ae < -180) ae += 360;
+                printf("  gt=(%4d,%4d)@%3.0f  got=(%5.1f,%5.1f)@%5.1f  err: %+5.2fdeg %4.1fpx\n",
+                       fhd_objs[best_j].x, fhd_objs[best_j].y, (float)fhd_objs[best_j].angle,
+                       r.x, r.y, r.angle, ae, best_d);
+            }
+            printf("\n");
+        }
+
         // Suppress meiqua cout during benchmark
         std::streambuf* orig_cout = std::cout.rdbuf();
         std::ostringstream null_stream;
@@ -641,10 +680,12 @@ int main() {
         printf("\n--- Isolated: 1 object, clean background, per-angle error ---\n");
         {
         auto& feat = feat_fhd;
-        float test_angles[] = {0, 15, 30, 45, 60, 90, 120, 150, 180, 210, 270, 315};
+        // Dense angle sweep: every 5 degrees
+        std::vector<float> test_angles;
+        for (float a = 0; a < 360; a += 5) test_angles.push_back(a);
 
-        printf("%-8s  %-24s  %-24s\n", "Angle", "ICP (dense)", "ROI");
-        printf("%-8s  %-24s  %-24s\n", "-----", "-----------", "---");
+        printf("%-8s  %-24s  %-24s  %-24s\n", "Angle", "ICP (dense)", "ICP inverse", "ROI");
+        printf("%-8s  %-24s  %-24s  %-24s\n", "-----", "-----------", "-----------", "---");
 
         for (float gt_ang : test_angles) {
             // Create clean scene with 1 object at center
@@ -670,36 +711,81 @@ int main() {
 
             printf("%-8.0f", gt_ang);
 
-            Mode iso_modes[] = {
-                {"ICP", sbm::RefineMode::ICP},
-                {"ROI", sbm::RefineMode::ROI},
-            };
+            // Get coarse match first (shared by all modes)
+            sbm::MatchConfig cfg_none;
+            cfg_none.min_score = 40;
+            cfg_none.nms_radius = 80;
+            cfg_none.refine = sbm::RefineMode::None;
+            sbm::ShapeMatcher matcher_coarse(cfg_none);
+            sbm::ModelConfig mcfg;
+            mcfg.angle = {0, 360, 2};
+            std::cout.rdbuf(null_stream.rdbuf());
+            matcher_coarse.addModel("L", feat, mcfg);
+            auto coarse_results = matcher_coarse.match(scene1obj);
+            std::cout.rdbuf(orig_cout);
 
-            for (auto& mode : iso_modes) {
+            // ICP dense (forward)
+            {
                 sbm::MatchConfig cfg;
-                cfg.min_score = 40;
-                cfg.nms_radius = 80;
-                cfg.refine = mode.mode;
-
+                cfg.min_score = 40; cfg.nms_radius = 80;
+                cfg.refine = sbm::RefineMode::ICP;
                 sbm::ShapeMatcher matcher(cfg);
-                sbm::ModelConfig mcfg;
-                mcfg.angle = {0, 360, 2};
-                matcher.addModel("L", feat, mcfg);
-
                 std::cout.rdbuf(null_stream.rdbuf());
+                matcher.addModel("L", feat, mcfg);
                 auto results = matcher.match(scene1obj);
                 std::cout.rdbuf(orig_cout);
-
                 if (!results.empty()) {
                     auto& r = results[0];
                     float ae = r.angle - gt_ang;
                     if (ae > 180) ae -= 360; if (ae < -180) ae += 360;
-                    float dx = r.x - gt_x, dy = r.y - gt_y;
-                    float pe = std::sqrt(dx*dx + dy*dy);
+                    float pe = std::sqrt((r.x-gt_x)*(r.x-gt_x)+(r.y-gt_y)*(r.y-gt_y));
                     printf("  ang=%+5.2f pos=%4.1fpx", ae, pe);
-                } else {
-                    printf("  NOT FOUND              ");
-                }
+                } else printf("  NOT FOUND              ");
+            }
+
+            // ICP inverse (template EDT)
+            if (!coarse_results.empty()) {
+                auto& cr = coarse_results[0];
+                // Compute coarse center from user origin
+                float o_x = 100 - 100, o_y = 75 - 100;  // origin offset
+                float r_rad = -cr.angle * (float)CV_PI / 180.0f;
+                float coarse_cx = cr.x - (std::cos(r_rad)*o_x - std::sin(r_rad)*o_y);
+                float coarse_cy = cr.y - (std::sin(r_rad)*o_x + std::cos(r_rad)*o_y);
+
+                icp_refine::ICPConfig icfg;
+                icfg.max_iterations = 30;
+                icfg.max_dist = 10;
+                icp_refine::Pose2D init(coarse_cx, coarse_cy, cr.angle);
+                auto refined = icp_refine::refineInverse(
+                    templ_fhd, scene1obj, init, 20, icfg);
+
+                // Compute user origin from refined center
+                float rr = -refined.angle * (float)CV_PI / 180.0f;
+                float ux = refined.x + std::cos(rr)*o_x - std::sin(rr)*o_y;
+                float uy = refined.y + std::sin(rr)*o_x + std::cos(rr)*o_y;
+                float ae = refined.angle - gt_ang;
+                if (ae > 180) ae -= 360; if (ae < -180) ae += 360;
+                float pe = std::sqrt((ux-gt_x)*(ux-gt_x)+(uy-gt_y)*(uy-gt_y));
+                printf("  ang=%+5.2f pos=%4.1fpx", ae, pe);
+            } else printf("  NOT FOUND              ");
+
+            // ROI
+            {
+                sbm::MatchConfig cfg;
+                cfg.min_score = 40; cfg.nms_radius = 80;
+                cfg.refine = sbm::RefineMode::ROI;
+                sbm::ShapeMatcher matcher(cfg);
+                std::cout.rdbuf(null_stream.rdbuf());
+                matcher.addModel("L", feat, mcfg);
+                auto results = matcher.match(scene1obj);
+                std::cout.rdbuf(orig_cout);
+                if (!results.empty()) {
+                    auto& r = results[0];
+                    float ae = r.angle - gt_ang;
+                    if (ae > 180) ae -= 360; if (ae < -180) ae += 360;
+                    float pe = std::sqrt((r.x-gt_x)*(r.x-gt_x)+(r.y-gt_y)*(r.y-gt_y));
+                    printf("  ang=%+5.2f pos=%4.1fpx", ae, pe);
+                } else printf("  NOT FOUND              ");
             }
             printf("\n");
         }

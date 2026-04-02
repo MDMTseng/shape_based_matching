@@ -103,4 +103,42 @@ Pose2D refineLocal(const std::vector<cv::Point2f>& templ_edges,
                    int roi_margin = 20,
                    const ICPConfig& config = ICPConfig());
 
+/// Inverse ICP: build EDT on template, match scene edges against it.
+/// Scene edges are inverse-transformed to template space for correspondence.
+/// Template EDT is clean (no other objects), potentially better at corners.
+Pose2D refineInverse(const cv::Mat& templ_gray,
+                     const cv::Mat& scene_gray,
+                     const Pose2D& initial_pose,
+                     int roi_margin = 20,
+                     const ICPConfig& config = ICPConfig());
+
+/// Inverse ICP with pre-built template EdgeScene (avoids rebuilding EDT per call).
+/// @param templ_scene  Pre-built EdgeScene from the template (build once at addModel time).
+/// @param templ_width  Template width (for center offset).
+/// @param templ_height Template height (for center offset).
+/// @param scene_gray   Scene grayscale image.
+/// @param initial_pose Coarse pose from template matching.
+/// @param roi_margin   Extra margin around template bounding box.
+/// @param config       ICP parameters.
+Pose2D refineInverse(const EdgeScene& templ_scene,
+                     int templ_width, int templ_height,
+                     const cv::Mat& scene_gray,
+                     const Pose2D& initial_pose,
+                     int roi_margin = 20,
+                     const ICPConfig& config = ICPConfig());
+
+/// Inverse ICP with pre-built template EdgeScene and scene Sobel derivatives.
+/// Avoids both template EDT rebuild and scene Gaussian+Sobel recomputation.
+Pose2D refineInverse(const EdgeScene& templ_scene,
+                     int templ_width, int templ_height,
+                     const cv::Mat& scene_dx, const cv::Mat& scene_dy,
+                     const Pose2D& initial_pose,
+                     int templ_diag,
+                     int roi_margin = 20,
+                     const ICPConfig& config = ICPConfig());
+
+/// Build a template EdgeScene from a grayscale template image.
+/// Call once per template at addModel time, then pass to refineInverse.
+EdgeScene buildTemplateScene(const cv::Mat& templ_gray, float max_dist = 20.0f);
+
 } // namespace icp_refine

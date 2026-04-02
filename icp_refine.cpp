@@ -516,188 +516,12 @@ Pose2D refineWithNormals(const std::vector<EdgePoint>& model_edges,
         float cs = std::cos(rad) * pose.scale;
         float sn = std::sin(rad) * pose.scale;
 
+        // Direct Jacobian accumulation (no correspondence collection)
         float ATA[3][3] = {}, ATb[3] = {};
         float total_error = 0;
         int inlier_count = 0;
 
-#ifdef __AVX2__
-        // AVX2 vectorized inner loop
-        __m256 vcs = _mm256_set1_ps(cs), vsn = _mm256_set1_ps(sn);
-        __m256 vtx = _mm256_set1_ps(pose.x), vty = _mm256_set1_ps(pose.y);
-        __m256 vhalf = _mm256_set1_ps(0.5f);
-        __m256 vneg1f = _mm256_set1_ps(-1.0f);
-        __m256 vzero = _mm256_setzero_ps();
-        __m256 vmax_dist2 = _mm256_set1_ps(max_dist2);
-        __m256 vcos_thresh = _mm256_set1_ps(cos_thresh);
-        __m256i vwidth = _mm256_set1_epi32(local_scene.width);
-        __m256i vheight = _mm256_set1_epi32(local_scene.height);
-        __m256i vstride = _mm256_set1_epi32(stride);
-        __m256i vzero_i = _mm256_setzero_si256();
-
-        // Accumulators (11 values)
-        __m256 vata00=vzero, vata01=vzero, vata02=vzero;
-        __m256 vata11=vzero, vata12=vzero, vata22=vzero;
-        __m256 vatb0=vzero, vatb1=vzero, vatb2=vzero;
-        __m256 vtot_err=vzero;
-        __m256i vinlier=vzero_i;
-
-        int i = 0;
-        for (; i + 7 < N; i += 8) {
-            // Phase A: Transform 8 points
-            __m256 vpx = _mm256_loadu_ps(&soa_px[i]);
-            __m256 vpy = _mm256_loadu_ps(&soa_py[i]);
-            __m256 vmx = _mm256_add_ps(_mm256_sub_ps(_mm256_mul_ps(vcs, vpx), _mm256_mul_ps(vsn, vpy)), vtx);
-            __m256 vmy = _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(vsn, vpx), _mm256_mul_ps(vcs, vpy)), vty);
-
-            // Round to int for lookup
-            __m256i vix = _mm256_cvttps_epi32(_mm256_add_ps(vmx, vhalf));
-            __m256i viy = _mm256_cvttps_epi32(_mm256_add_ps(vmy, vhalf));
-
-            // Bounds check: 0 <= ix < width && 0 <= iy < height
-            __m256i b1 = _mm256_and_si256(_mm256_cmpgt_epi32(vix, _mm256_set1_epi32(-1)),
-                                           _mm256_cmpgt_epi32(vwidth, vix));
-            __m256i b2 = _mm256_and_si256(_mm256_cmpgt_epi32(viy, _mm256_set1_epi32(-1)),
-                                           _mm256_cmpgt_epi32(vheight, viy));
-            __m256 bounds_mask = _mm256_castsi256_ps(_mm256_and_si256(b1, b2));
-            if (_mm256_movemask_ps(bounds_mask) == 0) continue;
-
-            // Phase B: Gather closest_x/y
-            // Clamp indices for safe gather (out-of-bounds lanes masked later)
-            __m256i safe_ix = _mm256_max_epi32(vzero_i, _mm256_min_epi32(vix, _mm256_sub_epi32(vwidth, _mm256_set1_epi32(1))));
-            __m256i safe_iy = _mm256_max_epi32(vzero_i, _mm256_min_epi32(viy, _mm256_sub_epi32(vheight, _mm256_set1_epi32(1))));
-            __m256i voffset = _mm256_add_epi32(_mm256_mullo_epi32(safe_iy, vstride), safe_ix);
-
-            __m256 vcx = _mm256_mask_i32gather_ps(vneg1f, cx_base, voffset, bounds_mask, 4);
-            __m256 vcy = _mm256_mask_i32gather_ps(vneg1f, cy_base, voffset, bounds_mask, 4);
-
-            // Validity: closest_cx >= 0
-            __m256 valid_mask = _mm256_and_ps(bounds_mask, _mm256_cmp_ps(vcx, vzero, _CMP_GE_OQ));
-            if (_mm256_movemask_ps(valid_mask) == 0) continue;
-
-            // Distance check
-            __m256 vdx = _mm256_sub_ps(vmx, vcx);
-            __m256 vdy = _mm256_sub_ps(vmy, vcy);
-            __m256 vdist2 = _mm256_add_ps(_mm256_mul_ps(vdx, vdx), _mm256_mul_ps(vdy, vdy));
-            __m256 dist_mask = _mm256_and_ps(valid_mask, _mm256_cmp_ps(vdist2, vmax_dist2, _CMP_LE_OQ));
-            if (_mm256_movemask_ps(dist_mask) == 0) continue;
-
-            // Gather scene normals at closest edge positions
-            __m256i vecx = _mm256_cvttps_epi32(_mm256_add_ps(vcx, vhalf));
-            __m256i vecy = _mm256_cvttps_epi32(_mm256_add_ps(vcy, vhalf));
-            vecx = _mm256_max_epi32(vzero_i, _mm256_min_epi32(vecx, _mm256_sub_epi32(vwidth, _mm256_set1_epi32(1))));
-            vecy = _mm256_max_epi32(vzero_i, _mm256_min_epi32(vecy, _mm256_sub_epi32(vheight, _mm256_set1_epi32(1))));
-            __m256i vnoff = _mm256_add_epi32(_mm256_mullo_epi32(vecy, vstride), vecx);
-
-            __m256 vsnx = _mm256_mask_i32gather_ps(vzero, snx_base, vnoff, dist_mask, 4);
-            __m256 vsny = _mm256_mask_i32gather_ps(vzero, sny_base, vnoff, dist_mask, 4);
-
-            // Check scene normal non-zero
-            __m256 nz_mask = _mm256_cmp_ps(
-                _mm256_add_ps(_mm256_mul_ps(vsnx, vsnx), _mm256_mul_ps(vsny, vsny)),
-                _mm256_set1_ps(1e-12f), _CMP_GT_OQ);
-            __m256 mask = _mm256_and_ps(dist_mask, nz_mask);
-            if (_mm256_movemask_ps(mask) == 0) continue;
-
-            // Rotate model normals
-            __m256 vmnx = _mm256_loadu_ps(&soa_nx[i]);
-            __m256 vmny = _mm256_loadu_ps(&soa_ny[i]);
-            __m256 vrot_mnx = _mm256_sub_ps(_mm256_mul_ps(vcs, vmnx), _mm256_mul_ps(vsn, vmny));
-            __m256 vrot_mny = _mm256_add_ps(_mm256_mul_ps(vsn, vmnx), _mm256_mul_ps(vcs, vmny));
-            __m256 vnmag = _mm256_sqrt_ps(_mm256_add_ps(_mm256_mul_ps(vrot_mnx, vrot_mnx),
-                                                         _mm256_mul_ps(vrot_mny, vrot_mny)));
-            __m256 vnmag_safe = _mm256_max_ps(vnmag, _mm256_set1_ps(1e-6f));
-            vrot_mnx = _mm256_div_ps(vrot_mnx, vnmag_safe);
-            vrot_mny = _mm256_div_ps(vrot_mny, vnmag_safe);
-
-            // Normal compatibility: |dot| > cos_thresh
-            __m256 vndot = _mm256_add_ps(_mm256_mul_ps(vrot_mnx, vsnx), _mm256_mul_ps(vrot_mny, vsny));
-            // abs via clearing sign bit
-            __m256 vabs_ndot = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), vndot);
-            __m256 norm_mask = _mm256_cmp_ps(vabs_ndot, vcos_thresh, _CMP_GE_OQ);
-            mask = _mm256_and_ps(mask, norm_mask);
-            if (_mm256_movemask_ps(mask) == 0) continue;
-
-            // Phase C: Point-to-plane error + Jacobian accumulation
-            __m256 ve_plane = _mm256_add_ps(_mm256_mul_ps(vdx, vsnx), _mm256_mul_ps(vdy, vsny));
-            __m256 ve2 = _mm256_mul_ps(ve_plane, ve_plane);
-
-            __m256 vjp0 = _mm256_add_ps(_mm256_mul_ps(_mm256_sub_ps(vzero, vmy), vsnx),
-                                         _mm256_mul_ps(vmx, vsny));
-            __m256 vjp1 = vsnx;
-            __m256 vjp2 = vsny;
-
-            // Masked accumulation
-            __m256 m_jp0 = _mm256_and_ps(vjp0, mask);
-            __m256 m_jp1 = _mm256_and_ps(vjp1, mask);
-            __m256 m_jp2 = _mm256_and_ps(vjp2, mask);
-            __m256 m_e = _mm256_and_ps(ve_plane, mask);
-
-            vata00 = _mm256_add_ps(vata00, _mm256_mul_ps(m_jp0, vjp0));
-            vata01 = _mm256_add_ps(vata01, _mm256_mul_ps(m_jp0, vjp1));
-            vata02 = _mm256_add_ps(vata02, _mm256_mul_ps(m_jp0, vjp2));
-            vata11 = _mm256_add_ps(vata11, _mm256_mul_ps(m_jp1, vjp1));
-            vata12 = _mm256_add_ps(vata12, _mm256_mul_ps(m_jp1, vjp2));
-            vata22 = _mm256_add_ps(vata22, _mm256_mul_ps(m_jp2, vjp2));
-            vatb0 = _mm256_sub_ps(vatb0, _mm256_mul_ps(m_jp0, ve_plane));
-            vatb1 = _mm256_sub_ps(vatb1, _mm256_mul_ps(m_jp1, ve_plane));
-            vatb2 = _mm256_sub_ps(vatb2, _mm256_mul_ps(m_jp2, ve_plane));
-            vtot_err = _mm256_add_ps(vtot_err, _mm256_and_ps(ve2, mask));
-
-            // Count inliers via mask bits
-            vinlier = _mm256_sub_epi32(vinlier, _mm256_castps_si256(mask));  // -1 per active lane
-
-            // Point-to-point regularization
-            if (p2p_w > 0 || use_corn) {
-                __m256 vw;
-                if (use_corn) {
-                    __m256 vc = _mm256_loadu_ps(&soa_corn[i]);
-                    vw = _mm256_add_ps(_mm256_mul_ps(vc, _mm256_set1_ps(1.0f)),
-                                       _mm256_mul_ps(_mm256_sub_ps(_mm256_set1_ps(1.0f), vc),
-                                                     _mm256_set1_ps(0.01f)));
-                } else {
-                    vw = _mm256_set1_ps(p2p_w);
-                }
-                __m256 m_w = _mm256_and_ps(vw, mask);
-                __m256 m_dx = _mm256_and_ps(vdx, mask);
-                __m256 m_dy = _mm256_and_ps(vdy, mask);
-                __m256 m_mx = _mm256_and_ps(vmx, mask);
-                __m256 m_my = _mm256_and_ps(vmy, mask);
-
-                vata00 = _mm256_add_ps(vata00, _mm256_mul_ps(m_w,
-                    _mm256_add_ps(_mm256_mul_ps(vmy, vmy), _mm256_mul_ps(vmx, vmx))));
-                vata01 = _mm256_add_ps(vata01, _mm256_mul_ps(m_w, _mm256_sub_ps(vzero, vmy)));
-                vata02 = _mm256_add_ps(vata02, _mm256_mul_ps(m_w, vmx));
-                vata11 = _mm256_add_ps(vata11, m_w);
-                vata22 = _mm256_add_ps(vata22, m_w);
-                vatb0 = _mm256_sub_ps(vatb0, _mm256_mul_ps(m_w,
-                    _mm256_add_ps(_mm256_mul_ps(_mm256_sub_ps(vzero, m_my), vdx),
-                                  _mm256_mul_ps(m_mx, vdy))));
-                vatb1 = _mm256_sub_ps(vatb1, _mm256_mul_ps(m_w, vdx));
-                vatb2 = _mm256_sub_ps(vatb2, _mm256_mul_ps(m_w, vdy));
-            }
-        }
-
-        // Horizontal reduce accumulators
-        ATA[0][0] = hsum256_ps(vata00);
-        ATA[0][1] = hsum256_ps(vata01);
-        ATA[0][2] = hsum256_ps(vata02);
-        ATA[1][1] = hsum256_ps(vata11);
-        ATA[1][2] = hsum256_ps(vata12);
-        ATA[2][2] = hsum256_ps(vata22);
-        ATb[0] = hsum256_ps(vatb0);
-        ATb[1] = hsum256_ps(vatb1);
-        ATb[2] = hsum256_ps(vatb2);
-        total_error = hsum256_ps(vtot_err);
-
-        // Sum inlier count: vinlier has counts per lane as negative ints
-        int ilanes[8]; _mm256_storeu_si256((__m256i*)ilanes, vinlier);
-        for (int k = 0; k < 8; k++) inlier_count += ilanes[k];
-
-        // Scalar tail
-        for (; i < N; ++i) {
-#else
         for (int i = 0; i < N; ++i) {
-#endif
             float px = soa_px[i], py = soa_py[i];
             float mx = cs * px - sn * py + pose.x;
             float my = sn * px + cs * py + pose.y;
@@ -709,8 +533,8 @@ Pose2D refineWithNormals(const std::vector<EdgePoint>& model_edges,
             float closest_cy = cy_base[iy * stride + ix];
             if (closest_cx < 0) continue;
 
-            float dx = mx - closest_cx, dy = my - closest_cy;
-            if (dx * dx + dy * dy > max_dist2) continue;
+            float ddx = mx - closest_cx, ddy = my - closest_cy;
+            if (ddx * ddx + ddy * ddy > max_dist2) continue;
 
             int ecx = std::max(0, std::min(local_scene.width - 1, (int)(closest_cx + 0.5f)));
             int ecy = std::max(0, std::min(local_scene.height - 1, (int)(closest_cy + 0.5f)));
@@ -727,7 +551,7 @@ Pose2D refineWithNormals(const std::vector<EdgePoint>& model_edges,
             float ndot = std::abs(rot_mnx * snx_v + rot_mny * sny_v);
             if (ndot < cos_thresh) continue;
 
-            float e_plane = dx * snx_v + dy * sny_v;
+            float e_plane = ddx * snx_v + ddy * sny_v;
             total_error += e_plane * e_plane;
             ++inlier_count;
 
@@ -744,8 +568,7 @@ Pose2D refineWithNormals(const std::vector<EdgePoint>& model_edges,
 
             float w = p2p_w;
             if (use_corn) {
-                float c = soa_corn[i];
-                w = c * 1.0f + (1.0f - c) * 0.01f;
+                w = soa_corn[i] * 1.0f + (1.0f - soa_corn[i]) * 0.01f;
             }
             if (w > 0) {
                 ATA[0][0] += w * (my*my + mx*mx);
@@ -753,9 +576,9 @@ Pose2D refineWithNormals(const std::vector<EdgePoint>& model_edges,
                 ATA[0][2] += w * (mx);
                 ATA[1][1] += w;
                 ATA[2][2] += w;
-                ATb[0] -= w * (-my*dx + mx*dy);
-                ATb[1] -= w * dx;
-                ATb[2] -= w * dy;
+                ATb[0] -= w * (-my*ddx + mx*ddy);
+                ATb[1] -= w * ddx;
+                ATb[2] -= w * ddy;
             }
         }
 
@@ -789,6 +612,263 @@ Pose2D refineWithNormals(const std::vector<EdgePoint>& model_edges,
     pose.x += rx;
     pose.y += ry;
     return pose;
+}
+
+// -----------------------------------------------------------------------
+// Build template EdgeScene (call once per template)
+// -----------------------------------------------------------------------
+EdgeScene buildTemplateScene(const cv::Mat& templ_gray, float max_dist) {
+    cv::Mat t_smooth, t_dx, t_dy;
+    cv::GaussianBlur(templ_gray, t_smooth, cv::Size(5, 5), 0);
+    cv::Sobel(t_smooth, t_dx, CV_16S, 1, 0, 3);
+    cv::Sobel(t_smooth, t_dy, CV_16S, 0, 1, 3);
+
+    EdgeScene scene;
+    scene.build(t_dx, t_dy, 30, 60, max_dist);
+    return scene;
+}
+
+// -----------------------------------------------------------------------
+// Core inverse ICP iteration loop (shared by all refineInverse overloads)
+// -----------------------------------------------------------------------
+static Pose2D refineInverseCore(
+    const EdgeScene& templ_scene, int TW, int TH,
+    const float* se_x, const float* se_y,
+    const float* se_nx, const float* se_ny,
+    int NS,
+    const Pose2D& initial_pose,
+    const ICPConfig& config)
+{
+    float tcx = TW / 2.0f, tcy = TH / 2.0f;
+    float cos_thresh = std::cos(config.normal_angle_thresh * (float)CV_PI / 180.0f);
+    float max_dist2 = config.max_dist * config.max_dist * 4;  // wider search in template space
+    float* tcx_base = (float*)templ_scene.closest_x.data;
+    float* tcy_base = (float*)templ_scene.closest_y.data;
+    float* tnx_base = (float*)templ_scene.normal_x.data;
+    float* tny_base = (float*)templ_scene.normal_y.data;
+    int tstride = (int)templ_scene.closest_x.step1();
+
+    Pose2D pose = initial_pose;
+    float prev_fitness = 0, prev_rmse = 1e10f;
+
+    for (int iter = 0; iter < config.max_iterations; ++iter) {
+        float rad = pose.angle * (float)CV_PI / 180.0f;
+        float cs = std::cos(rad), sn = std::sin(rad);
+        float inv_cs = cs, inv_sn = -sn;  // R^T
+
+        float ATA[3][3] = {}, ATb[3] = {};
+        float total_error = 0;
+        int inlier_count = 0;
+
+        for (int i = 0; i < NS; i++) {
+            float sx = se_x[i], sy = se_y[i];
+
+            // Inverse-transform scene point to template space
+            float dx_s = sx - pose.x, dy_s = sy - pose.y;
+            float tx = inv_cs * dx_s - inv_sn * dy_s + tcx;
+            float ty = inv_sn * dx_s + inv_cs * dy_s + tcy;
+
+            int ix = (int)(tx + 0.5f), iy = (int)(ty + 0.5f);
+            if (ix < 0 || ix >= TW || iy < 0 || iy >= TH) continue;
+
+            // Find closest template edge
+            float ctx = tcx_base[iy * tstride + ix];
+            float cty = tcy_base[iy * tstride + ix];
+            if (ctx < 0) continue;
+
+            float ddx = tx - ctx, ddy = ty - cty;
+            if (ddx*ddx + ddy*ddy > max_dist2) continue;
+
+            // Template normal at closest edge
+            int ecx = std::max(0, std::min(TW - 1, (int)(ctx + 0.5f)));
+            int ecy = std::max(0, std::min(TH - 1, (int)(cty + 0.5f)));
+            float tnx = tnx_base[ecy * tstride + ecx];
+            float tny = tny_base[ecy * tstride + ecx];
+            if (tnx == 0 && tny == 0) continue;
+
+            // Normal compatibility: rotate scene normal to template space
+            float rot_snx = inv_cs * se_nx[i] - inv_sn * se_ny[i];
+            float rot_sny = inv_sn * se_nx[i] + inv_cs * se_ny[i];
+            float ndot = std::abs(rot_snx * tnx + rot_sny * tny);
+            if (ndot < cos_thresh) continue;
+
+            // Error in template space: point-to-plane
+            float e_plane = ddx * tnx + ddy * tny;
+            total_error += e_plane * e_plane;
+            ++inlier_count;
+
+            // Jacobian
+            float dtx_da = -sn * dx_s + cs * dy_s;
+            float dty_da = -cs * dx_s - sn * dy_s;
+
+            float jp0 = dtx_da * tnx + dty_da * tny;
+            float jp1 = (-cs * tnx + sn * tny);
+            float jp2 = (-sn * tnx - cs * tny);
+
+            ATA[0][0] += jp0*jp0; ATA[0][1] += jp0*jp1; ATA[0][2] += jp0*jp2;
+            ATA[1][1] += jp1*jp1; ATA[1][2] += jp1*jp2;
+            ATA[2][2] += jp2*jp2;
+            ATb[0] -= jp0 * e_plane;
+            ATb[1] -= jp1 * e_plane;
+            ATb[2] -= jp2 * e_plane;
+
+            // Point-to-point regularization
+            float w = config.point_to_point_weight;
+            if (w > 0) {
+                float jx0 = dtx_da, jx1 = -cs, jx2 = -sn;
+                float jy0 = dty_da, jy1 = sn,  jy2 = -cs;
+                ATA[0][0] += w*(jx0*jx0+jy0*jy0);
+                ATA[0][1] += w*(jx0*jx1+jy0*jy1);
+                ATA[0][2] += w*(jx0*jx2+jy0*jy2);
+                ATA[1][1] += w*(jx1*jx1+jy1*jy1);
+                ATA[1][2] += w*(jx1*jx2+jy1*jy2);
+                ATA[2][2] += w*(jx2*jx2+jy2*jy2);
+                ATb[0] -= w*(jx0*ddx+jy0*ddy);
+                ATb[1] -= w*(jx1*ddx+jy1*ddy);
+                ATb[2] -= w*(jx2*ddx+jy2*ddy);
+            }
+        }
+
+        if (inlier_count == 0) break;
+        pose.fitness = (float)inlier_count / NS;
+        pose.rmse = std::sqrt(total_error / inlier_count);
+
+        if (iter > 0 &&
+            std::abs(pose.fitness - prev_fitness) < config.convergence_fitness &&
+            std::abs(pose.rmse - prev_rmse) < config.convergence_rmse)
+            break;
+        prev_fitness = pose.fitness;
+        prev_rmse = pose.rmse;
+
+        ATA[1][0]=ATA[0][1]; ATA[2][0]=ATA[0][2]; ATA[2][1]=ATA[1][2];
+        for (int i = 0; i < 3; i++) ATA[i][i] += 0.01f;
+        float update[3] = {};
+        if (!solve3x3(ATA, ATb, update)) break;
+
+        float d_theta = std::max(-0.1f, std::min(0.1f, update[0]));
+        float d_tx = std::max(-5.0f, std::min(5.0f, update[1]));
+        float d_ty = std::max(-5.0f, std::min(5.0f, update[2]));
+        pose.angle += d_theta * 180.0f / (float)CV_PI;
+        pose.x += d_tx;
+        pose.y += d_ty;
+    }
+
+    while (pose.angle < 0) pose.angle += 360;
+    while (pose.angle >= 360) pose.angle -= 360;
+    return pose;
+}
+
+// Helper: extract scene edges from Sobel dx/dy in a ROI, return SoA arrays
+static int extractSceneEdgesSoA(
+    const cv::Mat& s_dx, const cv::Mat& s_dy,
+    float offset_x, float offset_y,
+    std::vector<float>& out_x, std::vector<float>& out_y,
+    std::vector<float>& out_nx, std::vector<float>& out_ny)
+{
+    cv::Mat s_edges;
+    cv::Canny(s_dx, s_dy, s_edges, 50, 100);
+
+    for (int r = 0; r < s_edges.rows; r++) {
+        const uchar* er = s_edges.ptr<uchar>(r);
+        const short* dxr = s_dx.ptr<short>(r);
+        const short* dyr = s_dy.ptr<short>(r);
+        for (int c = 0; c < s_edges.cols; c++) {
+            if (er[c] == 0) continue;
+            float gx = (float)dxr[c], gy = (float)dyr[c];
+            float mag = std::sqrt(gx*gx + gy*gy);
+            if (mag < 1e-6f) continue;
+            out_x.push_back((float)c + offset_x);
+            out_y.push_back((float)r + offset_y);
+            out_nx.push_back(gx / mag);
+            out_ny.push_back(gy / mag);
+        }
+    }
+    return (int)out_x.size();
+}
+
+// -----------------------------------------------------------------------
+// Inverse ICP: build EDT on template, match scene edges against it
+// (original interface — builds template scene each call)
+// -----------------------------------------------------------------------
+Pose2D refineInverse(const cv::Mat& templ_gray,
+                     const cv::Mat& scene_gray,
+                     const Pose2D& initial_pose,
+                     int roi_margin,
+                     const ICPConfig& config) {
+    EdgeScene templ_scene = buildTemplateScene(templ_gray, config.max_dist * 2);
+    return refineInverse(templ_scene, templ_gray.cols, templ_gray.rows,
+                         scene_gray, initial_pose, roi_margin, config);
+}
+
+// -----------------------------------------------------------------------
+// Inverse ICP with pre-built template EdgeScene + scene gray image
+// -----------------------------------------------------------------------
+Pose2D refineInverse(const EdgeScene& templ_scene,
+                     int templ_width, int templ_height,
+                     const cv::Mat& scene_gray,
+                     const Pose2D& initial_pose,
+                     int roi_margin,
+                     const ICPConfig& config) {
+    int TW = templ_width, TH = templ_height;
+
+    // Extract scene edges in local ROI
+    int margin = TW / 2 + roi_margin;
+    int rx = std::max(0, (int)(initial_pose.x + 0.5f) - margin);
+    int ry = std::max(0, (int)(initial_pose.y + 0.5f) - margin);
+    int rw = std::min(scene_gray.cols - rx, 2 * margin);
+    int rh = std::min(scene_gray.rows - ry, 2 * margin);
+    if (rw <= 10 || rh <= 10) return initial_pose;
+
+    cv::Mat roi = scene_gray(cv::Rect(rx, ry, rw, rh));
+    cv::Mat s_smooth, s_dx, s_dy;
+    cv::GaussianBlur(roi, s_smooth, cv::Size(5, 5), 0);
+    cv::Sobel(s_smooth, s_dx, CV_16S, 1, 0, 3);
+    cv::Sobel(s_smooth, s_dy, CV_16S, 0, 1, 3);
+
+    std::vector<float> se_x, se_y, se_nx, se_ny;
+    int NS = extractSceneEdgesSoA(s_dx, s_dy, (float)rx, (float)ry,
+                                  se_x, se_y, se_nx, se_ny);
+    if (NS == 0) return initial_pose;
+
+    return refineInverseCore(templ_scene, TW, TH,
+                             se_x.data(), se_y.data(),
+                             se_nx.data(), se_ny.data(), NS,
+                             initial_pose, config);
+}
+
+// -----------------------------------------------------------------------
+// Inverse ICP with pre-built template EdgeScene + scene Sobel derivatives
+// -----------------------------------------------------------------------
+Pose2D refineInverse(const EdgeScene& templ_scene,
+                     int templ_width, int templ_height,
+                     const cv::Mat& scene_dx, const cv::Mat& scene_dy,
+                     const Pose2D& initial_pose,
+                     int templ_diag,
+                     int roi_margin,
+                     const ICPConfig& config) {
+    int TW = templ_width, TH = templ_height;
+
+    // ROI from scene Sobel derivatives
+    int margin = templ_diag / 2 + roi_margin;
+    int rx = std::max(0, (int)(initial_pose.x + 0.5f) - margin);
+    int ry = std::max(0, (int)(initial_pose.y + 0.5f) - margin);
+    int rw = std::min(scene_dx.cols - rx, 2 * margin);
+    int rh = std::min(scene_dx.rows - ry, 2 * margin);
+    if (rw <= 10 || rh <= 10) return initial_pose;
+
+    cv::Rect roi(rx, ry, rw, rh);
+    cv::Mat local_dx = scene_dx(roi);
+    cv::Mat local_dy = scene_dy(roi);
+
+    std::vector<float> se_x, se_y, se_nx, se_ny;
+    int NS = extractSceneEdgesSoA(local_dx, local_dy, (float)rx, (float)ry,
+                                  se_x, se_y, se_nx, se_ny);
+    if (NS == 0) return initial_pose;
+
+    return refineInverseCore(templ_scene, TW, TH,
+                             se_x.data(), se_y.data(),
+                             se_nx.data(), se_ny.data(), NS,
+                             initial_pose, config);
 }
 
 } // namespace icp_refine

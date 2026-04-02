@@ -932,6 +932,12 @@ int ShapeMatcher::addModel(const std::string& name,
     info.name = name;
     info.features = features;
     info.features.selectOptimizedPoints(15);  // precompute + cache
+    // Pre-build template EdgeScene for inverse ICP refinement
+    if (!info.features.templ_image.empty()) {
+        info.features.cached_templ_scene =
+            icp_refine::buildTemplateScene(info.features.templ_image, 20.0f);
+        info.features.templ_scene_valid = true;
+    }
     info.config = config;
     info.class_id = "sbm_" + name;
     info.class_id_flip = "sbm_" + name + "_flip";
@@ -1064,78 +1070,35 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         while (user_angle < 0) user_angle += 360;
         while (user_angle >= 360) user_angle -= 360;
 
-        // ICP refinement at full resolution
+        // ICP refinement at full resolution (inverse ICP)
         bool do_icp = (cfg.refine == RefineMode::ICP || cfg.refine == RefineMode::ICP_Sparse)
-                      && !scene.empty();
+                      && !scene.empty() && fs.templ_scene_valid;
         if (do_icp) {
-            std::vector<icp_refine::EdgePoint> edges;
-            bool use_cornerness = false;
+            icp_refine::ICPConfig icp_cfg;
+            icp_cfg.max_iterations = cfg.icp_iterations;
+            icp_cfg.max_dist = cfg.icp_max_dist;
 
-            if (cfg.refine == RefineMode::ICP && !fs.refine_points.empty()) {
-                // All refine points (edges + corners) with proper normals + cornerness
-                for (auto& rp : fs.refine_points) {
-                    icp_refine::EdgePoint ep;
-                    ep.pos = cv::Point2f(rp.px, rp.py);
-                    ep.normal = cv::Point2f(rp.nx, rp.ny);
-                    ep.cornerness = rp.cornerness;
-                    edges.push_back(ep);
-                }
-                use_cornerness = true;  // corners get point-to-point
-            } else {
-                // Sparse matching features with cornerness-aware ICP weight.
-                // Corner features (cornerness > 0.3) use higher point_to_point_weight
-                // for 2D constraint. Edge features use point-to-plane only.
-                auto& lvl0 = fs.levels[0];
-                for (auto& f : lvl0.features) {
-                    icp_refine::EdgePoint ep;
-                    ep.pos = cv::Point2f((float)(f.x + lvl0.tl_x) - fs.templ_width / 2.0f,
-                                         (float)(f.y + lvl0.tl_y) - fs.templ_height / 2.0f);
-                    float tr = f.theta * (float)CV_PI / 180.0f;
-                    ep.normal = cv::Point2f(std::cos(tr), std::sin(tr));
-                    ep.cornerness = f.cornerness;
-                    edges.push_back(ep);
-                }
-                use_cornerness = true;
-            }
+            icp_refine::Pose2D init(scene_x, scene_y, raw_angle);
+            auto refined = icp_refine::refineInverse(
+                fs.cached_templ_scene,
+                fs.templ_width, fs.templ_height,
+                scene, init, 20, icp_cfg);
 
-            cv::Mat roi_smooth, roi_dx, roi_dy;
-            int margin = (int)(fs.templ_width * matched_scale / 2) + 30;
-            int rx = std::max(0, (int)(scene_x - margin));
-            int ry = std::max(0, (int)(scene_y - margin));
-            int rw = std::min(scene.cols - rx, 2 * margin);
-            int rh = std::min(scene.rows - ry, 2 * margin);
-            if (rw > 10 && rh > 10) {
-                cv::Mat roi = scene(cv::Rect(rx, ry, rw, rh));
-                cv::GaussianBlur(roi, roi_smooth, cv::Size(7, 7), 0);
-                cv::Sobel(roi_smooth, roi_dx, CV_16S, 1, 0, 3);
-                cv::Sobel(roi_smooth, roi_dy, CV_16S, 0, 1, 3);
+            // Update with refined pose
+            scene_x = refined.x;
+            scene_y = refined.y;
+            raw_angle = refined.angle;
 
-                icp_refine::ICPConfig icp_cfg;
-                icp_cfg.max_iterations = cfg.icp_iterations;
-                icp_cfg.max_dist = cfg.icp_max_dist;
-                icp_cfg.use_cornerness = use_cornerness;
-
-                icp_refine::Pose2D init(scene_x - rx, scene_y - ry, raw_angle);
-                auto refined = icp_refine::refineWithNormals(
-                    edges, roi_dx, roi_dy, init,
-                    (int)(fs.templ_width * matched_scale), 20, icp_cfg);
-
-                // Update with refined pose
-                scene_x = refined.x + rx;
-                scene_y = refined.y + ry;
-                raw_angle = refined.angle;
-
-                // Recompute user coordinates from refined pose
-                rad = -raw_angle * (float)CV_PI / 180.0f;
-                rot_ox = (std::cos(rad) * ox - std::sin(rad) * oy) * matched_scale;
-                rot_oy = (std::sin(rad) * ox + std::cos(rad) * oy) * matched_scale;
-                user_x = scene_x + rot_ox;
-                user_y = scene_y + rot_oy;
-                user_angle = raw_angle + fs.angle_offset;
-                if (is_flip) user_angle = -user_angle + 2 * fs.angle_offset;
-                while (user_angle < 0) user_angle += 360;
-                while (user_angle >= 360) user_angle -= 360;
-            }
+            // Recompute user coordinates from refined pose
+            rad = -raw_angle * (float)CV_PI / 180.0f;
+            rot_ox = (std::cos(rad) * ox - std::sin(rad) * oy) * matched_scale;
+            rot_oy = (std::sin(rad) * ox + std::cos(rad) * oy) * matched_scale;
+            user_x = scene_x + rot_ox;
+            user_y = scene_y + rot_oy;
+            user_angle = raw_angle + fs.angle_offset;
+            if (is_flip) user_angle = -user_angle + 2 * fs.angle_offset;
+            while (user_angle < 0) user_angle += 360;
+            while (user_angle >= 360) user_angle -= 360;
         }
 
         // ROI-based refinement

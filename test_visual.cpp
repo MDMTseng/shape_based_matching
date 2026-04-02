@@ -296,20 +296,22 @@ int main() {
         double ms = chrono::duration<double, std::milli>(
             chrono::high_resolution_clock::now() - t0).count();
 
-        // ICP refinement on NMS'd matches
+        // ICP local refinement on NMS'd matches
+        // Reuse scene Sobel (already computed during match preprocessing)
         auto nms_matches = spatial_nms(matches, (float)TW * 0.8f);
         double icp_ms = 0;
         {
             auto icp_t0 = chrono::high_resolution_clock::now();
 
-            // Build edge scene from this image
+            // Compute scene Sobel once (in production, cache from match())
             Mat scene_smooth, scene_dx, scene_dy;
             GaussianBlur(scene, scene_smooth, Size(7, 7), 0);
             Sobel(scene_smooth, scene_dx, CV_16S, 1, 0, 3);
             Sobel(scene_smooth, scene_dy, CV_16S, 0, 1, 3);
 
-            icp_refine::EdgeScene edge_scene;
-            edge_scene.build(scene_dx, scene_dy, 30, 60, 10);
+            auto sobel_done = chrono::high_resolution_clock::now();
+            double sobel_ms = chrono::duration<double, std::milli>(
+                sobel_done - icp_t0).count();
 
             icp_refine::ICPConfig icp_cfg;
             icp_cfg.max_iterations = 30;
@@ -324,7 +326,9 @@ int main() {
                 float coarse_angle = m.template_id * 2.0f;
 
                 icp_refine::Pose2D init_pose(cx, cy, coarse_angle);
-                auto refined = icp_refine::refine(templ_edge_pts, edge_scene, init_pose, icp_cfg);
+                auto refined = icp_refine::refineLocal(
+                    templ_edge_pts, scene_dx, scene_dy,
+                    init_pose, TW, 20, icp_cfg);
                 m.refined_angle = refined.angle;
                 m.x = (int)(refined.x - tmpl_info[0].width / 2.0f + 0.5f);
                 m.y = (int)(refined.y - tmpl_info[0].height / 2.0f + 0.5f);
@@ -332,6 +336,10 @@ int main() {
 
             icp_ms = chrono::duration<double, std::milli>(
                 chrono::high_resolution_clock::now() - icp_t0).count();
+            double icp_only_ms = chrono::duration<double, std::milli>(
+                chrono::high_resolution_clock::now() - sobel_done).count();
+            // Note: sobel_ms could be eliminated by caching from match()
+            printf("  (sobel=%.1fms icp=%.1fms)", sobel_ms, icp_only_ms);
         }
 
         printf("%-20s: %5d matches  match=%.1fms  icp=%.1fms  total=%.1fms",

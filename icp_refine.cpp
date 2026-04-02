@@ -341,4 +341,54 @@ Pose2D refine(const std::vector<cv::Point2f>& templ_edges,
     return pose;
 }
 
+// -----------------------------------------------------------------------
+// Local ROI refinement — builds EdgeScene only on a small patch
+// -----------------------------------------------------------------------
+Pose2D refineLocal(const std::vector<cv::Point2f>& templ_edges,
+                   const cv::Mat& scene_dx, const cv::Mat& scene_dy,
+                   const Pose2D& initial_pose,
+                   int templ_size,
+                   int roi_margin,
+                   const ICPConfig& config) {
+    int sw = scene_dx.cols, sh = scene_dx.rows;
+    int half = templ_size / 2 + roi_margin;
+
+    // ROI centered on match position
+    int rx = (int)(initial_pose.x + 0.5f) - half;
+    int ry = (int)(initial_pose.y + 0.5f) - half;
+    int rw = 2 * half;
+    int rh = 2 * half;
+
+    // Clamp to image bounds
+    if (rx < 0) rx = 0;
+    if (ry < 0) ry = 0;
+    if (rx + rw > sw) rw = sw - rx;
+    if (ry + rh > sh) rh = sh - ry;
+    if (rw <= 10 || rh <= 10) return initial_pose;
+
+    cv::Rect roi(rx, ry, rw, rh);
+    cv::Mat local_dx = scene_dx(roi);
+    cv::Mat local_dy = scene_dy(roi);
+
+    // Build local edge scene
+    EdgeScene local_scene;
+    local_scene.build(local_dx, local_dy,
+                      config.max_dist * 3, config.max_dist * 6,  // Canny thresholds
+                      config.max_dist);
+
+    // Shift initial pose to local coordinates
+    Pose2D local_pose = initial_pose;
+    local_pose.x -= rx;
+    local_pose.y -= ry;
+
+    // Run ICP in local coordinates
+    Pose2D result = refine(templ_edges, local_scene, local_pose, config);
+
+    // Shift back to global coordinates
+    result.x += rx;
+    result.y += ry;
+
+    return result;
+}
+
 } // namespace icp_refine

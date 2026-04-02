@@ -57,15 +57,27 @@ struct EdgeScene {
 std::vector<cv::Point2f> transformModelPoints(
     const std::vector<cv::Point2f>& templ_edges, const Pose2D& pose);
 
-/// Run ICP refinement.
-/// @param model_points  Template edge points in scene coords (initial pose).
-/// @param scene         Pre-built edge scene.
-/// @param initial_pose  Coarse pose from template matching.
-/// @param config        ICP parameters.
-/// @return Refined pose with fitness and RMSE.
+/// Run ICP refinement using pre-built full scene.
 Pose2D refine(const std::vector<cv::Point2f>& templ_edges,
               const EdgeScene& scene,
               const Pose2D& initial_pose,
               const ICPConfig& config = ICPConfig());
+
+/// Run ICP refinement using local ROI only.
+/// Crops a patch around the match position from scene Sobel derivatives,
+/// builds a local EdgeScene, and refines within that patch.
+/// Much faster than full-scene build (~0.1ms per object vs ~40ms for full scene).
+/// @param templ_edges   Template edge points relative to center.
+/// @param scene_dx      Full scene Sobel dx (CV_16S).
+/// @param scene_dy      Full scene Sobel dy (CV_16S).
+/// @param initial_pose  Coarse pose (x, y, angle) from template matching.
+/// @param roi_margin    Extra margin around template bounding box (pixels).
+/// @param config        ICP parameters.
+Pose2D refineLocal(const std::vector<cv::Point2f>& templ_edges,
+                   const cv::Mat& scene_dx, const cv::Mat& scene_dy,
+                   const Pose2D& initial_pose,
+                   int templ_size,
+                   int roi_margin = 20,
+                   const ICPConfig& config = ICPConfig());
 
 } // namespace icp_refine

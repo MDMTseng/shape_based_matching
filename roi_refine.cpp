@@ -242,6 +242,14 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
     std::vector<MatchedPoint> matched_points;
     float last_match_angle = -999;
 
+    // Cache rotated ROI patches — warp once, reuse across re-matches
+    struct CachedROI {
+        cv::Mat patch;    // rotated ROI patch
+        int sample_idx;
+    };
+    std::vector<CachedROI> cached_rois;
+    float cached_angle = -999;
+
     for (int iteration = 0; iteration < config.max_iters; ++iteration) {
 
     float cx = pose[0], cy = pose[1];
@@ -260,26 +268,42 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
         last_match_angle = angle_deg;
         matched_points.clear();
 
-        for (size_t si = 0; si < sample_points.size(); ++si) {
-            auto& sp = sample_points[si];
-            int tx = (int)(sp.pos.x + tcx + 0.5f);
-            int ty = (int)(sp.pos.y + tcy + 0.5f);
-            int h = config.roi_half;
+        // Warp ROI patches only if angle changed significantly from cache
+        bool need_warp = (std::abs(angle_deg - cached_angle) > 5.0f);
+        if (need_warp) {
+            cached_angle = angle_deg;
+            cached_rois.clear();
+        }
 
-            if (tx-h < 0 || tx+h >= templ_img.cols || ty-h < 0 || ty+h >= templ_img.rows) {
-                h = std::min({tx, ty, templ_img.cols - 1 - tx, templ_img.rows - 1 - ty});
-                if (h < 5) continue;
+        if (cached_rois.empty()) {
+            // Warp each ROI patch once
+            for (size_t si = 0; si < sample_points.size(); ++si) {
+                auto& sp = sample_points[si];
+                int tx = (int)(sp.pos.x + tcx + 0.5f);
+                int ty = (int)(sp.pos.y + tcy + 0.5f);
+                int h = config.roi_half;
+                if (tx-h<0||tx+h>=templ_img.cols||ty-h<0||ty+h>=templ_img.rows) {
+                    h = std::min({tx,ty,templ_img.cols-1-tx,templ_img.rows-1-ty});
+                    if (h < 5) continue;
+                }
+                cv::Mat roi_unrot = templ_img(cv::Rect(tx-h, ty-h, 2*h, 2*h));
+                cv::Mat roi;
+                if (std::abs(angle_deg) > 0.5f) {
+                    cv::Mat M = cv::getRotationMatrix2D(cv::Point2f((float)h,(float)h), -angle_deg, 1.0);
+                    cv::warpAffine(roi_unrot, roi, M, roi_unrot.size(), cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+                } else {
+                    roi = roi_unrot.clone();
+                }
+                CachedROI cr;
+                cr.patch = roi;
+                cr.sample_idx = (int)si;
+                cached_rois.push_back(cr);
             }
+        }
 
-            cv::Mat roi_unrotated = templ_img(cv::Rect(tx-h, ty-h, 2*h, 2*h));
-            cv::Mat roi;
-            if (std::abs(angle_deg) > 0.5f) {
-                cv::Mat M = cv::getRotationMatrix2D(cv::Point2f((float)h, (float)h), -angle_deg, 1.0);
-                cv::warpAffine(roi_unrotated, roi, M, roi_unrotated.size(),
-                               cv::INTER_LINEAR, cv::BORDER_REPLICATE);
-            } else {
-                roi = roi_unrotated;
-            }
+        for (auto& cr : cached_rois) {
+            auto& sp = sample_points[cr.sample_idx];
+            cv::Mat& roi = cr.patch;
 
             float ex = cs * sp.pos.x - sn * sp.pos.y + cx;
             float ey = sn * sp.pos.x + cs * sp.pos.y + cy;
@@ -298,7 +322,7 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
             mp.tangent = eigvecs[0];
             mp.is_corner = (eigvals[0] > 1e-6f && eigvals[1] > 1e-6f &&
                             eigvals[0] / eigvals[1] < config.corner_eigen_ratio);
-            mp.sample_idx = (int)si;
+            mp.sample_idx = cr.sample_idx;
             matched_points.push_back(mp);
         }
     }

@@ -365,7 +365,6 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
         pt0 = pnow();
         Mat quantized_unfiltered = Mat::zeros(src.size(), CV_8U);
         Mat mag_mask = Mat::zeros(src.size(), CV_8U); // 0xFF if above threshold
-        int threshold_i = (int)threshold;
         float threshold_sq = threshold * threshold;
 
         for (int r = 1; r < src.rows - 1; ++r) {
@@ -380,9 +379,10 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
                 int mag_sq_i = gx*gx + gy*gy;
                 mag_r[c] = (float)mag_sq_i;
 
-                int abs_gx = abs(gx), abs_gy = abs(gy);
-                if (abs_gx + abs_gy <= threshold_i) continue;
+                if (mag_sq_i <= (int)threshold_sq) continue;
                 mask_r[c] = 0xFF;
+
+                int abs_gx = abs(gx), abs_gy = abs(gy);
 
                 // Reduce to undirected [0,180)
                 int ugx = gx, ugy = gy;

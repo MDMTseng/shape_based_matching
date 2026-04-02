@@ -1,5 +1,4 @@
 // Per-stage profiling under clean and noisy conditions.
-// Shows where time is spent so we know what to optimize next.
 
 #include "line2Dup.h"
 #include <opencv2/core.hpp>
@@ -9,11 +8,6 @@
 
 using namespace cv;
 using namespace std;
-using Clock = chrono::high_resolution_clock;
-
-static double ms_since(Clock::time_point t0) {
-    return chrono::duration<double, std::milli>(Clock::now() - t0).count();
-}
 
 static void draw_L(Mat& img, int cx, int cy, double angle, int color, double scale = 2.0) {
     double rad = angle * CV_PI / 180.0;
@@ -84,8 +78,7 @@ int main() {
         warpAffine(mask_t, rot_mask, M, Size(TW, TW));
         det.addTemplate(rot_templ, "L", rot_mask);
     }
-    int ntmpl = det.numTemplates("L");
-    printf("Templates: %d\n\n", ntmpl);
+    printf("Templates: %d\n\n", det.numTemplates("L"));
 
     struct TestCase { int w, h; double sigma; const char* name; };
     TestCase cases[] = {
@@ -98,7 +91,7 @@ int main() {
         {1920, 1080, 50, "FHD sigma=50"},
     };
 
-    const int RUNS = 3;
+    line2Dup::enableProfiling(true);
 
     for (auto& tc : cases) {
         printf("--- %s (%dx%d) ---\n", tc.name, tc.w, tc.h);
@@ -106,35 +99,20 @@ int main() {
         Mat scene = make_scene(tc.w, tc.h, tc.sigma);
         Mat padded = pad16(scene);
 
-        // Warmup
+        // Warmup (without profiling)
+        line2Dup::enableProfiling(false);
         auto matches = det.match(padded, 50);
+        line2Dup::enableProfiling(true);
+
+        // Profile run
+        line2Dup::resetProfiling();
+        matches = det.match(padded, 50);
+
         printf("  Matches: %d\n", (int)matches.size());
-
-        // Profile: total match time
-        double total_ms = 0;
-        for (int r = 0; r < RUNS; ++r) {
-            auto t0 = Clock::now();
-            matches = det.match(padded, 50);
-            total_ms += ms_since(t0);
-        }
-        printf("  Total: %.1f ms\n", total_ms / RUNS);
-
-        // Profile individual stages using the internal timers
-        // (the match() function prints "construct response map" and "templ match")
-        // We just need to read the elapsed output above.
-
-        // Also profile: just preprocessing (quantize + fused spread/response/linearize)
-        // by calling match on a detector with the same scene but measuring externally.
-        // The internal timer.out() already printed the breakdown.
-
+        line2Dup::printProfiling();
         printf("\n");
     }
 
     printf("================================================================\n");
-    printf("  Internal timer breakdown is printed above as:\n");
-    printf("    'construct response map' = quantize + spread + LUT + linearize\n");
-    printf("    'templ match' = coarse similarity + pyramid refinement + NMS\n");
-    printf("================================================================\n");
-
     return 0;
 }

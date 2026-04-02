@@ -30,6 +30,39 @@ private:
     std::chrono::time_point<clock_> beg_;
 };
 
+// Per-stage profiling accumulator (thread-safe for single match() call)
+struct StageProfile {
+    double blur_ms = 0;
+    double sobel_ms = 0;
+    double quantize_ms = 0;
+    double voting_ms = 0;
+    double fused_spread_lut_ms = 0;
+    double coarse_match_ms = 0;
+    double refine_ms = 0;
+    double sort_nms_ms = 0;
+    bool enabled = false;
+
+    void print() const {
+        if (!enabled) return;
+        printf("  %-28s %7.1fms\n", "GaussianBlur 7x7", blur_ms);
+        printf("  %-28s %7.1fms\n", "Sobel dx+dy (int16)", sobel_ms);
+        printf("  %-28s %7.1fms\n", "Quantize (comparison)", quantize_ms);
+        printf("  %-28s %7.1fms\n", "3x3 voting", voting_ms);
+        printf("  %-28s %7.1fms\n", "Fused spread+LUT+linearize", fused_spread_lut_ms);
+        printf("  %-28s %7.1fms\n", "Coarse similarity", coarse_match_ms);
+        printf("  %-28s %7.1fms\n", "Pyramid refinement", refine_ms);
+        printf("  %-28s %7.1fms\n", "Sort + NMS", sort_nms_ms);
+        double total = blur_ms + sobel_ms + quantize_ms + voting_ms +
+                       fused_spread_lut_ms + coarse_match_ms + refine_ms + sort_nms_ms;
+        printf("  %-28s %7.1fms\n", "TOTAL", total);
+    }
+    void reset() {
+        blur_ms = sobel_ms = quantize_ms = voting_ms = 0;
+        fused_spread_lut_ms = coarse_match_ms = refine_ms = sort_nms_ms = 0;
+    }
+};
+static StageProfile g_profile;
+
 namespace line2Dup
 {
 /**
@@ -292,19 +325,24 @@ void hysteresisGradient(Mat &magnitude, Mat &quantized_angle,
 static void quantizedOrientations(const Mat &src, Mat &magnitude,
                                   Mat &angle, Mat& angle_ori, float threshold)
 {
+    using PClock = std::chrono::high_resolution_clock;
+    auto pnow = []() { return PClock::now(); };
+    auto pms = [](PClock::time_point t0) {
+        return std::chrono::duration<double, std::milli>(PClock::now() - t0).count();
+    };
+
     Mat smoothed;
-    // Compute horizontal and vertical image derivatives on all color channels separately
     static const int KERNEL_SIZE = 7;
-    // For some reason cvSmooth/cv::GaussianBlur, cvSobel/cv::Sobel have different defaults for border handling...
+    auto pt0 = pnow();
     GaussianBlur(src, smoothed, Size(KERNEL_SIZE, KERNEL_SIZE), 0, 0, BORDER_REPLICATE);
+    if (g_profile.enabled) g_profile.blur_ms += pms(pt0);
 
     if(src.channels() == 1){
-        // FAST PATH: integer Sobel + comparison-based 8-bin quantization.
-        // Avoids cv::phase() (atan2 on every pixel) which dominates preprocessing.
-        // Instead, determine orientation bin from dx/dy sign + magnitude comparisons.
         Mat sobel_dx_16s, sobel_dy_16s;
+        pt0 = pnow();
         Sobel(smoothed, sobel_dx_16s, CV_16S, 1, 0, 3, 1.0, 0.0, BORDER_REPLICATE);
         Sobel(smoothed, sobel_dy_16s, CV_16S, 0, 1, 3, 1.0, 0.0, BORDER_REPLICATE);
+        if (g_profile.enabled) g_profile.sobel_ms += pms(pt0);
 
         // Squared magnitude (float) for threshold compatibility
         magnitude.create(src.size(), CV_32F);
@@ -321,139 +359,127 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
         // Fixed-point tan boundaries * 10000:
         static const int TAN_B[4] = {1989, 6682, 14966, 50273};
 
-        // Step 1: Compute magnitude + unfiltered 8-bin quantization
-        // AVX2 fast path: compute L1 magnitude for 16 pixels at once,
-        // then scalar bin computation only for above-threshold pixels.
+        // Step 1: Compute magnitude + unfiltered 8-bin quantization.
+        // Sobel 3x3 on uint8: max |dx|=1020, so 1020*50273=51M fits int32.
+        // No need for long long — int multiply is 3x faster.
+        pt0 = pnow();
         Mat quantized_unfiltered = Mat::zeros(src.size(), CV_8U);
-        int threshold_i = (int)threshold;  // L1 threshold (not squared)
-        float threshold_sq = threshold * threshold;  // for magnitude Mat compatibility
+        Mat mag_mask = Mat::zeros(src.size(), CV_8U); // 0xFF if above threshold
+        int threshold_i = (int)threshold;
+        float threshold_sq = threshold * threshold;
 
         for (int r = 1; r < src.rows - 1; ++r) {
             const short *dx = sobel_dx_16s.ptr<short>(r);
             const short *dy = sobel_dy_16s.ptr<short>(r);
             float *mag_r = magnitude.ptr<float>(r);
             uchar *qr = quantized_unfiltered.ptr<uchar>(r);
+            uchar *mask_r = mag_mask.ptr<uchar>(r);
 
-            int c = 1;
-#ifdef __AVX2__
-            // AVX2: compute magnitude for 16 pixels, threshold, then
-            // only process above-threshold pixels with scalar bin logic.
-            const __m256i thresh_v = _mm256_set1_epi16((short)threshold_i);
-            for (; c <= src.cols - 1 - 16; c += 16) {
-                __m256i vdx = _mm256_loadu_si256((const __m256i*)(dx + c));
-                __m256i vdy = _mm256_loadu_si256((const __m256i*)(dy + c));
-                __m256i adx = _mm256_abs_epi16(vdx);
-                __m256i ady = _mm256_abs_epi16(vdy);
-                __m256i mag_l1 = _mm256_add_epi16(adx, ady);
-
-                // Store squared magnitude as float for compatibility
-                // Widen to int32 and convert
-                __m256i lo16 = _mm256_unpacklo_epi16(vdx, _mm256_setzero_si256());
-                __m256i hi16 = _mm256_unpackhi_epi16(vdx, _mm256_setzero_si256());
-                // Actually, just compute and store mag_sq with scalar below
-                // since the float store is not the bottleneck
-
-                // Check which pixels are above threshold
-                __m256i above = _mm256_cmpgt_epi16(mag_l1, thresh_v);
-                int mask = _mm256_movemask_epi8(above);
-
-                if (mask == 0) {
-                    // All below threshold: just store zero magnitudes
-                    for (int i = 0; i < 16; ++i) {
-                        int gx = dx[c+i], gy = dy[c+i];
-                        mag_r[c+i] = (float)(gx*gx + gy*gy);
-                    }
-                    continue;
-                }
-
-                // Some pixels above threshold: scalar bin computation
-                for (int i = 0; i < 16; ++i) {
-                    int gx = dx[c+i], gy = dy[c+i];
-                    int mag_sq_i = gx*gx + gy*gy;
-                    mag_r[c+i] = (float)mag_sq_i;
-
-                    int abs_gx = abs(gx), abs_gy = abs(gy);
-                    if (abs_gx + abs_gy <= threshold_i) continue;
-
-                    int ugx = gx, ugy = gy;
-                    if (ugy < 0) { ugx = -ugx; ugy = -ugy; }
-                    if (ugy == 0 && ugx < 0) ugx = -ugx;
-
-                    int bin;
-                    if (ugx >= 0) {
-                        long long test_y = (long long)ugy * 10000;
-                        if (test_y < (long long)ugx * TAN_B[0]) bin = 0;
-                        else if (test_y < (long long)ugx * TAN_B[1]) bin = 1;
-                        else if (test_y < (long long)ugx * TAN_B[2]) bin = 2;
-                        else if (test_y < (long long)ugx * TAN_B[3]) bin = 3;
-                        else bin = 4;
-                    } else {
-                        int agx = -ugx;
-                        long long test_y = (long long)ugy * 10000;
-                        if (test_y < (long long)agx * TAN_B[0]) bin = 0;
-                        else if (test_y < (long long)agx * TAN_B[1]) bin = 7;
-                        else if (test_y < (long long)agx * TAN_B[2]) bin = 6;
-                        else if (test_y < (long long)agx * TAN_B[3]) bin = 5;
-                        else bin = 4;
-                    }
-                    qr[c+i] = (uchar)bin;
-                }
-            }
-#endif
-            // Scalar tail
-            for (; c < src.cols - 1; ++c) {
+            for (int c = 1; c < src.cols - 1; ++c) {
                 int gx = dx[c], gy = dy[c];
                 int mag_sq_i = gx*gx + gy*gy;
                 mag_r[c] = (float)mag_sq_i;
 
                 int abs_gx = abs(gx), abs_gy = abs(gy);
                 if (abs_gx + abs_gy <= threshold_i) continue;
+                mask_r[c] = 0xFF;
 
+                // Reduce to undirected [0,180)
                 int ugx = gx, ugy = gy;
                 if (ugy < 0) { ugx = -ugx; ugy = -ugy; }
                 if (ugy == 0 && ugx < 0) ugx = -ugx;
 
                 int bin;
                 if (ugx >= 0) {
-                    long long test_y = (long long)ugy * 10000;
-                    if (test_y < (long long)ugx * TAN_B[0]) bin = 0;
-                    else if (test_y < (long long)ugx * TAN_B[1]) bin = 1;
-                    else if (test_y < (long long)ugx * TAN_B[2]) bin = 2;
-                    else if (test_y < (long long)ugx * TAN_B[3]) bin = 3;
+                    int test_y = ugy * 10000;
+                    if (test_y < ugx * TAN_B[0]) bin = 0;
+                    else if (test_y < ugx * TAN_B[1]) bin = 1;
+                    else if (test_y < ugx * TAN_B[2]) bin = 2;
+                    else if (test_y < ugx * TAN_B[3]) bin = 3;
                     else bin = 4;
                 } else {
                     int agx = -ugx;
-                    long long test_y = (long long)ugy * 10000;
-                    if (test_y < (long long)agx * TAN_B[0]) bin = 0;
-                    else if (test_y < (long long)agx * TAN_B[1]) bin = 7;
-                    else if (test_y < (long long)agx * TAN_B[2]) bin = 6;
-                    else if (test_y < (long long)agx * TAN_B[3]) bin = 5;
+                    int test_y = ugy * 10000;
+                    if (test_y < agx * TAN_B[0]) bin = 0;
+                    else if (test_y < agx * TAN_B[1]) bin = 7;
+                    else if (test_y < agx * TAN_B[2]) bin = 6;
+                    else if (test_y < agx * TAN_B[3]) bin = 5;
                     else bin = 4;
                 }
                 qr[c] = (uchar)bin;
             }
         }
 
-        // Step 2: Fast 3x3 neighborhood voting.
-        // Instead of full 8-bin histogram, count how many of the 8 neighbors
-        // share the center pixel's bin. Cheaper: 8 equality checks vs 9 loads +
-        // histogram + find-max. Semantically equivalent when center bin wins.
+        if (g_profile.enabled) g_profile.quantize_ms += pms(pt0);
+
+        // Step 2: AVX2-vectorized 3x3 neighborhood voting.
+        // For each pixel, count how many of its 8 neighbors share its bin.
+        // Process 32 pixels at a time with SIMD equality comparisons.
+        pt0 = pnow();
         angle = Mat::zeros(src.size(), CV_8U);
-        static const int NEIGHBOR_THRESHOLD = 5; // 5 of 9 (center + 4 neighbors)
-        int q_step = static_cast<int>(quantized_unfiltered.step1());
+        static const int NEIGHBOR_THRESHOLD = 5;
+
+#ifdef __AVX2__
+        // LUT: bin index (0-7) → bitmask (1<<bin)
+        alignas(16) static const uchar bin_to_bit[16] = {
+            1, 2, 4, 8, 16, 32, 64, 128, 0, 0, 0, 0, 0, 0, 0, 0
+        };
+        const __m256i bit_lut = _mm256_broadcastsi128_si256(
+            _mm_load_si128((const __m128i*)bin_to_bit));
+        const __m256i one = _mm256_set1_epi8(1);
+        const __m256i thresh_vote = _mm256_set1_epi8((char)(NEIGHBOR_THRESHOLD - 1));
+        // cmpgt > (THRESHOLD-1) means >= THRESHOLD
 
         for (int r = 1; r < src.rows - 1; ++r) {
-            float *mag_r = magnitude.ptr<float>(r);
             const uchar *q_prev = quantized_unfiltered.ptr<uchar>(r-1);
             const uchar *q_curr = quantized_unfiltered.ptr<uchar>(r);
             const uchar *q_next = quantized_unfiltered.ptr<uchar>(r+1);
+            const uchar *mask_r = mag_mask.ptr<uchar>(r);
             uchar *angle_r = angle.ptr<uchar>(r);
 
-            for (int c = 1; c < src.cols - 1; ++c) {
-                if (mag_r[c] > threshold_sq) {
+            int c = 1;
+            for (; c <= src.cols - 1 - 32; c += 32) {
+                // Load center pixels
+                __m256i center = _mm256_loadu_si256((const __m256i*)(q_curr + c));
+
+                // Count matching neighbors (start with 1 for center)
+                __m256i votes = one;
+                votes = _mm256_add_epi8(votes, _mm256_and_si256(one,
+                    _mm256_cmpeq_epi8(center, _mm256_loadu_si256((const __m256i*)(q_prev + c - 1)))));
+                votes = _mm256_add_epi8(votes, _mm256_and_si256(one,
+                    _mm256_cmpeq_epi8(center, _mm256_loadu_si256((const __m256i*)(q_prev + c)))));
+                votes = _mm256_add_epi8(votes, _mm256_and_si256(one,
+                    _mm256_cmpeq_epi8(center, _mm256_loadu_si256((const __m256i*)(q_prev + c + 1)))));
+                votes = _mm256_add_epi8(votes, _mm256_and_si256(one,
+                    _mm256_cmpeq_epi8(center, _mm256_loadu_si256((const __m256i*)(q_curr + c - 1)))));
+                votes = _mm256_add_epi8(votes, _mm256_and_si256(one,
+                    _mm256_cmpeq_epi8(center, _mm256_loadu_si256((const __m256i*)(q_curr + c + 1)))));
+                votes = _mm256_add_epi8(votes, _mm256_and_si256(one,
+                    _mm256_cmpeq_epi8(center, _mm256_loadu_si256((const __m256i*)(q_next + c - 1)))));
+                votes = _mm256_add_epi8(votes, _mm256_and_si256(one,
+                    _mm256_cmpeq_epi8(center, _mm256_loadu_si256((const __m256i*)(q_next + c)))));
+                votes = _mm256_add_epi8(votes, _mm256_and_si256(one,
+                    _mm256_cmpeq_epi8(center, _mm256_loadu_si256((const __m256i*)(q_next + c + 1)))));
+
+                // votes >= NEIGHBOR_THRESHOLD?
+                __m256i pass = _mm256_cmpgt_epi8(votes, thresh_vote);
+
+                // Magnitude mask
+                __m256i mag_ok = _mm256_loadu_si256((const __m256i*)(mask_r + c));
+
+                // Convert bin to bitmask: 1 << center_bin
+                __m256i bitmask = _mm256_shuffle_epi8(bit_lut, center);
+
+                // Result: bitmask where both pass and mag_ok
+                __m256i result = _mm256_and_si256(bitmask, _mm256_and_si256(pass, mag_ok));
+                _mm256_storeu_si256((__m256i*)(angle_r + c), result);
+            }
+
+            // Scalar tail
+            for (; c < src.cols - 1; ++c) {
+                if (mask_r[c]) {
                     uchar center_bin = q_curr[c];
-                    // Count center + 8 neighbors matching center_bin
-                    int votes = 1; // center always matches itself
+                    int votes = 1;
                     votes += (q_prev[c-1] == center_bin);
                     votes += (q_prev[c]   == center_bin);
                     votes += (q_prev[c+1] == center_bin);
@@ -462,12 +488,39 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
                     votes += (q_next[c-1] == center_bin);
                     votes += (q_next[c]   == center_bin);
                     votes += (q_next[c+1] == center_bin);
-
                     if (votes >= NEIGHBOR_THRESHOLD)
                         angle_r[c] = (uchar)(1 << center_bin);
                 }
             }
         }
+#else
+        // Scalar-only voting fallback
+        for (int r = 1; r < src.rows - 1; ++r) {
+            const uchar *q_prev = quantized_unfiltered.ptr<uchar>(r-1);
+            const uchar *q_curr = quantized_unfiltered.ptr<uchar>(r);
+            const uchar *q_next = quantized_unfiltered.ptr<uchar>(r+1);
+            const uchar *mask_r = mag_mask.ptr<uchar>(r);
+            uchar *angle_r = angle.ptr<uchar>(r);
+            for (int c = 1; c < src.cols - 1; ++c) {
+                if (mask_r[c]) {
+                    uchar center_bin = q_curr[c];
+                    int votes = 1;
+                    votes += (q_prev[c-1] == center_bin);
+                    votes += (q_prev[c]   == center_bin);
+                    votes += (q_prev[c+1] == center_bin);
+                    votes += (q_curr[c-1] == center_bin);
+                    votes += (q_curr[c+1] == center_bin);
+                    votes += (q_next[c-1] == center_bin);
+                    votes += (q_next[c]   == center_bin);
+                    votes += (q_next[c+1] == center_bin);
+                    if (votes >= NEIGHBOR_THRESHOLD)
+                        angle_r[c] = (uchar)(1 << center_bin);
+                }
+            }
+        }
+#endif
+
+        if (g_profile.enabled) g_profile.voting_ms += pms(pt0);
 
     }else{
 
@@ -1351,6 +1404,11 @@ std::vector<Match> Detector::match(Mat source, float threshold,
         {
             quantizers[i]->quantize(quantized);
 
+            // Profile: fused spread+LUT+linearize
+            {
+                using PClock = std::chrono::high_resolution_clock;
+                auto fused_t0 = PClock::now();
+
             // FULLY FUSED: spread + computeResponseMaps + linearize in one pass.
             // Instead of creating WxH spread buffer then reading it back,
             // compute the spread on-the-fly per row using two small temp buffers.
@@ -1610,6 +1668,11 @@ std::vector<Match> Detector::match(Mat source, float threshold,
                     }
                 }
             }
+
+                if (g_profile.enabled)
+                    g_profile.fused_spread_lut_ms += std::chrono::duration<double, std::milli>(
+                        PClock::now() - fused_t0).count();
+            }
         }
 
         sizes.push_back(quantized.size());
@@ -1617,28 +1680,39 @@ std::vector<Match> Detector::match(Mat source, float threshold,
 
     timer.out("construct response map");
 
-    if (class_ids.empty())
     {
-        // Match all templates
-        TemplatesMap::const_iterator it = class_templates.begin(), itend = class_templates.end();
-        for (; it != itend; ++it)
-            matchClass(lm_pyramid, sizes, threshold, matches, it->first, it->second);
-    }
-    else
-    {
-        // Match only templates for the requested class IDs
-        for (int i = 0; i < (int)class_ids.size(); ++i)
+        using PClock = std::chrono::high_resolution_clock;
+        auto match_t0 = PClock::now();
+
+        if (class_ids.empty())
         {
-            TemplatesMap::const_iterator it = class_templates.find(class_ids[i]);
-            if (it != class_templates.end())
+            TemplatesMap::const_iterator it = class_templates.begin(), itend = class_templates.end();
+            for (; it != itend; ++it)
                 matchClass(lm_pyramid, sizes, threshold, matches, it->first, it->second);
         }
-    }
+        else
+        {
+            for (int i = 0; i < (int)class_ids.size(); ++i)
+            {
+                TemplatesMap::const_iterator it = class_templates.find(class_ids[i]);
+                if (it != class_templates.end())
+                    matchClass(lm_pyramid, sizes, threshold, matches, it->first, it->second);
+            }
+        }
 
-    // Sort matches by similarity, and prune any duplicates introduced by pyramid refinement
-    std::sort(matches.begin(), matches.end());
-    std::vector<Match>::iterator new_end = std::unique(matches.begin(), matches.end());
-    matches.erase(new_end, matches.end());
+        if (g_profile.enabled) {
+            double match_ms = std::chrono::duration<double, std::milli>(PClock::now() - match_t0).count();
+            // Split coarse vs refine is inside matchClass, just record total here
+            g_profile.coarse_match_ms += match_ms;
+        }
+
+        auto sort_t0 = PClock::now();
+        std::sort(matches.begin(), matches.end());
+        std::vector<Match>::iterator new_end = std::unique(matches.begin(), matches.end());
+        matches.erase(new_end, matches.end());
+        if (g_profile.enabled)
+            g_profile.sort_nms_ms += std::chrono::duration<double, std::milli>(PClock::now() - sort_t0).count();
+    }
 
     timer.out("templ match");
 
@@ -1652,6 +1726,10 @@ struct MatchPredicate
     bool operator()(const Match &m) { return m.similarity < threshold; }
     float threshold;
 };
+
+void enableProfiling(bool enable) { g_profile.enabled = enable; }
+void resetProfiling() { g_profile.reset(); }
+void printProfiling() { g_profile.print(); }
 
 void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
                           const std::vector<Size> &sizes,

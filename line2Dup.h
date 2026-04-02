@@ -204,6 +204,11 @@ protected:
                                     const std::vector<TemplatePyramid> &template_pyramids) const;
 };
 
+// Per-stage profiling control
+void enableProfiling(bool enable);
+void resetProfiling();
+void printProfiling();
+
 } // namespace line2Dup
 
 namespace shape_based_matching {

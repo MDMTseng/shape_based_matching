@@ -7,6 +7,8 @@
 #include <opencv2/imgproc.hpp>
 #include <chrono>
 #include <cstdio>
+#include <iostream>
+#include <sstream>
 
 using namespace cv;
 
@@ -425,6 +427,283 @@ int main() {
         for (auto& r : results)
             printf("(%3.0f,%3.0f)@%5.1f  ", r.x, r.y, r.angle);
         printf("\n");
+    }
+
+    // ================================================================
+    // FHD speed benchmark: larger template, 1920x1080 scene, 10 objects
+    // ================================================================
+    printf("\n========== FHD SPEED BENCHMARK ==========\n");
+    {
+        // Larger L-shape template (200x200)
+        Mat templ_fhd(200, 200, CV_8U, Scalar(0));
+        draw_L(templ_fhd, 100, 100, 0, 200);
+
+        auto feat_fhd = sbm::extractFeatures(templ_fhd);
+        feat_fhd.setOrigin(100, 75);
+        printf("Template: 200x200 L-shape, %d features\n", feat_fhd.numFeatures());
+
+        // Print optimized feature positions
+        auto fhd_opt = feat_fhd.selectOptimizedPoints(8);
+        printf("  Optimized 8 points (relative to center 100,100):\n");
+        float tcx = feat_fhd.templ_width / 2.0f, tcy = feat_fhd.templ_height / 2.0f;
+        for (size_t i = 0; i < fhd_opt.size(); i++) {
+            auto& p = fhd_opt[i];
+            float lev = std::sqrt(p.x*p.x + p.y*p.y);
+            // Find the normal for this point
+            int best = -1; float best_d = 1e9f;
+            for (size_t j = 0; j < feat_fhd.refine_points.size(); j++) {
+                float dx = p.x - feat_fhd.refine_points[j].px;
+                float dy = p.y - feat_fhd.refine_points[j].py;
+                if (dx*dx+dy*dy < best_d) { best_d = dx*dx+dy*dy; best = (int)j; }
+            }
+            auto& rp = feat_fhd.refine_points[best];
+            printf("    [%d] (%+6.1f,%+6.1f) lev=%4.0f n=(%+.2f,%+.2f) %s\n",
+                   (int)i, p.x, p.y, lev, rp.nx, rp.ny,
+                   rp.type == sbm::FeatureSet::RefinePt::CORNER ? "CORNER" : "EDGE");
+        }
+
+        // Also show sensitivity
+        auto fhd_sens = feat_fhd.analyzeSensitivity();
+        printf("  Sensitivity: worst_ang=%.2f worst_pos=%.2f\n",
+               fhd_sens.worst_angle_sens, fhd_sens.worst_pos_sens);
+        for (auto& f : fhd_sens.features)
+            printf("    (%+6.1f,%+6.1f) d_ang=%.2f d_pos=%.2f lev=%.0f\n",
+                   f.pos.x, f.pos.y, f.d_ang, f.d_pos, f.leverage);
+        printf("\n");
+
+        // FHD scene with 10 objects at various positions/angles
+        struct FHDObj { int x, y; double angle; };
+        FHDObj fhd_objs[] = {
+            {200, 150, 15},  {500, 300, 45},   {900, 200, 90},
+            {1300, 400, 135}, {1700, 250, 180}, {350, 700, 210},
+            {750, 850, 270}, {1100, 600, 315},  {1500, 800, 30},
+            {1800, 900, 60},
+        };
+
+        Mat scene_fhd(1080, 1920, CV_8U, Scalar(30));
+        RNG rng_fhd(123);
+        // Add background texture noise
+        Mat bg_noise(scene_fhd.size(), CV_64F);
+        rng_fhd.fill(bg_noise, RNG::NORMAL, 0, 15);
+        Mat tmp_fhd; scene_fhd.convertTo(tmp_fhd, CV_64F);
+        tmp_fhd += bg_noise; tmp_fhd.convertTo(scene_fhd, CV_8U);
+
+        for (auto& obj : fhd_objs) {
+            Mat M = getRotationMatrix2D(Point2f(100, 100), -obj.angle, 1.0);
+            Mat rot; warpAffine(templ_fhd, rot, M, templ_fhd.size(),
+                                INTER_LINEAR, BORDER_CONSTANT, Scalar(0));
+            int ox = obj.x - 100, oy = obj.y - 100;
+            for (int r = 0; r < rot.rows; r++)
+                for (int c = 0; c < rot.cols; c++) {
+                    int sy = oy + r, sx = ox + c;
+                    if (sy >= 0 && sy < scene_fhd.rows && sx >= 0 &&
+                        sx < scene_fhd.cols && rot.at<uchar>(r, c) > 0)
+                        scene_fhd.at<uchar>(sy, sx) = rot.at<uchar>(r, c);
+                }
+        }
+
+        printf("Scene: 1920x1080, 10 objects, background noise s=15\n");
+
+        // Conditions to test
+        struct FHDCond {
+            const char* name;
+            double noise;
+            int blur;
+        };
+        FHDCond conditions[] = {
+            {"clean",       0,  0},
+            {"noise s=10",  10, 0},
+            {"noise s=20",  20, 0},
+            {"noise s=30",  30, 0},
+            {"noise s=50",  50, 0},
+            {"blur k=3",    0,  3},
+            {"blur k=5",    0,  5},
+            {"blur k=7",    0,  7},
+            {"blur k=11",   0,  11},
+            {"blur k=21",   0,  21},
+            {"n10+b3",      10, 3},
+            {"n20+b5",      20, 5},
+            {"n30+b7",      30, 7},
+            {"n30+b11",     30, 11},
+            {"n50+b11",     50, 11},
+            {"n50+b21",     50, 21},
+        };
+
+        Mode fhd_modes[] = {
+            {"None",        sbm::RefineMode::None},
+            {"ICP (dense)", sbm::RefineMode::ICP},
+            {"ROI",         sbm::RefineMode::ROI},
+        };
+
+        int n_objs = sizeof(fhd_objs) / sizeof(fhd_objs[0]);
+
+        // Header
+        printf("\n%-14s", "Condition");
+        for (auto& mode : fhd_modes)
+            printf("  %-28s", mode.name);
+        printf("\n");
+        for (int i = 0; i < 14 + 4*30; i++) printf("-");
+        printf("\n");
+
+        // Suppress meiqua cout during benchmark
+        std::streambuf* orig_cout = std::cout.rdbuf();
+        std::ostringstream null_stream;
+
+        for (auto& cond : conditions) {
+            // Apply noise/blur to clean scene
+            Mat scene_test = scene_fhd.clone();
+            if (cond.noise > 0) {
+                Mat noise_mat(scene_test.size(), CV_64F);
+                RNG rng_c(42);
+                rng_c.fill(noise_mat, RNG::NORMAL, 0, cond.noise);
+                Mat tmp_c; scene_test.convertTo(tmp_c, CV_64F);
+                tmp_c += noise_mat; tmp_c.convertTo(scene_test, CV_8U);
+            }
+            if (cond.blur > 0) {
+                GaussianBlur(scene_test, scene_test, Size(cond.blur, cond.blur), 0);
+            }
+
+            // Collect all results first, then print in one line
+            struct ModeResult { int matched; int total; double ms; float ang; float pos; };
+            ModeResult mode_results[4];
+            int mi = 0;
+
+            for (auto& mode : fhd_modes) {
+                sbm::MatchConfig cfg;
+                cfg.min_score = 40;
+                cfg.nms_radius = 80;
+                cfg.refine = mode.mode;
+
+                sbm::ShapeMatcher matcher(cfg);
+                sbm::ModelConfig mcfg;
+                mcfg.angle = {0, 360, 2};
+                matcher.addModel("L", feat_fhd, mcfg);
+
+                // Warm up (mute cout)
+                std::cout.rdbuf(null_stream.rdbuf());
+                matcher.match(scene_test);
+                std::cout.rdbuf(orig_cout);
+
+                // Average 3 runs (mute cout)
+                double total_ms = 0;
+                std::vector<sbm::MatchResult> results;
+                std::cout.rdbuf(null_stream.rdbuf());
+                for (int i = 0; i < 3; i++) {
+                    auto t0 = std::chrono::high_resolution_clock::now();
+                    results = matcher.match(scene_test);
+                    total_ms += std::chrono::duration<double, std::milli>(
+                        std::chrono::high_resolution_clock::now() - t0).count();
+                }
+                std::cout.rdbuf(orig_cout);
+                double avg_ms = total_ms / 3.0;
+
+                // Compute mean angle/position error across found objects
+                float total_ang_err = 0, total_pos_err = 0;
+                int matched = 0;
+                for (auto& r : results) {
+                    // Find closest ground truth object
+                    float best_d = 1e9f;
+                    int best_j = -1;
+                    for (int j = 0; j < n_objs; j++) {
+                        // GT position: origin at (100,75), rotated around (100,100)
+                        float ox = 100 - 100, oy = 75 - 100;  // origin offset from center
+                        float rad = -(float)fhd_objs[j].angle * (float)CV_PI / 180.0f;
+                        float rx = std::cos(rad)*ox - std::sin(rad)*oy;
+                        float ry = std::sin(rad)*ox + std::cos(rad)*oy;
+                        float gt_x = fhd_objs[j].x + rx;
+                        float gt_y = fhd_objs[j].y + ry;
+                        float dx = r.x - gt_x, dy = r.y - gt_y;
+                        float d = std::sqrt(dx*dx + dy*dy);
+                        if (d < best_d) { best_d = d; best_j = j; }
+                    }
+                    if (best_j >= 0 && best_d < 50) {
+                        float ae = r.angle - (float)fhd_objs[best_j].angle;
+                        if (ae > 180) ae -= 360; if (ae < -180) ae += 360;
+                        total_ang_err += std::abs(ae);
+                        total_pos_err += best_d;
+                        matched++;
+                    }
+                }
+                float mean_ang = matched > 0 ? total_ang_err / matched : -1;
+                float mean_pos = matched > 0 ? total_pos_err / matched : -1;
+                mode_results[mi++] = {matched, n_objs, avg_ms, mean_ang, mean_pos};
+            }
+            // Print entire row at once (avoids meiqua cout interleaving)
+            printf("%-14s", cond.name);
+            for (int i = 0; i < mi; i++)
+                printf("  %2d/%d %5.1fms %4.1fdeg %4.1fpx",
+                       mode_results[i].matched, mode_results[i].total,
+                       mode_results[i].ms, mode_results[i].ang, mode_results[i].pos);
+            printf("\n");
+        }
+
+        // --- Isolated test: 1 object, clean background, per-angle error ---
+        printf("\n--- Isolated: 1 object, clean background, per-angle error ---\n");
+        {
+        auto& feat = feat_fhd;
+        float test_angles[] = {0, 15, 30, 45, 60, 90, 120, 150, 180, 210, 270, 315};
+
+        printf("%-8s  %-24s  %-24s\n", "Angle", "ICP (dense)", "ROI");
+        printf("%-8s  %-24s  %-24s\n", "-----", "-----------", "---");
+
+        for (float gt_ang : test_angles) {
+            // Create clean scene with 1 object at center
+            Mat scene1obj(1080, 1920, CV_8U, Scalar(0));
+            int obj_x = 960, obj_y = 540;
+            Mat M = getRotationMatrix2D(Point2f(100, 100), -gt_ang, 1.0);
+            Mat rot; warpAffine(templ_fhd, rot, M, templ_fhd.size(),
+                                INTER_LINEAR, BORDER_CONSTANT, Scalar(0));
+            int ox = obj_x - 100, oy = obj_y - 100;
+            for (int r = 0; r < rot.rows; r++)
+                for (int c = 0; c < rot.cols; c++) {
+                    int sy = oy + r, sx = ox + c;
+                    if (sy >= 0 && sy < scene1obj.rows && sx >= 0 &&
+                        sx < scene1obj.cols && rot.at<uchar>(r, c) > 0)
+                        scene1obj.at<uchar>(sy, sx) = rot.at<uchar>(r, c);
+                }
+
+            // GT origin position
+            float gox = 100 - 100, goy = 75 - 100;
+            float grad = -gt_ang * (float)CV_PI / 180.0f;
+            float gt_x = obj_x + std::cos(grad)*gox - std::sin(grad)*goy;
+            float gt_y = obj_y + std::sin(grad)*gox + std::cos(grad)*goy;
+
+            printf("%-8.0f", gt_ang);
+
+            Mode iso_modes[] = {
+                {"ICP", sbm::RefineMode::ICP},
+                {"ROI", sbm::RefineMode::ROI},
+            };
+
+            for (auto& mode : iso_modes) {
+                sbm::MatchConfig cfg;
+                cfg.min_score = 40;
+                cfg.nms_radius = 80;
+                cfg.refine = mode.mode;
+
+                sbm::ShapeMatcher matcher(cfg);
+                sbm::ModelConfig mcfg;
+                mcfg.angle = {0, 360, 2};
+                matcher.addModel("L", feat, mcfg);
+
+                std::cout.rdbuf(null_stream.rdbuf());
+                auto results = matcher.match(scene1obj);
+                std::cout.rdbuf(orig_cout);
+
+                if (!results.empty()) {
+                    auto& r = results[0];
+                    float ae = r.angle - gt_ang;
+                    if (ae > 180) ae -= 360; if (ae < -180) ae += 360;
+                    float dx = r.x - gt_x, dy = r.y - gt_y;
+                    float pe = std::sqrt(dx*dx + dy*dy);
+                    printf("  ang=%+5.2f pos=%4.1fpx", ae, pe);
+                } else {
+                    printf("  NOT FOUND              ");
+                }
+            }
+            printf("\n");
+        }
+        }
     }
 
     return 0;

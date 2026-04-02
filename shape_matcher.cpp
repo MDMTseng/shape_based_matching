@@ -8,6 +8,9 @@
 
 #include <opencv2/imgproc.hpp>
 #include <fstream>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include <algorithm>
 #include <cmath>
 
@@ -544,20 +547,25 @@ std::vector<cv::Point2f> FeatureSet::selectOptimizedPoints(int max_points) const
         return result;
 
     // Collect all valid candidate points with margin check
-    struct CandPt { int rp_idx; float corn; };
+    float max_lev = std::sqrt((float)(templ_width*templ_width + templ_height*templ_height)) / 2.0f;
+    struct CandPt { int rp_idx; float corn; float score; };
     std::vector<CandPt> all_cands;
     for (size_t i = 0; i < refine_points.size(); i++) {
         auto& rp = refine_points[i];
         if (std::abs(rp.px) > templ_width/2.0f - 5 || std::abs(rp.py) > templ_height/2.0f - 5)
             continue;
-        all_cands.push_back({(int)i, rp.cornerness});
+        float lev = std::sqrt(rp.px*rp.px + rp.py*rp.py);
+        // Score: corners high priority, then distance from center
+        // cornerness [0,1] boosted to dominate, leverage normalized to [0,1]
+        float score = rp.cornerness * 10.0f + lev / (max_lev + 1e-6f);
+        all_cands.push_back({(int)i, rp.cornerness, score});
     }
 
-    // Initial greedy selection: corners first, then well-spaced
+    // Initial greedy selection: corners + far-from-center first
     float min_dist = std::max(templ_width, templ_height) / 16.0f * 1.5f;
     float min_dist_sq = min_dist * min_dist;
     std::sort(all_cands.begin(), all_cands.end(),
-              [](const CandPt& a, const CandPt& b){ return a.corn > b.corn; });
+              [](const CandPt& a, const CandPt& b){ return a.score > b.score; });
 
     std::vector<int> selected;  // indices into refine_points
     for (auto& c : all_cands) {
@@ -623,7 +631,9 @@ std::vector<cv::Point2f> FeatureSet::selectOptimizedPoints(int max_points) const
             float d_ang = ang_dx + ang_dy;
             float d_pos = std::sqrt(pos_dx*pos_dx + pos_dy*pos_dy);
             sens[fi] = d_ang + d_pos;
-            if (sens[fi] < least_sens) { least_sens = sens[fi]; least_idx = (int)fi; }
+            // Don't swap out corners — they provide 2D constraint
+            bool is_corner = refine_points[selected[fi]].cornerness > 0.3f;
+            if (sens[fi] < least_sens && !is_corner) { least_sens = sens[fi]; least_idx = (int)fi; }
             worst_sens = std::max(worst_sens, sens[fi]);
         }
 
@@ -921,7 +931,7 @@ int ShapeMatcher::addModel(const std::string& name,
     ModelInfo info;
     info.name = name;
     info.features = features;
-    info.features.selectOptimizedPoints(8);  // precompute + cache
+    info.features.selectOptimizedPoints(15);  // precompute + cache
     info.config = config;
     info.class_id = "sbm_" + name;
     info.class_id_flip = "sbm_" + name + "_flip";
@@ -1004,7 +1014,13 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
     // Prepare ICP if needed
     std::vector<icp_refine::EdgePoint> model_edges_cache;
 
-    for (auto& m : nms_matches) {
+    int n_matches = (int)nms_matches.size();
+    results.resize(n_matches);
+    std::vector<bool> valid(n_matches, false);
+
+    #pragma omp parallel for schedule(dynamic) if(n_matches >= 4)
+    for (int mi_idx = 0; mi_idx < n_matches; ++mi_idx) {
+        auto& m = nms_matches[mi_idx];
         // Find which model this belongs to
         ModelInfo* mi = nullptr;
         bool is_flip = false;
@@ -1125,7 +1141,7 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         // ROI-based refinement
         if (cfg.refine == RefineMode::ROI && !fs.templ_image.empty() && !scene.empty()) {
             // Use sensitivity-optimized point selection
-            auto opt_points = fs.selectOptimizedPoints(8);
+            auto opt_points = fs.selectOptimizedPoints(15);
             std::vector<roi_refine::SamplePoint> sample_pts;
             for (auto& p : opt_points) {
                 roi_refine::SamplePoint sp;
@@ -1167,10 +1183,15 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         r.scale = matched_scale;
         r.flipped = is_flip;
         r.score = m.similarity;
-        results.push_back(r);
+        results[mi_idx] = r;
+        valid[mi_idx] = true;
     }
 
-    return results;
+    // Remove invalid entries
+    std::vector<MatchResult> final_results;
+    for (int i = 0; i < n_matches; i++)
+        if (valid[i]) final_results.push_back(results[i]);
+    return final_results;
 }
 
 int ShapeMatcher::numModels() const { return (int)impl_->models.size(); }

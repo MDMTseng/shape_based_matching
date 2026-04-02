@@ -6,6 +6,21 @@
 #include <algorithm>
 #include <cstring>
 
+#ifdef __AVX2__
+#include <immintrin.h>
+
+static inline float hsum256_ps(__m256 v) {
+    __m128 lo = _mm256_castps256_ps128(v);
+    __m128 hi = _mm256_extractf128_ps(v, 1);
+    lo = _mm_add_ps(lo, hi);
+    __m128 shuf = _mm_movehdup_ps(lo);
+    lo = _mm_add_ps(lo, shuf);
+    shuf = _mm_movehl_ps(shuf, lo);
+    lo = _mm_add_ss(lo, shuf);
+    return _mm_cvtss_f32(lo);
+}
+#endif
+
 namespace icp_refine {
 
 // Simple 3x3 symmetric positive-definite solver (Cholesky-like)
@@ -476,6 +491,26 @@ Pose2D refineWithNormals(const std::vector<EdgePoint>& model_edges,
     int N = (int)model_edges.size();
     float prev_fitness = 0, prev_rmse = 1e10f;
 
+    // SoA layout for SIMD
+    std::vector<float> soa_px(N), soa_py(N), soa_nx(N), soa_ny(N), soa_corn(N);
+    for (int i = 0; i < N; i++) {
+        soa_px[i] = model_edges[i].pos.x;
+        soa_py[i] = model_edges[i].pos.y;
+        soa_nx[i] = model_edges[i].normal.x;
+        soa_ny[i] = model_edges[i].normal.y;
+        soa_corn[i] = model_edges[i].cornerness;
+    }
+
+    // Precompute pointers and stride for gather
+    float* cx_base = (float*)local_scene.closest_x.data;
+    float* cy_base = (float*)local_scene.closest_y.data;
+    float* snx_base = (float*)local_scene.normal_x.data;
+    float* sny_base = (float*)local_scene.normal_y.data;
+    int stride = (int)(local_scene.closest_x.step1());  // floats per row
+    float max_dist2 = config.max_dist * config.max_dist;
+    float p2p_w = config.point_to_point_weight;
+    bool use_corn = config.use_cornerness;
+
     for (int iter = 0; iter < config.max_iterations; ++iter) {
         float rad = pose.angle * (float)CV_PI / 180.0f;
         float cs = std::cos(rad) * pose.scale;
@@ -485,52 +520,220 @@ Pose2D refineWithNormals(const std::vector<EdgePoint>& model_edges,
         float total_error = 0;
         int inlier_count = 0;
 
+#ifdef __AVX2__
+        // AVX2 vectorized inner loop
+        __m256 vcs = _mm256_set1_ps(cs), vsn = _mm256_set1_ps(sn);
+        __m256 vtx = _mm256_set1_ps(pose.x), vty = _mm256_set1_ps(pose.y);
+        __m256 vhalf = _mm256_set1_ps(0.5f);
+        __m256 vneg1f = _mm256_set1_ps(-1.0f);
+        __m256 vzero = _mm256_setzero_ps();
+        __m256 vmax_dist2 = _mm256_set1_ps(max_dist2);
+        __m256 vcos_thresh = _mm256_set1_ps(cos_thresh);
+        __m256i vwidth = _mm256_set1_epi32(local_scene.width);
+        __m256i vheight = _mm256_set1_epi32(local_scene.height);
+        __m256i vstride = _mm256_set1_epi32(stride);
+        __m256i vzero_i = _mm256_setzero_si256();
+
+        // Accumulators (11 values)
+        __m256 vata00=vzero, vata01=vzero, vata02=vzero;
+        __m256 vata11=vzero, vata12=vzero, vata22=vzero;
+        __m256 vatb0=vzero, vatb1=vzero, vatb2=vzero;
+        __m256 vtot_err=vzero;
+        __m256i vinlier=vzero_i;
+
+        int i = 0;
+        for (; i + 7 < N; i += 8) {
+            // Phase A: Transform 8 points
+            __m256 vpx = _mm256_loadu_ps(&soa_px[i]);
+            __m256 vpy = _mm256_loadu_ps(&soa_py[i]);
+            __m256 vmx = _mm256_add_ps(_mm256_sub_ps(_mm256_mul_ps(vcs, vpx), _mm256_mul_ps(vsn, vpy)), vtx);
+            __m256 vmy = _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(vsn, vpx), _mm256_mul_ps(vcs, vpy)), vty);
+
+            // Round to int for lookup
+            __m256i vix = _mm256_cvttps_epi32(_mm256_add_ps(vmx, vhalf));
+            __m256i viy = _mm256_cvttps_epi32(_mm256_add_ps(vmy, vhalf));
+
+            // Bounds check: 0 <= ix < width && 0 <= iy < height
+            __m256i b1 = _mm256_and_si256(_mm256_cmpgt_epi32(vix, _mm256_set1_epi32(-1)),
+                                           _mm256_cmpgt_epi32(vwidth, vix));
+            __m256i b2 = _mm256_and_si256(_mm256_cmpgt_epi32(viy, _mm256_set1_epi32(-1)),
+                                           _mm256_cmpgt_epi32(vheight, viy));
+            __m256 bounds_mask = _mm256_castsi256_ps(_mm256_and_si256(b1, b2));
+            if (_mm256_movemask_ps(bounds_mask) == 0) continue;
+
+            // Phase B: Gather closest_x/y
+            // Clamp indices for safe gather (out-of-bounds lanes masked later)
+            __m256i safe_ix = _mm256_max_epi32(vzero_i, _mm256_min_epi32(vix, _mm256_sub_epi32(vwidth, _mm256_set1_epi32(1))));
+            __m256i safe_iy = _mm256_max_epi32(vzero_i, _mm256_min_epi32(viy, _mm256_sub_epi32(vheight, _mm256_set1_epi32(1))));
+            __m256i voffset = _mm256_add_epi32(_mm256_mullo_epi32(safe_iy, vstride), safe_ix);
+
+            __m256 vcx = _mm256_mask_i32gather_ps(vneg1f, cx_base, voffset, bounds_mask, 4);
+            __m256 vcy = _mm256_mask_i32gather_ps(vneg1f, cy_base, voffset, bounds_mask, 4);
+
+            // Validity: closest_cx >= 0
+            __m256 valid_mask = _mm256_and_ps(bounds_mask, _mm256_cmp_ps(vcx, vzero, _CMP_GE_OQ));
+            if (_mm256_movemask_ps(valid_mask) == 0) continue;
+
+            // Distance check
+            __m256 vdx = _mm256_sub_ps(vmx, vcx);
+            __m256 vdy = _mm256_sub_ps(vmy, vcy);
+            __m256 vdist2 = _mm256_add_ps(_mm256_mul_ps(vdx, vdx), _mm256_mul_ps(vdy, vdy));
+            __m256 dist_mask = _mm256_and_ps(valid_mask, _mm256_cmp_ps(vdist2, vmax_dist2, _CMP_LE_OQ));
+            if (_mm256_movemask_ps(dist_mask) == 0) continue;
+
+            // Gather scene normals at closest edge positions
+            __m256i vecx = _mm256_cvttps_epi32(_mm256_add_ps(vcx, vhalf));
+            __m256i vecy = _mm256_cvttps_epi32(_mm256_add_ps(vcy, vhalf));
+            vecx = _mm256_max_epi32(vzero_i, _mm256_min_epi32(vecx, _mm256_sub_epi32(vwidth, _mm256_set1_epi32(1))));
+            vecy = _mm256_max_epi32(vzero_i, _mm256_min_epi32(vecy, _mm256_sub_epi32(vheight, _mm256_set1_epi32(1))));
+            __m256i vnoff = _mm256_add_epi32(_mm256_mullo_epi32(vecy, vstride), vecx);
+
+            __m256 vsnx = _mm256_mask_i32gather_ps(vzero, snx_base, vnoff, dist_mask, 4);
+            __m256 vsny = _mm256_mask_i32gather_ps(vzero, sny_base, vnoff, dist_mask, 4);
+
+            // Check scene normal non-zero
+            __m256 nz_mask = _mm256_cmp_ps(
+                _mm256_add_ps(_mm256_mul_ps(vsnx, vsnx), _mm256_mul_ps(vsny, vsny)),
+                _mm256_set1_ps(1e-12f), _CMP_GT_OQ);
+            __m256 mask = _mm256_and_ps(dist_mask, nz_mask);
+            if (_mm256_movemask_ps(mask) == 0) continue;
+
+            // Rotate model normals
+            __m256 vmnx = _mm256_loadu_ps(&soa_nx[i]);
+            __m256 vmny = _mm256_loadu_ps(&soa_ny[i]);
+            __m256 vrot_mnx = _mm256_sub_ps(_mm256_mul_ps(vcs, vmnx), _mm256_mul_ps(vsn, vmny));
+            __m256 vrot_mny = _mm256_add_ps(_mm256_mul_ps(vsn, vmnx), _mm256_mul_ps(vcs, vmny));
+            __m256 vnmag = _mm256_sqrt_ps(_mm256_add_ps(_mm256_mul_ps(vrot_mnx, vrot_mnx),
+                                                         _mm256_mul_ps(vrot_mny, vrot_mny)));
+            __m256 vnmag_safe = _mm256_max_ps(vnmag, _mm256_set1_ps(1e-6f));
+            vrot_mnx = _mm256_div_ps(vrot_mnx, vnmag_safe);
+            vrot_mny = _mm256_div_ps(vrot_mny, vnmag_safe);
+
+            // Normal compatibility: |dot| > cos_thresh
+            __m256 vndot = _mm256_add_ps(_mm256_mul_ps(vrot_mnx, vsnx), _mm256_mul_ps(vrot_mny, vsny));
+            // abs via clearing sign bit
+            __m256 vabs_ndot = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), vndot);
+            __m256 norm_mask = _mm256_cmp_ps(vabs_ndot, vcos_thresh, _CMP_GE_OQ);
+            mask = _mm256_and_ps(mask, norm_mask);
+            if (_mm256_movemask_ps(mask) == 0) continue;
+
+            // Phase C: Point-to-plane error + Jacobian accumulation
+            __m256 ve_plane = _mm256_add_ps(_mm256_mul_ps(vdx, vsnx), _mm256_mul_ps(vdy, vsny));
+            __m256 ve2 = _mm256_mul_ps(ve_plane, ve_plane);
+
+            __m256 vjp0 = _mm256_add_ps(_mm256_mul_ps(_mm256_sub_ps(vzero, vmy), vsnx),
+                                         _mm256_mul_ps(vmx, vsny));
+            __m256 vjp1 = vsnx;
+            __m256 vjp2 = vsny;
+
+            // Masked accumulation
+            __m256 m_jp0 = _mm256_and_ps(vjp0, mask);
+            __m256 m_jp1 = _mm256_and_ps(vjp1, mask);
+            __m256 m_jp2 = _mm256_and_ps(vjp2, mask);
+            __m256 m_e = _mm256_and_ps(ve_plane, mask);
+
+            vata00 = _mm256_add_ps(vata00, _mm256_mul_ps(m_jp0, vjp0));
+            vata01 = _mm256_add_ps(vata01, _mm256_mul_ps(m_jp0, vjp1));
+            vata02 = _mm256_add_ps(vata02, _mm256_mul_ps(m_jp0, vjp2));
+            vata11 = _mm256_add_ps(vata11, _mm256_mul_ps(m_jp1, vjp1));
+            vata12 = _mm256_add_ps(vata12, _mm256_mul_ps(m_jp1, vjp2));
+            vata22 = _mm256_add_ps(vata22, _mm256_mul_ps(m_jp2, vjp2));
+            vatb0 = _mm256_sub_ps(vatb0, _mm256_mul_ps(m_jp0, ve_plane));
+            vatb1 = _mm256_sub_ps(vatb1, _mm256_mul_ps(m_jp1, ve_plane));
+            vatb2 = _mm256_sub_ps(vatb2, _mm256_mul_ps(m_jp2, ve_plane));
+            vtot_err = _mm256_add_ps(vtot_err, _mm256_and_ps(ve2, mask));
+
+            // Count inliers via mask bits
+            vinlier = _mm256_sub_epi32(vinlier, _mm256_castps_si256(mask));  // -1 per active lane
+
+            // Point-to-point regularization
+            if (p2p_w > 0 || use_corn) {
+                __m256 vw;
+                if (use_corn) {
+                    __m256 vc = _mm256_loadu_ps(&soa_corn[i]);
+                    vw = _mm256_add_ps(_mm256_mul_ps(vc, _mm256_set1_ps(1.0f)),
+                                       _mm256_mul_ps(_mm256_sub_ps(_mm256_set1_ps(1.0f), vc),
+                                                     _mm256_set1_ps(0.01f)));
+                } else {
+                    vw = _mm256_set1_ps(p2p_w);
+                }
+                __m256 m_w = _mm256_and_ps(vw, mask);
+                __m256 m_dx = _mm256_and_ps(vdx, mask);
+                __m256 m_dy = _mm256_and_ps(vdy, mask);
+                __m256 m_mx = _mm256_and_ps(vmx, mask);
+                __m256 m_my = _mm256_and_ps(vmy, mask);
+
+                vata00 = _mm256_add_ps(vata00, _mm256_mul_ps(m_w,
+                    _mm256_add_ps(_mm256_mul_ps(vmy, vmy), _mm256_mul_ps(vmx, vmx))));
+                vata01 = _mm256_add_ps(vata01, _mm256_mul_ps(m_w, _mm256_sub_ps(vzero, vmy)));
+                vata02 = _mm256_add_ps(vata02, _mm256_mul_ps(m_w, vmx));
+                vata11 = _mm256_add_ps(vata11, m_w);
+                vata22 = _mm256_add_ps(vata22, m_w);
+                vatb0 = _mm256_sub_ps(vatb0, _mm256_mul_ps(m_w,
+                    _mm256_add_ps(_mm256_mul_ps(_mm256_sub_ps(vzero, m_my), vdx),
+                                  _mm256_mul_ps(m_mx, vdy))));
+                vatb1 = _mm256_sub_ps(vatb1, _mm256_mul_ps(m_w, vdx));
+                vatb2 = _mm256_sub_ps(vatb2, _mm256_mul_ps(m_w, vdy));
+            }
+        }
+
+        // Horizontal reduce accumulators
+        ATA[0][0] = hsum256_ps(vata00);
+        ATA[0][1] = hsum256_ps(vata01);
+        ATA[0][2] = hsum256_ps(vata02);
+        ATA[1][1] = hsum256_ps(vata11);
+        ATA[1][2] = hsum256_ps(vata12);
+        ATA[2][2] = hsum256_ps(vata22);
+        ATb[0] = hsum256_ps(vatb0);
+        ATb[1] = hsum256_ps(vatb1);
+        ATb[2] = hsum256_ps(vatb2);
+        total_error = hsum256_ps(vtot_err);
+
+        // Sum inlier count: vinlier has counts per lane as negative ints
+        int ilanes[8]; _mm256_storeu_si256((__m256i*)ilanes, vinlier);
+        for (int k = 0; k < 8; k++) inlier_count += ilanes[k];
+
+        // Scalar tail
+        for (; i < N; ++i) {
+#else
         for (int i = 0; i < N; ++i) {
-            // Transform model point
-            float px = model_edges[i].pos.x, py = model_edges[i].pos.y;
+#endif
+            float px = soa_px[i], py = soa_py[i];
             float mx = cs * px - sn * py + pose.x;
             float my = sn * px + cs * py + pose.y;
 
             int ix = (int)(mx + 0.5f), iy = (int)(my + 0.5f);
             if (ix < 0 || ix >= local_scene.width || iy < 0 || iy >= local_scene.height) continue;
 
-            float closest_cx = local_scene.closest_x.at<float>(iy, ix);
-            float closest_cy = local_scene.closest_y.at<float>(iy, ix);
+            float closest_cx = cx_base[iy * stride + ix];
+            float closest_cy = cy_base[iy * stride + ix];
             if (closest_cx < 0) continue;
 
             float dx = mx - closest_cx, dy = my - closest_cy;
-            if (dx * dx + dy * dy > config.max_dist * config.max_dist) continue;
+            if (dx * dx + dy * dy > max_dist2) continue;
 
-            // Scene normal at closest edge
             int ecx = std::max(0, std::min(local_scene.width - 1, (int)(closest_cx + 0.5f)));
             int ecy = std::max(0, std::min(local_scene.height - 1, (int)(closest_cy + 0.5f)));
-            float snx = local_scene.normal_x.at<float>(ecy, ecx);
-            float sny = local_scene.normal_y.at<float>(ecy, ecx);
-            if (snx == 0 && sny == 0) continue;
+            float snx_v = snx_base[ecy * stride + ecx];
+            float sny_v = sny_base[ecy * stride + ecx];
+            if (snx_v == 0 && sny_v == 0) continue;
 
-            // Transform model normal by current rotation
-            float mnx = model_edges[i].normal.x;
-            float mny = model_edges[i].normal.y;
+            float mnx = soa_nx[i], mny = soa_ny[i];
             float rot_mnx = cs * mnx - sn * mny;
             float rot_mny = sn * mnx + cs * mny;
             float nmag = std::sqrt(rot_mnx*rot_mnx + rot_mny*rot_mny);
             if (nmag > 1e-6f) { rot_mnx /= nmag; rot_mny /= nmag; }
 
-            // Normal compatibility check: reject if normals disagree
-            // dot product > cos_thresh means angle < threshold
-            // Use absolute value because normals can point in opposite directions
-            float ndot = std::abs(rot_mnx * snx + rot_mny * sny);
-            if (ndot < cos_thresh) continue;  // normals incompatible, skip
+            float ndot = std::abs(rot_mnx * snx_v + rot_mny * sny_v);
+            if (ndot < cos_thresh) continue;
 
-            // Point-to-plane error
-            float e_plane = dx * snx + dy * sny;
+            float e_plane = dx * snx_v + dy * sny_v;
             total_error += e_plane * e_plane;
             ++inlier_count;
 
-            // Jacobian for point-to-plane
-            float jp0 = -my * snx + mx * sny;
-            float jp1 = snx;
-            float jp2 = sny;
+            float jp0 = -my * snx_v + mx * sny_v;
+            float jp1 = snx_v;
+            float jp2 = sny_v;
 
             ATA[0][0] += jp0*jp0; ATA[0][1] += jp0*jp1; ATA[0][2] += jp0*jp2;
             ATA[1][1] += jp1*jp1; ATA[1][2] += jp1*jp2;
@@ -539,13 +742,9 @@ Pose2D refineWithNormals(const std::vector<EdgePoint>& model_edges,
             ATb[1] -= jp1 * e_plane;
             ATb[2] -= jp2 * e_plane;
 
-            // Point-to-point regularization.
-            // If use_cornerness: edge features (cornerness~0) get point-to-plane only,
-            // corner features (cornerness~1) get strong point-to-point for 2D anchor.
-            float w = config.point_to_point_weight;
-            if (config.use_cornerness) {
-                float c = model_edges[i].cornerness;
-                // Corners: full p2p weight. Edges: minimal p2p (just for stability).
+            float w = p2p_w;
+            if (use_corn) {
+                float c = soa_corn[i];
                 w = c * 1.0f + (1.0f - c) * 0.01f;
             }
             if (w > 0) {

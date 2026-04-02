@@ -386,7 +386,7 @@ struct ShapeMatcher::Impl {
         for (float a = angle.start + angle.step; a < angle.end; a += angle.step) {
             // Rotate feature coordinates + orientation
             std::vector<line2Dup::Template> rot_tp(pyramid_levels);
-            float angRad = -a * (float)CV_PI / 180.0f;
+            float angRad = a * (float)CV_PI / 180.0f;
 
             for (int l = 0; l < pyramid_levels; ++l) {
                 cv::Point2f lvl_center = center;
@@ -403,7 +403,7 @@ struct ShapeMatcher::Impl {
                     line2Dup::Feature fn;
                     fn.x = (int)(rot.x + 0.5f);
                     fn.y = (int)(rot.y + 0.5f);
-                    fn.theta = f.theta - a;
+                    fn.theta = f.theta + a;
                     while (fn.theta >= 360) fn.theta -= 360;
                     while (fn.theta < 0) fn.theta += 360;
                     fn.label = (int)(fn.theta * 16.0f / 360.0f + 0.5f) & 7;

@@ -8,11 +8,24 @@
 
 using namespace cv;
 
+static void draw_L(Mat& img, int cx, int cy, double angle, int color) {
+    double rad = angle * CV_PI / 180.0, cs = cos(rad), sn = sin(rad);
+    for (double ly = -30; ly <= 30; ly += 0.5)
+        for (double lx = -10; lx <= 10; lx += 0.5) {
+            int px = cx+(int)(lx*cs-ly*sn+0.5), py = cy+(int)(lx*sn+ly*cs+0.5);
+            if (px>=0&&px<img.cols&&py>=0&&py<img.rows) img.at<uchar>(py,px)=(uchar)color;
+        }
+    for (double ly = 10; ly <= 30; ly += 0.5)
+        for (double lx = 10; lx <= 40; lx += 0.5) {
+            int px = cx+(int)(lx*cs-ly*sn+0.5), py = cy+(int)(lx*sn+ly*cs+0.5);
+            if (px>=0&&px<img.cols&&py>=0&&py<img.rows) img.at<uchar>(py,px)=(uchar)color;
+        }
+}
+
 int main() {
-    // 1. Create a template (L-shape, asymmetric — no 180° ambiguity)
+    // 1. Create L-shape template
     Mat templ(80, 80, CV_8U, Scalar(0));
-    rectangle(templ, Point(25, 10), Point(35, 70), Scalar(200), -1);
-    rectangle(templ, Point(25, 50), Point(65, 70), Scalar(200), -1);
+    draw_L(templ, 40, 40, 0, 200);
 
     // 2. Extract features + save
     auto features = sbm::extractFeatures(templ);
@@ -20,15 +33,15 @@ int main() {
     features.save("rect.feat");
     printf("Extracted %d features\n", features.numFeatures());
 
-    // 3. Create scene with 3 rotated rectangles
+    // 3. Create scene with 3 rotated L-shapes
     struct Obj { int x, y; double angle; };
     Obj objs[] = {{160,120,25}, {320,240,90}, {480,360,200}};
 
     Mat scene(480, 640, CV_8U, Scalar(30));
     for (auto& obj : objs) {
-        Mat M = getRotationMatrix2D(Point2f(40,30), -obj.angle, 1.0);
+        Mat M = getRotationMatrix2D(Point2f(40, 40), -obj.angle, 1.0);
         Mat rot; warpAffine(templ, rot, M, templ.size(), INTER_LINEAR, BORDER_CONSTANT, Scalar(0));
-        int ox = obj.x - 40, oy = obj.y - 30;
+        int ox = obj.x - 40, oy = obj.y - 40;
         for (int r=0; r<rot.rows; r++) for (int c=0; c<rot.cols; c++) {
             int sy=oy+r, sx=ox+c;
             if (sy>=0 && sy<scene.rows && sx>=0 && sx<scene.cols && rot.at<uchar>(r,c)>0)
@@ -66,7 +79,7 @@ int main() {
         sbm::ShapeMatcher matcher(cfg);
         sbm::ModelConfig mcfg;
         mcfg.angle = {0, 360, 2};
-        matcher.addModel("rect", loaded, mcfg);
+        matcher.addModel("L", loaded, mcfg);
 
         auto t0 = std::chrono::high_resolution_clock::now();
         auto results = matcher.match(scene);

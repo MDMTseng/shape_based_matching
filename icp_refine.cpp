@@ -246,38 +246,51 @@ Pose2D refine(const std::vector<cv::Point2f>& templ_edges,
             float ny = scene.normal_y.at<float>(ecy, ecx);
             if (nx == 0 && ny == 0) continue;
 
-            // Point-to-plane error: e = (model - closest) . normal
-            float e = dx * nx + dy * ny;
-            total_error += e * e;
+            // Point-to-plane error: e_plane = (model - closest) . normal
+            float e_plane = dx * nx + dy * ny;
+            total_error += e_plane * e_plane;
             ++inlier_count;
 
-            // Jacobian for SO2: d(e)/d(theta, tx, ty)
-            // model = R(theta) * templ + t
-            // d(model)/d(theta) = [-sin(theta)*px - cos(theta)*py,
-            //                       cos(theta)*px - sin(theta)*py]
-            // = [-my_local, mx_local] where mx_local, my_local are in current frame
-            // Simplified: J = [(-my*nx + mx*ny), nx, ny]
-            float j0 = -my * nx + mx * ny;  // d/d(theta) -- small angle approx
-            float j1 = nx;                   // d/d(tx)
-            float j2 = ny;                   // d/d(ty)
+            // Jacobian for point-to-plane: J_plane = [(-my*nx + mx*ny), nx, ny]
+            float jp0 = -my * nx + mx * ny;  // d/d(theta)
+            float jp1 = nx;                   // d/d(tx)
+            float jp2 = ny;                   // d/d(ty)
 
-            // Accumulate J^T * J and J^T * e
-            ATA[0][0] += j0 * j0; ATA[0][1] += j0 * j1; ATA[0][2] += j0 * j2;
-            ATA[1][1] += j1 * j1; ATA[1][2] += j1 * j2;
-            ATA[2][2] += j2 * j2;
-            ATb[0] -= j0 * e;
-            ATb[1] -= j1 * e;
-            ATb[2] -= j2 * e;
+            // Accumulate point-to-plane: J^T * J and J^T * e
+            ATA[0][0] += jp0*jp0; ATA[0][1] += jp0*jp1; ATA[0][2] += jp0*jp2;
+            ATA[1][1] += jp1*jp1; ATA[1][2] += jp1*jp2;
+            ATA[2][2] += jp2*jp2;
+            ATb[0] -= jp0 * e_plane;
+            ATb[1] -= jp1 * e_plane;
+            ATb[2] -= jp2 * e_plane;
+
+            // Point-to-point regularization: prevents sliding along edges.
+            // Adds weighted (dx, dy) error with Jacobian for x and y separately.
+            // J_x = [-my, 1, 0],  e_x = dx
+            // J_y = [ mx, 0, 1],  e_y = dy
+            float w = config.point_to_point_weight;
+            if (w > 0) {
+                float jx0 = -my, jx1 = 1.0f, jx2 = 0.0f;
+                float jy0 =  mx, jy1 = 0.0f, jy2 = 1.0f;
+
+                ATA[0][0] += w * (jx0*jx0 + jy0*jy0);
+                ATA[0][1] += w * (jx0*jx1 + jy0*jy1);
+                ATA[0][2] += w * (jx0*jx2 + jy0*jy2);
+                ATA[1][1] += w * (jx1*jx1 + jy1*jy1);
+                ATA[1][2] += w * (jx1*jx2 + jy1*jy2);
+                ATA[2][2] += w * (jx2*jx2 + jy2*jy2);
+                ATb[0] -= w * (jx0*dx + jy0*dy);
+                ATb[1] -= w * (jx1*dx + jy1*dy);
+                ATb[2] -= w * (jx2*dx + jy2*dy);
+            }
 
             if (config.use_scale) {
-                // Sim2: add d/d(scale)
-                // d(model)/d(s) at current pose = R * templ = [mx - tx, my - ty] / s
                 float j3 = ((mx - pose.x) * nx + (my - pose.y) * ny) / pose.scale;
-                ATA4[0][0] += j0*j0; ATA4[0][1] += j0*j1; ATA4[0][2] += j0*j2; ATA4[0][3] += j0*j3;
-                ATA4[1][1] += j1*j1; ATA4[1][2] += j1*j2; ATA4[1][3] += j1*j3;
-                ATA4[2][2] += j2*j2; ATA4[2][3] += j2*j3;
+                ATA4[0][0] += jp0*jp0; ATA4[0][1] += jp0*jp1; ATA4[0][2] += jp0*jp2; ATA4[0][3] += jp0*j3;
+                ATA4[1][1] += jp1*jp1; ATA4[1][2] += jp1*jp2; ATA4[1][3] += jp1*j3;
+                ATA4[2][2] += jp2*jp2; ATA4[2][3] += jp2*j3;
                 ATA4[3][3] += j3*j3;
-                ATb4[0] -= j0*e; ATb4[1] -= j1*e; ATb4[2] -= j2*e; ATb4[3] -= j3*e;
+                ATb4[0] -= jp0*e_plane; ATb4[1] -= jp1*e_plane; ATb4[2] -= jp2*e_plane; ATb4[3] -= j3*e_plane;
             }
         }
 

@@ -71,6 +71,15 @@ static vector<line2Dup::Match> spatial_nms(const vector<line2Dup::Match>& matche
 
 // Draw matches on a color image
 // angle_step: degrees per template_id (e.g., 2 for 2-degree steps)
+// Compute object center from match position + template info.
+// m.x/m.y is where tl_x/tl_y maps in the scene. Template image center
+// is at (TW/2, TW/2), so scene center = m.x + (TW/2 - tl_x).
+static Point matchCenter(const line2Dup::Match& m, const line2Dup::Detector& det, int TW) {
+    auto& tmpl = det.getTemplates(m.class_id, m.template_id);
+    return Point(m.x + TW/2 - tmpl[0].tl_x,
+                 m.y + TW/2 - tmpl[0].tl_y);
+}
+
 static Mat draw_matches(const Mat& scene_gray, const vector<line2Dup::Match>& raw_matches,
                         const line2Dup::Detector& det, int TW, double match_ms = -1,
                         double angle_step = 2.0) {
@@ -94,10 +103,8 @@ static Mat draw_matches(const Mat& scene_gray, const vector<line2Dup::Match>& ra
 
         // Compute object center from template bounding box
         // m.x, m.y is at the template's (tl_x, tl_y) in scene coords
-        auto& tmpl = det.getTemplates(m.class_id, m.template_id);
-        int cx = m.x + tmpl[0].width / 2;
-        int cy = m.y + tmpl[0].height / 2;
-        Point center(cx, cy);
+        Point center = matchCenter(m, det, TW);
+        int cx = center.x, cy = center.y;
 
         // Orientation arrow: use refined_angle if available, else template_id * step
         double angle_deg = (m.refined_angle >= 0) ? m.refined_angle
@@ -153,10 +160,8 @@ static Mat draw_matches_direct(const Mat& scene_gray, const vector<line2Dup::Mat
         else if (m.similarity >= 60) color = Scalar(0, 255, 255);
         else color = Scalar(0, 0, 255);
 
-        auto& tmpl = det.getTemplates(m.class_id, m.template_id);
-        int cx = m.x + tmpl[0].width / 2;
-        int cy = m.y + tmpl[0].height / 2;
-        Point center(cx, cy);
+        Point center = matchCenter(m, det, TW);
+        int cx = center.x, cy = center.y;
 
         double angle_deg = (m.refined_angle >= 0) ? m.refined_angle
                                                    : m.template_id * angle_step;
@@ -321,17 +326,17 @@ int main() {
             for (int i = 0; i < refine_n; ++i) {
                 auto& m = nms_matches[i];
                 auto& tmpl_info = det.getTemplates(m.class_id, m.template_id);
-                float cx = m.x + tmpl_info[0].width / 2.0f;
-                float cy = m.y + tmpl_info[0].height / 2.0f;
+                float icx = m.x + TW/2.0f - tmpl_info[0].tl_x;
+                float icy = m.y + TW/2.0f - tmpl_info[0].tl_y;
                 float coarse_angle = m.template_id * 2.0f;
 
-                icp_refine::Pose2D init_pose(cx, cy, coarse_angle);
+                icp_refine::Pose2D init_pose(icx, icy, coarse_angle);
                 auto refined = icp_refine::refineLocal(
                     templ_edge_pts, scene_dx, scene_dy,
                     init_pose, TW, 20, icp_cfg);
                 m.refined_angle = refined.angle;
-                m.x = (int)(refined.x - tmpl_info[0].width / 2.0f + 0.5f);
-                m.y = (int)(refined.y - tmpl_info[0].height / 2.0f + 0.5f);
+                m.x = (int)(refined.x - TW/2.0f + tmpl_info[0].tl_x + 0.5f);
+                m.y = (int)(refined.y - TW/2.0f + tmpl_info[0].tl_y + 0.5f);
             }
 
             icp_ms = chrono::duration<double, std::milli>(

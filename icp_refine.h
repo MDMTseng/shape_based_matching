@@ -31,6 +31,9 @@ struct ICPConfig {
     float max_dist = 10.0f;        ///< Max correspondence distance (pixels)
     float convergence_rmse = 1e-3f;
     float convergence_fitness = 1e-3f;
+    float point_to_point_weight = 0.1f; ///< Blend point-to-point with point-to-plane.
+                                        ///< 0 = pure point-to-plane (slides on edges),
+                                        ///< 1 = equal weight. 0.1 is a good default.
     bool use_subpixel = false;     ///< Subpixel edge refinement via Hessian
     bool use_scale = false;        ///< Sim2 (with scale) vs SO2 (no scale)
 };

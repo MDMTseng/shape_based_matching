@@ -97,10 +97,12 @@ int main() {
 
     fprintf(out, "%-12s", "Shape");
     for (float s : steps) fprintf(out, "  step=%2.0f", s);
-    fprintf(out, "    cal_ms\n");
+    fprintf(out, "\n");
     fprintf(out, "%-12s", "-----");
     for (size_t i = 0; i < sizeof(steps)/sizeof(steps[0]); i++) fprintf(out, "  ------");
-    fprintf(out, "    ------\n");
+    fprintf(out, "\n");
+
+    fprintf(out, "\n--- Method 1: warpAffine + re-extract ---\n");
 
     for (auto& shape : shapes) {
         // Collect results first, print after (avoid interleaving with meiqua warnings)
@@ -114,7 +116,6 @@ int main() {
                 if (shape.templ.at<uchar>(r, c) > 0) mask_t.at<uchar>(r, c) = 255;
         dilate(mask_t, mask_t, Mat(), Point(-1,-1), 5);
 
-        double cal_time = 0;
         for (float step : steps) {
             line2Dup::Detector det(128, {4, 8}, 30, 60);
             for (int a = 0; a < 360; a += (int)step) {
@@ -140,8 +141,46 @@ int main() {
         fprintf(out, "    %.0fms\n", cal_time);
     }
 
-    fprintf(out, "\nNote: bias is shape-dependent but consistent per shape.\n");
-    fprintf(out, "calibrateAngleBias() measures it automatically in ~30ms.\n");
+    // Method 2: addTemplate_rotate (rotate features, no re-extract)
+    fprintf(out, "\n--- Method 2: addTemplate_rotate (rotate features only) ---\n");
+    fflush(out);
+
+    for (auto& shape : shapes) {
+        float biases[5] = {};
+        bool ok = true;
+
+        Mat mask_t = Mat::zeros(TW, TW, CV_8U);
+        for (int r = 0; r < TW; ++r)
+            for (int c = 0; c < TW; ++c)
+                if (shape.templ.at<uchar>(r, c) > 0) mask_t.at<uchar>(r, c) = 255;
+        dilate(mask_t, mask_t, Mat(), Point(-1,-1), 5);
+
+        for (int si = 0; si < 5; ++si) {
+            float step = steps[si];
+            line2Dup::Detector det(128, {4, 8}, 30, 60);
+            int zero_id = det.addTemplate(shape.templ, "S", mask_t);
+            if (zero_id < 0) { ok = false; break; }
+
+            Point2f center(TW/2.0f, TW/2.0f);
+            for (int a = (int)step; a < 360; a += (int)step) {
+                det.addTemplate_rotate("S", zero_id, (float)a, center);
+            }
+
+            float bias = det.calibrateAngleBias(shape.templ, step, "S", threshold);
+            biases[si] = bias;
+        }
+        fprintf(out, "%-12s", shape.name);
+        if (ok) {
+            for (int i = 0; i < 5; ++i) fprintf(out, "  %+5.1f", biases[i]);
+        } else {
+            fprintf(out, "  FAILED (too few features at 0 deg)");
+        }
+        fprintf(out, "\n");
+        fflush(out);
+    }
+
+    fprintf(out, "\nMethod 2 eliminates warpAffine artifacts.\n");
+    fprintf(out, "calibrateAngleBias() measures bias in ~20ms.\n");
     // done
     return 0;
 }

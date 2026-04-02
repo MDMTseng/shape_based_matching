@@ -32,6 +32,7 @@ struct Template
     int tl_x;
     int tl_y;
     int pyramid_level;
+    float angle = 0;  ///< Rotation angle in degrees (for feature-rotated templates)
     std::vector<Feature> features;
 
     void read(const cv::FileNode &fn);
@@ -180,6 +181,22 @@ public:
                                     const cv::Mat &object_mask, int num_features = 0);
 
     int addTemplate_rotate(const std::string &class_id, int zero_id, float theta, cv::Point2f center);
+
+    /// Batch-add rotated templates from a single 0-degree extraction.
+    /// Extracts features once from templ_gray, then mathematically rotates
+    /// feature coordinates + orientation labels for all angles.
+    /// Eliminates warpAffine bias and is faster than per-angle extraction.
+    /// @param templ_gray  Template image at 0 degrees.
+    /// @param object_mask Template mask (255 = object, 0 = background).
+    /// @param class_id    Template class name.
+    /// @param angle_start First angle in degrees.
+    /// @param angle_end   Last angle in degrees (exclusive).
+    /// @param angle_step  Angle increment in degrees.
+    /// @return Number of templates added, or -1 on failure.
+    int addRotatedTemplates(const cv::Mat& templ_gray, const cv::Mat& object_mask,
+                            const std::string& class_id,
+                            float angle_start = 0, float angle_end = 360,
+                            float angle_step = 2);
 
     const cv::Ptr<ColorGradient> &getModalities() const { return modality; }
 

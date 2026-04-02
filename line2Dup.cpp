@@ -2166,7 +2166,6 @@ int Detector::addTemplate(const Mat source, const std::string &class_id,
 static cv::Point2f rotate2d(const cv::Point2f inPoint, const double angRad)
 {
     cv::Point2f outPoint;
-    //CW rotation
     outPoint.x = std::cos(angRad)*inPoint.x - std::sin(angRad)*inPoint.y;
     outPoint.y = std::sin(angRad)*inPoint.x + std::cos(angRad)*inPoint.y;
     return outPoint;
@@ -2177,48 +2176,82 @@ static cv::Point2f rotatePoint(const cv::Point2f inPoint, const cv::Point2f cent
     return rotate2d(inPoint - center, angRad) + center;
 }
 
+// Rotate a TemplatePyramid's features by theta degrees around center.
+// Creates a new TemplatePyramid with rotated coordinates + orientation labels.
+static std::vector<Template> rotateTemplatePyramid(const std::vector<Template>& src,
+                                              float theta, cv::Point2f center,
+                                              int pyramid_levels) {
+    std::vector<Template> tp;
+    tp.resize(pyramid_levels);
+    // Negative angle for CW rotation in image coordinates (y-axis points down).
+    // warpAffine with -angle rotates the object CW, so feature rotation must match.
+    float angRad = -theta * (float)CV_PI / 180.0f;
+
+    for (int l = 0; l < pyramid_levels; ++l) {
+        cv::Point2f lvl_center = center;
+        for (int i = 0; i < l; ++i) lvl_center *= 0.5f;
+
+        for (auto& f : src[l].features) {
+            cv::Point2f p((float)(f.x + src[l].tl_x),
+                          (float)(f.y + src[l].tl_y));
+            cv::Point2f p_rot = rotatePoint(p, lvl_center, angRad);
+
+            Feature f_new;
+            f_new.x = (int)(p_rot.x + 0.5f);
+            f_new.y = (int)(p_rot.y + 0.5f);
+
+            // Rotate orientation to match the rotated edge direction
+            f_new.theta = f.theta - theta;
+            while (f_new.theta >= 360) f_new.theta -= 360;
+            while (f_new.theta < 0) f_new.theta += 360;
+            f_new.label = (int)(f_new.theta * 16.0f / 360.0f + 0.5f) & 7;
+
+            tp[l].features.push_back(f_new);
+        }
+        tp[l].pyramid_level = l;
+        tp[l].angle = theta;
+    }
+    return tp;
+}
+
 int Detector::addTemplate_rotate(const string &class_id, int zero_id,
                                  float theta, cv::Point2f center)
 {
     std::vector<TemplatePyramid> &template_pyramids = class_templates[class_id];
     int template_id = static_cast<int>(template_pyramids.size());
+    const auto& src = template_pyramids[zero_id];
 
-    const auto& to_rotate_tp = template_pyramids[zero_id];
-
-    TemplatePyramid tp;
-    tp.resize(pyramid_levels);
-
-    for (int l = 0; l < pyramid_levels; ++l)
-    {
-        if(l>0) center /= 2;
-
-        for(auto& f: to_rotate_tp[l].features){
-            Point2f p;
-            p.x = f.x + to_rotate_tp[l].tl_x;
-            p.y = f.y + to_rotate_tp[l].tl_y;
-            Point2f p_rot = rotatePoint(p, center, -theta/180*CV_PI);
-
-            Feature f_new;
-            f_new.x = int(p_rot.x + 0.5f);
-            f_new.y = int(p_rot.y + 0.5f);
-
-            f_new.theta = f.theta - theta;
-            while(f_new.theta > 360) f_new.theta -= 360;
-            while(f_new.theta < 0) f_new.theta += 360;
-
-            f_new.label = int(f_new.theta * 16 / 360 + 0.5f);
-            f_new.label &= 7;
-
-
-            tp[l].features.push_back(f_new);
-        }
-        tp[l].pyramid_level = l;
-    }
-
+    auto tp = rotateTemplatePyramid(src, theta, center, pyramid_levels);
     cropTemplates(tp);
-
     template_pyramids.push_back(tp);
     return template_id;
+}
+
+int Detector::addRotatedTemplates(const cv::Mat& templ_gray, const cv::Mat& object_mask,
+                                   const std::string& class_id,
+                                   float angle_start, float angle_end,
+                                   float angle_step) {
+    // Step 1: Extract features once at 0 degrees
+    std::vector<TemplatePyramid> &template_pyramids = class_templates[class_id];
+
+    // Use addTemplate for the base extraction (handles quantize + NMS + feature selection)
+    int zero_id = addTemplate(templ_gray, class_id, object_mask);
+    if (zero_id < 0) return -1;
+
+    // Copy base template (the reference would be invalidated by push_back)
+    auto base_tp = template_pyramids[zero_id];
+    cv::Point2f center(templ_gray.cols / 2.0f, templ_gray.rows / 2.0f);
+
+    // Step 2: Rotate features for all other angles
+    int count = 1;  // already have the 0-degree template
+    for (float angle = angle_start + angle_step; angle < angle_end; angle += angle_step) {
+        auto tp = rotateTemplatePyramid(base_tp, angle, center, pyramid_levels);
+        cropTemplates(tp);
+        template_pyramids.push_back(tp);
+        count++;
+    }
+
+    return count;
 }
 const std::vector<Template> &Detector::getTemplates(const std::string &class_id, int template_id) const
 {

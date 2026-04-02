@@ -210,6 +210,11 @@ public:
     int numTemplates(const std::string &class_id) const;
     int numClasses() const { return static_cast<int>(class_templates.size()); }
 
+    /// Get mutable access to template pyramids for a class (for feature scaling).
+    std::vector<std::vector<Template>>& getClassTemplates(const std::string& class_id) {
+        return class_templates[class_id];
+    }
+
     std::vector<std::string> classIds() const;
 
     void read(const cv::FileNode &fn);

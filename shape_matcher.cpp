@@ -346,7 +346,7 @@ FeatureSet::QualityReport FeatureSet::evaluateQuality() const {
 
     int roi_half = 15;
 
-    // Collect gradient vectors at each selected point for cross product analysis
+    // Collect gradient vectors + PCA cornerness at each selected point
     struct GradInfo { cv::Point2f dir; float mag; };
     std::vector<GradInfo> grads;
     for (int si : selected) {
@@ -366,6 +366,29 @@ FeatureSet::QualityReport FeatureSet::evaluateQuality() const {
         float gx=dx2.at<float>(max_loc.y,max_loc.x);
         float gy=dy2.at<float>(max_loc.y,max_loc.x);
         grads.push_back({cv::Point2f(gx,gy), (float)max_mag});
+
+        // PCA: if corner-like, add perpendicular gradient too
+        // This accounts for corners providing 2D constraint
+        float thr = 0.3f * (float)max_mag;
+        float cxx=0,cyy=0,cxy=0; int n=0;
+        for(int r2=0;r2<roi2.rows;r2++) for(int c2=0;c2<roi2.cols;c2++)
+            if(mag2.at<float>(r2,c2)>thr) {
+                float ddx=c2-h,ddy=r2-h; cxx+=ddx*ddx;cyy+=ddy*ddy;cxy+=ddx*ddy;n++;
+            }
+        if(n>0){cxx/=n;cyy/=n;cxy/=n;}
+        float trace=cxx+cyy;
+        float disc=std::sqrt(std::max(0.f,(cxx-cyy)*(cxx-cyy)/4+cxy*cxy));
+        float lam1=trace/2+disc, lam2=trace/2-disc;
+        float ratio = (lam2>1e-6f) ? lam1/lam2 : 999;
+
+        if (ratio < 1.8f) {
+            // Corner-like: add perpendicular direction with scaled magnitude
+            float corner_strength = (float)max_mag * (1.8f - ratio) / 0.8f;
+            grads.push_back({cv::Point2f(-gy, gx), corner_strength});
+            r.num_corner++;
+        } else {
+            r.num_edge++;
+        }
     }
 
     // Find the pair with the BEST cross product

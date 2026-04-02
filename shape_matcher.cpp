@@ -287,6 +287,183 @@ FeatureSet extractFeatures(const cv::Mat& templ_gray,
 }
 
 // ============================================================
+// FeatureSet quality evaluation
+// ============================================================
+
+FeatureSet::QualityReport FeatureSet::evaluateQuality() const {
+    QualityReport r;
+    r.score = 0;
+    r.condition_number = 999;
+    r.angle_coverage_deg = 0;
+    r.mean_edge_strength = 0;
+    r.num_directions = 0;
+    r.num_edge = 0;
+    r.num_corner = 0;
+
+    if (refine_points.empty() || templ_image.empty()) {
+        r.diagnosis = "No refine points or template image";
+        return r;
+    }
+
+    // Select ~15 well-spaced points (same as what ROI refine would use)
+    std::vector<cv::Point2f> positions;
+    std::vector<float> cornerness;
+    for (auto& rp : refine_points) {
+        positions.push_back(cv::Point2f(rp.px, rp.py));
+        cornerness.push_back(rp.cornerness);
+    }
+
+    float tcx = templ_width / 2.0f, tcy = templ_height / 2.0f;
+    float min_dist = std::max(templ_width, templ_height) / 16.0f * 1.5f;
+    float min_dist_sq = min_dist * min_dist;
+
+    // Greedy select well-spaced points (corners first)
+    struct Cand { int idx; float corn; };
+    std::vector<Cand> cands(positions.size());
+    for (size_t i = 0; i < positions.size(); i++)
+        cands[i] = {(int)i, cornerness[i]};
+    std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b){ return a.corn > b.corn; });
+
+    std::vector<int> selected;
+    for (auto& c : cands) {
+        if ((int)selected.size() >= 15) break;
+        auto& p = positions[c.idx];
+        bool too_close = false;
+        for (int si : selected) {
+            float dx = p.x - positions[si].x, dy = p.y - positions[si].y;
+            if (dx*dx + dy*dy < min_dist_sq) { too_close = true; break; }
+        }
+        if (too_close) continue;
+        if (std::abs(p.x) > templ_width/2.0f - 5 || std::abs(p.y) > templ_height/2.0f - 5)
+            continue;
+        selected.push_back(c.idx);
+    }
+
+    if (selected.size() < 3) {
+        r.diagnosis = "Too few usable points (" + std::to_string(selected.size()) + ")";
+        return r;
+    }
+
+    // Analyze each selected point: PCA + edge strength
+    std::vector<float> normal_angles;
+    std::vector<float> J_rows;
+    float total_strength = 0;
+    int roi_half = 15;
+
+    for (int si : selected) {
+        auto& rp = refine_points[si];
+        int tx = (int)(rp.px + tcx + 0.5f), ty = (int)(rp.py + tcy + 0.5f);
+        int h = roi_half;
+        if (tx-h<0||tx+h>=templ_image.cols||ty-h<0||ty+h>=templ_image.rows) {
+            h = std::min({tx,ty,templ_image.cols-1-tx,templ_image.rows-1-ty});
+            if (h < 5) continue;
+        }
+        cv::Mat roi = templ_image(cv::Rect(tx-h, ty-h, 2*h, 2*h));
+
+        // Edge strength
+        cv::Mat dx, dy, mag;
+        cv::Sobel(roi, dx, CV_32F, 1, 0, 3);
+        cv::Sobel(roi, dy, CV_32F, 0, 1, 3);
+        cv::magnitude(dx, dy, mag);
+        float max_mag = *std::max_element(mag.begin<float>(), mag.end<float>());
+        total_strength += max_mag;
+
+        // PCA
+        float thr = 0.3f * max_mag;
+        float cxx=0,cyy=0,cxy=0; int n=0;
+        for(int r2=0;r2<roi.rows;r2++) for(int c2=0;c2<roi.cols;c2++)
+            if(mag.at<float>(r2,c2)>thr) {
+                float ddx=c2-h,ddy=r2-h; cxx+=ddx*ddx;cyy+=ddy*ddy;cxy+=ddx*ddy;n++;
+            }
+        if(n>0){cxx/=n;cyy/=n;cxy/=n;}
+        float trace=cxx+cyy;
+        float disc=std::sqrt(std::max(0.f,(cxx-cyy)*(cxx-cyy)/4+cxy*cxy));
+        float lam1=trace/2+disc, lam2=trace/2-disc;
+        float ratio = (lam2>1e-6f) ? lam1/lam2 : 999;
+        bool is_corner = (ratio < 1.5f);
+
+        cv::Point2f normal;
+        if(std::abs(cxy)>1e-6f) normal = cv::Point2f(lam2-cyy, cxy);
+        else normal = (cxx>=cyy) ? cv::Point2f(0,1) : cv::Point2f(1,0);
+        float len = std::sqrt(normal.x*normal.x + normal.y*normal.y);
+        if(len>1e-6f) normal *= (1.0f/len);
+
+        float angle = std::atan2(normal.y, normal.x) * 180.0f / (float)CV_PI;
+        if (angle < 0) angle += 180;
+        normal_angles.push_back(angle);
+
+        if(is_corner) r.num_corner++; else r.num_edge++;
+
+        // Constraint row
+        float sx = rp.px, sy = rp.py;
+        float j0=-sy*normal.x+sx*normal.y, j1=normal.x, j2=normal.y;
+        J_rows.push_back(j0); J_rows.push_back(j1); J_rows.push_back(j2);
+
+        if(is_corner) {
+            cv::Point2f tang;
+            if(std::abs(cxy)>1e-6f) tang = cv::Point2f(lam1-cyy, cxy);
+            else tang = (cxx>=cyy) ? cv::Point2f(1,0) : cv::Point2f(0,1);
+            float tlen = std::sqrt(tang.x*tang.x+tang.y*tang.y);
+            if(tlen>1e-6f) tang *= (1.0f/tlen);
+            J_rows.push_back(-sy*tang.x+sx*tang.y);
+            J_rows.push_back(tang.x); J_rows.push_back(tang.y);
+            float ta = std::atan2(tang.y, tang.x)*180.0f/(float)CV_PI;
+            if(ta<0) ta+=180;
+            normal_angles.push_back(ta);
+        }
+    }
+
+    r.mean_edge_strength = total_strength / selected.size();
+
+    // Condition number
+    int nrows = (int)J_rows.size() / 3;
+    if (nrows >= 3) {
+        cv::Mat J(nrows, 3, CV_32F, J_rows.data());
+        cv::Mat w;
+        cv::SVD::compute(J, w);
+        r.condition_number = (w.at<float>(2) > 1e-8f) ? w.at<float>(0)/w.at<float>(2) : 999;
+    }
+
+    // Angle coverage
+    if (!normal_angles.empty()) {
+        std::sort(normal_angles.begin(), normal_angles.end());
+        float max_gap = 0;
+        for (size_t i = 1; i < normal_angles.size(); ++i)
+            max_gap = std::max(max_gap, normal_angles[i]-normal_angles[i-1]);
+        max_gap = std::max(max_gap, 180.0f-normal_angles.back()+normal_angles[0]);
+        r.angle_coverage_deg = 180.0f - max_gap;
+    }
+
+    // Direction count
+    bool bins[12]={};
+    for(float a:normal_angles){int b=(int)(a/15);if(b>=12)b=11;bins[b]=true;}
+    for(int i=0;i<12;i++) if(bins[i]) r.num_directions++;
+
+    // Compute composite score (0-100)
+    // Factors: condition number, angle coverage, edge strength, point count
+    float score_cond = std::max(0.0f, std::min(1.0f, (50.0f - r.condition_number) / 40.0f));
+    float score_coverage = std::max(0.0f, std::min(1.0f, (r.angle_coverage_deg - 20.0f) / 100.0f));
+    float score_strength = std::max(0.0f, std::min(1.0f, r.mean_edge_strength / 500.0f));
+    float score_count = std::max(0.0f, std::min(1.0f, (float)selected.size() / 10.0f));
+
+    r.score = (int)(100.0f * (score_cond * 0.35f + score_coverage * 0.30f +
+                               score_strength * 0.20f + score_count * 0.15f));
+    r.score = std::max(0, std::min(100, r.score));
+
+    // Diagnosis
+    if (r.score >= 90)
+        r.diagnosis = "Excellent";
+    else if (r.score >= 70)
+        r.diagnosis = "Good";
+    else if (r.score >= 50)
+        r.diagnosis = "Marginal — may fail under blur or large perturbation";
+    else
+        r.diagnosis = "Poor — near-degenerate geometry, add more diverse edges";
+
+    return r;
+}
+
+// ============================================================
 // ShapeMatcher::Impl
 // ============================================================
 

@@ -84,6 +84,28 @@ struct FeatureSet {
     int numFeatures() const {
         return levels.empty() ? 0 : (int)levels[0].features.size();
     }
+
+    /// Refinement quality score for a set of refine points.
+    /// Combines geometric constraint quality + edge response strength.
+    /// @return Score 0-100:
+    ///   90-100: Excellent — well-constrained, strong edges, robust to ±20px/±20deg
+    ///   70-89:  Good — reliable for most conditions
+    ///   50-69:  Marginal — may fail under large perturbation or blur
+    ///   0-49:   Poor — near-degenerate geometry, unreliable results
+    struct QualityReport {
+        int score;                  ///< Overall 0-100 score
+        float condition_number;     ///< Constraint matrix condition (lower = better)
+        float angle_coverage_deg;   ///< Edge normal direction spread (higher = better)
+        float mean_edge_strength;   ///< Average gradient magnitude at sample points
+        int num_directions;         ///< Distinct edge directions (binned 15 deg)
+        int num_edge, num_corner;   ///< Point classification counts
+        std::string diagnosis;      ///< Human-readable explanation
+    };
+
+    /// Evaluate refinement quality of current refine_points.
+    /// Call after extractFeatures() to check if the template is suitable
+    /// for sub-pixel refinement, before deploying to production.
+    QualityReport evaluateQuality() const;
 };
 
 /// Extract features from a template image.

@@ -27,7 +27,7 @@ static void draw_L(Mat& img, int cx, int cy, double angle, int color) {
 int main() {
     // 1. Create template — try different shapes
     Mat templ(80, 80, CV_8U, Scalar(0));
-#define TEMPLATE_SHAPE 2  // 0=L, 1=V, 2=parallel lines
+#define TEMPLATE_SHAPE 1  // 0=L, 1=V, 2=parallel lines
 #if TEMPLATE_SHAPE == 0
     draw_L(templ, 40, 40, 0, 200);
     printf("Template: L-shape\n");
@@ -179,30 +179,13 @@ int main() {
     }
     printf("  Edge-only sample points: %d\n", (int)sample_pts_edge.size());
 
-    // Validate constraints
-    printf("\n  --- Constraint Validation ---\n");
-    roi_refine::ROIConfig vcfg;
-    vcfg.roi_half = 15;
-
-    auto q_mixed = roi_refine::validateConstraints(sample_pts_8, loaded.templ_image, vcfg);
-    printf("  Mixed 8pt:     cond=%.0f  coverage=%.0f deg  dirs=%d  %de+%dc  %s\n",
-           q_mixed.condition_number, q_mixed.angle_coverage,
-           q_mixed.num_directions, q_mixed.num_edge, q_mixed.num_corner,
-           q_mixed.diagnosis.c_str());
-
-    auto q_edge = roi_refine::validateConstraints(sample_pts_edge, loaded.templ_image, vcfg);
-    printf("  Edge-only 8pt: cond=%.0f  coverage=%.0f deg  dirs=%d  %de+%dc  %s\n",
-           q_edge.condition_number, q_edge.angle_coverage,
-           q_edge.num_directions, q_edge.num_edge, q_edge.num_corner,
-           q_edge.diagnosis.c_str());
-
-    auto q_15 = roi_refine::validateConstraints(sample_pts_15, loaded.templ_image, vcfg);
-    printf("  Mixed 15pt:    cond=%.0f  coverage=%.0f deg  dirs=%d  %de+%dc  %s\n",
-           q_15.condition_number, q_15.angle_coverage,
-           q_15.num_directions, q_15.num_edge, q_15.num_corner,
-           q_15.diagnosis.c_str());
-
-    printf("\n");
+    // Quality evaluation (user-facing API)
+    auto quality = loaded.evaluateQuality();
+    printf("\n  Quality Score: %d/100 — %s\n", quality.score, quality.diagnosis.c_str());
+    printf("    cond=%.0f  coverage=%.0f deg  dirs=%d  strength=%.0f  %de+%dc\n\n",
+           quality.condition_number, quality.angle_coverage_deg,
+           quality.num_directions, quality.mean_edge_strength,
+           quality.num_edge, quality.num_corner);
 
     printf("%-22s  %-22s  %-22s  %-22s  %-22s\n",
            "Init perturbation", "ICP (dense)", "ROI 15pt×5", "ROI 8pt×3", "ROI 8edge-only");

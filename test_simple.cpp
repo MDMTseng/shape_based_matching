@@ -76,15 +76,15 @@ int main() {
     printf("\n--- Robustness: refine from perturbed initial pose ---\n");
     printf("GT: (160,120)@25.  Scene created with warpAffine.\n\n");
 
-    // Create scene with one L at (160,120)@25
-    Mat scene1(480, 640, CV_8U, Scalar(30));
+    // Base clean scene with one L at (160,120)@25
+    Mat scene_clean(480, 640, CV_8U, Scalar(30));
     {
         Mat M1 = getRotationMatrix2D(Point2f(40,40), -25.0, 1.0);
         Mat rot1; warpAffine(templ, rot1, M1, templ.size(), INTER_LINEAR, BORDER_CONSTANT, Scalar(0));
         for(int r=0;r<rot1.rows;r++) for(int c=0;c<rot1.cols;c++) {
             int sy=120-40+r, sx=160-40+c;
-            if(sy>=0&&sy<scene1.rows&&sx>=0&&sx<scene1.cols&&rot1.at<uchar>(r,c)>0)
-                scene1.at<uchar>(sy,sx)=rot1.at<uchar>(r,c);
+            if(sy>=0&&sy<scene_clean.rows&&sx>=0&&sx<scene_clean.cols&&rot1.at<uchar>(r,c)>0)
+                scene_clean.at<uchar>(sy,sx)=rot1.at<uchar>(r,c);
         }
     }
 
@@ -113,22 +113,42 @@ int main() {
     printf("%-22s  %-22s  %-22s  %-22s\n", "Init perturbation", "ICP (dense)", "ROI 15pt×5", "ROI 8pt×3");
     printf("%-22s  %-22s  %-22s  %-22s\n", "-----------------", "----------", "----------", "---------");
 
-    struct PoseError { float dx, dy, da; const char* name; };
+    struct PoseError { float dx, dy, da; double noise; int blur; const char* name; };
     PoseError errors[] = {
-        { 0,  0,  0, "perfect"},
-        { 2,  1,  2, "+2px +2deg"},
-        { 5,  3,  5, "+5px +5deg"},
-        { 8,  5,  8, "+8px +8deg"},
-        {10, 10, 10, "+10px +10deg"},
-        {15, 10, 15, "+15px +15deg"},
-        {20, 15, 20, "+20px +20deg"},
-        { 0,  0, 30, "+0px +30deg"},
-        { 0,  0, 45, "+0px +45deg"},
-        {30, 20,  0, "+30px +0deg"},
+        // Position/angle perturbation (clean)
+        { 0,  0,  0, 0, 0, "perfect"},
+        { 5,  3,  5, 0, 0, "+5px +5deg"},
+        {10, 10, 10, 0, 0, "+10px +10deg"},
+        {20, 15, 20, 0, 0, "+20px +20deg"},
+        { 0,  0, 30, 0, 0, "+30deg"},
+        // Noise (no pose error)
+        { 0,  0,  0, 10, 0, "noise s=10"},
+        { 0,  0,  0, 30, 0, "noise s=30"},
+        { 0,  0,  0, 50, 0, "noise s=50"},
+        // Blur (no pose error)
+        { 0,  0,  0,  0, 5, "blur k=5"},
+        { 0,  0,  0,  0,11, "blur k=11"},
+        { 0,  0,  0,  0,21, "blur k=21"},
+        // Combined
+        { 5,  3,  5, 20, 3, "+5px+5deg+noise+blur"},
+        {10, 10, 10, 30, 5, "+10px+10deg+noise+blur"},
     };
 
     for (auto& pe : errors) {
         float init_x = 160 + pe.dx, init_y = 120 + pe.dy, init_a = 25 + pe.da;
+
+        // Apply noise/blur to scene
+        Mat scene1 = scene_clean.clone();
+        if (pe.noise > 0) {
+            Mat noise(scene1.size(), CV_64F);
+            RNG rng(42);
+            rng.fill(noise, RNG::NORMAL, 0, pe.noise);
+            Mat tmp; scene1.convertTo(tmp, CV_64F);
+            tmp += noise; tmp.convertTo(scene1, CV_8U);
+        }
+        if (pe.blur > 0) {
+            GaussianBlur(scene1, scene1, Size(pe.blur, pe.blur), 0);
+        }
 
         printf("%-22s  ", pe.name);
 

@@ -22,83 +22,110 @@ static Mat pad16(const Mat& img) {
     if(pw!=img.cols||ph!=img.rows){Mat p;copyMakeBorder(img,p,0,ph-img.rows,0,pw-img.cols,BORDER_CONSTANT,Scalar(0));return p;}
     return img;
 }
+// Template shapes using cv drawing (larger for reliable feature extraction)
+static Mat make_templ_L(int TW) {
+    Mat img(TW, TW, CV_8U, Scalar(0));
+    rectangle(img, Point(TW/2-15, TW/2-30), Point(TW/2-5, TW/2+30), Scalar(200), -1);
+    rectangle(img, Point(TW/2-15, TW/2+20), Point(TW/2+25, TW/2+30), Scalar(200), -1);
+    return img;
+}
+static Mat make_templ_T(int TW) {
+    Mat img(TW, TW, CV_8U, Scalar(0));
+    rectangle(img, Point(TW/2-5, TW/2-25), Point(TW/2+5, TW/2+25), Scalar(200), -1);
+    rectangle(img, Point(TW/2-25, TW/2-25), Point(TW/2+25, TW/2-15), Scalar(200), -1);
+    return img;
+}
+static Mat make_templ_arrow(int TW) {
+    Mat img(TW, TW, CV_8U, Scalar(0));
+    Point pts[3] = {Point(TW/2-20, TW/2+15), Point(TW/2-20, TW/2-15), Point(TW/2+20, TW/2)};
+    fillConvexPoly(img, pts, 3, Scalar(200));
+    return img;
+}
+static Mat make_templ_wrench(int TW) {
+    Mat img(TW, TW, CV_8U, Scalar(0));
+    rectangle(img, Point(TW/2-30, TW/2-4), Point(TW/2+5, TW/2+4), Scalar(200), -1);
+    circle(img, Point(TW/2+12, TW/2), 12, Scalar(200), -1);
+    return img;
+}
+
+// Draw shape into scene at given angle using warpAffine from 0-degree template
+static void drawShapeInScene(Mat& scene, const Mat& templ, int cx, int cy, double angle) {
+    int TW = templ.cols;
+    Mat M = getRotationMatrix2D(Point2f(TW/2.0f, TW/2.0f), -angle, 1.0);
+    Mat rotated;
+    warpAffine(templ, rotated, M, Size(TW, TW), INTER_LINEAR, BORDER_CONSTANT, Scalar(0));
+    int ox = cx - TW/2, oy = cy - TW/2;
+    for (int r = 0; r < TW; ++r) {
+        int sy = oy + r;
+        if (sy < 0 || sy >= scene.rows) continue;
+        for (int c = 0; c < TW; ++c) {
+            int sx = ox + c;
+            if (sx < 0 || sx >= scene.cols) continue;
+            uchar v = rotated.at<uchar>(r, c);
+            if (v > 0) scene.at<uchar>(sy, sx) = v;
+        }
+    }
+}
+
 int main() {
     int TW=80, W=640, H=480, cx=W/2, cy=H/2;
-    Mat templ(TW,TW,CV_8U,Scalar(0));
-    draw_L(templ,TW/2,TW/2,0,200);
-    Mat mask=Mat::ones(TW,TW,CV_8U)*255;
 
-    // Method 1: warpAffine
-    line2Dup::Detector det1(128,{4,8},30,60);
-    for(int a=0;a<360;a+=2){
-        Mat rt,rm;
-        Mat M=getRotationMatrix2D(Point2f(TW/2.0f,TW/2.0f),-a,1.0);
-        warpAffine(templ,rt,M,Size(TW,TW)); warpAffine(mask,rm,M,Size(TW,TW));
-        det1.addTemplate(rt,"L",rm);
-    }
+    struct Shape { const char* name; Mat templ; };
+    Shape shapes[] = {
+        {"L-shape", make_templ_L(TW)},
+        {"T-shape", make_templ_T(TW)},
+        {"Arrow",   make_templ_arrow(TW)},
+        {"Wrench",  make_templ_wrench(TW)},
+    };
 
-    // Method 2: addRotatedTemplates (new batch API)
-    line2Dup::Detector det2(128,{4,8},30,60);
-    int cnt = det2.addRotatedTemplates(templ, mask, "L", 0, 360, 2);
-    fprintf(stderr, "addRotatedTemplates: %d templates\n", cnt);
+    fprintf(stderr, "%-10s  %-8s  %10s  %10s\n", "Shape", "Step", "warpAffine", "FeatRotate");
+    fprintf(stderr, "%-10s  %-8s  %10s  %10s\n", "-----", "----", "----------", "----------");
 
-    // Test with draw_L scenes
-    float sum1=0, sum2=0; int n=0;
-    for(int gt=0;gt<360;gt+=5){
-        Mat scene(H,W,CV_8U,Scalar(50));
-        draw_L(scene,cx,cy,gt,200);
-        Mat padded=pad16(scene);
+    for (auto& shape : shapes) {
+        Mat mask = Mat::zeros(TW, TW, CV_8U);
+        for (int r = 0; r < TW; ++r)
+            for (int c = 0; c < TW; ++c)
+                if (shape.templ.at<uchar>(r, c) > 0) mask.at<uchar>(r, c) = 255;
+        dilate(mask, mask, Mat(), Point(-1,-1), 5);
 
-        auto m1=det1.match(padded,50);
-        auto m2=det2.match(padded,50);
-        if(m1.empty()||m2.empty()) continue;
-
-        float e1=m1[0].template_id*2.0f-gt; if(e1>180)e1-=360;if(e1<-180)e1+=360;
-        float e2=m2[0].template_id*2.0f-gt; if(e2>180)e2-=360;if(e2<-180)e2+=360;
-        sum1+=e1; sum2+=e2; n++;
-    }
-    fprintf(stderr,"Method 1 (warpAffine):       bias = %+.1f deg  (n=%d)\n",sum1/n,n);
-    fprintf(stderr,"Method 2 (rotate features):  bias = %+.1f deg  (n=%d)\n",sum2/n,n);
-
-    // Bias vs step size: warpAffine vs feature rotation
-    fprintf(stderr, "\n%-8s  %10s  %10s\n", "Step", "warpAffine", "FeatRotate");
-    fprintf(stderr, "%-8s  %10s  %10s\n", "----", "----------", "----------");
-
-    for (float step : {1.0f, 2.0f, 3.0f, 5.0f, 10.0f}) {
-        // warpAffine method
-        line2Dup::Detector dw(128,{4,8},30,60);
-        for(int a=0;a<360;a+=(int)step){
-            Mat rt,rm;
-            Mat M=getRotationMatrix2D(Point2f(TW/2.0f,TW/2.0f),-a,1.0);
-            warpAffine(templ,rt,M,Size(TW,TW)); warpAffine(mask,rm,M,Size(TW,TW));
-            dw.addTemplate(rt,"L",rm);
-        }
-
-        // Feature rotation method
-        line2Dup::Detector dr(128,{4,8},30,60);
-        dr.addRotatedTemplates(templ, mask, "L", 0, 360, step);
-
-        float sw=0, sr=0; int nw=0, nr=0;
-        for(int gt=0;gt<360;gt+=5){
-            Mat scene(H,W,CV_8U,Scalar(50));
-            draw_L(scene,cx,cy,gt,200);
-            Mat padded=pad16(scene);
-
-            auto mw=dw.match(padded,50);
-            if(!mw.empty()){
-                float e=mw[0].template_id*step-gt;
-                if(e>180)e-=360;if(e<-180)e+=360;
-                sw+=e; nw++;
+        for (float step : {1.0f, 2.0f, 3.0f, 5.0f}) {
+            // warpAffine method
+            line2Dup::Detector dw(128,{4,8},30,60);
+            for(int a=0;a<360;a+=(int)step){
+                Mat rt,rm;
+                Mat M=getRotationMatrix2D(Point2f(TW/2.0f,TW/2.0f),-(double)a,1.0);
+                warpAffine(shape.templ,rt,M,Size(TW,TW));
+                warpAffine(mask,rm,M,Size(TW,TW));
+                dw.addTemplate(rt,"S",rm);
             }
-            auto mr=dr.match(padded,50);
-            if(!mr.empty()){
-                float e=mr[0].template_id*step-gt;
-                if(e>180)e-=360;if(e<-180)e+=360;
-                sr+=e; nr++;
+
+            // Feature rotation method
+            line2Dup::Detector dr(128,{4,8},30,60);
+            dr.addRotatedTemplates(shape.templ, mask, "S", 0, 360, step);
+
+            float sw=0, sr=0; int nw=0, nr=0;
+            for(int gt=0;gt<360;gt+=5){
+                Mat scene(H,W,CV_8U,Scalar(50));
+                drawShapeInScene(scene, shape.templ, cx, cy, gt);
+                Mat padded=pad16(scene);
+
+                auto mw=dw.match(padded,50);
+                if(!mw.empty()){
+                    float e=mw[0].template_id*step-gt;
+                    if(e>180)e-=360;if(e<-180)e+=360;
+                    sw+=e; nw++;
+                }
+                auto mr=dr.match(padded,50);
+                if(!mr.empty()){
+                    float e=mr[0].template_id*step-gt;
+                    if(e>180)e-=360;if(e<-180)e+=360;
+                    sr+=e; nr++;
+                }
             }
+            fprintf(stderr, "%-10s  step=%1.0f     %+5.1f deg    %+5.1f deg\n",
+                    shape.name, step, nw>0?sw/nw:0, nr>0?sr/nr:0);
         }
-        fprintf(stderr, "step=%2.0f    %+5.1f deg    %+5.1f deg\n",
-                step, nw>0?sw/nw:0, nr>0?sr/nr:0);
+        fprintf(stderr, "\n");
     }
 
     return 0;

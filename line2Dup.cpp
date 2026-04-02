@@ -2204,6 +2204,7 @@ static std::vector<Template> rotateTemplatePyramid(const std::vector<Template>& 
             f_new.theta = f.theta - theta;
             while (f_new.theta >= 360) f_new.theta -= 360;
             while (f_new.theta < 0) f_new.theta += 360;
+            // Round to nearest bin to match comparison-based scene quantization
             f_new.label = (int)(f_new.theta * 16.0f / 360.0f + 0.5f) & 7;
 
             tp[l].features.push_back(f_new);

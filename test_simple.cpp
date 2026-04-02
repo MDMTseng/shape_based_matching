@@ -3,6 +3,7 @@
 #include "shape_matcher.h"
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
+#include <chrono>
 #include <cstdio>
 
 using namespace cv;
@@ -18,26 +19,15 @@ int main() {
     features.save("rect.feat");
     printf("Extracted %d features\n", features.numFeatures());
 
-    // 3. Create matcher + load features
-    sbm::MatchConfig cfg;
-    cfg.min_score = 50;
-    cfg.nms_radius = 50;
-    cfg.refine = sbm::RefineMode::ICP;
+    // 3. Create scene with 3 rotated rectangles
+    struct Obj { int x, y; double angle; };
+    Obj objs[] = {{160,120,25}, {320,240,90}, {480,360,200}};
 
-    sbm::ShapeMatcher matcher(cfg);
-
-    sbm::ModelConfig mcfg;
-    mcfg.angle = {0, 360, 2};
-
-    matcher.addModel("rect", sbm::FeatureSet::load("rect.feat"), mcfg);
-    printf("Templates: %d\n", matcher.numTemplates());
-
-    // 4. Create scene with 3 rotated rectangles
     Mat scene(480, 640, CV_8U, Scalar(30));
-    for (auto& obj : std::vector<std::pair<Point,double>>{{Point(160,120),25},{Point(320,240),90},{Point(480,360),200}}) {
-        Mat M = getRotationMatrix2D(Point2f(40,30), -obj.second, 1.0);
+    for (auto& obj : objs) {
+        Mat M = getRotationMatrix2D(Point2f(40,30), -obj.angle, 1.0);
         Mat rot; warpAffine(templ, rot, M, templ.size(), INTER_LINEAR, BORDER_CONSTANT, Scalar(0));
-        int ox = obj.first.x - 40, oy = obj.first.y - 30;
+        int ox = obj.x - 40, oy = obj.y - 30;
         for (int r=0; r<rot.rows; r++) for (int c=0; c<rot.cols; c++) {
             int sy=oy+r, sx=ox+c;
             if (sy>=0 && sy<scene.rows && sx>=0 && sx<scene.cols && rot.at<uchar>(r,c)>0)
@@ -45,12 +35,41 @@ int main() {
         }
     }
 
-    // 5. Match
-    auto results = matcher.match(scene);
-    printf("\nFound %d matches:\n", (int)results.size());
-    for (auto& r : results)
-        printf("  %s at (%.0f, %.0f) angle=%.1f score=%.0f\n",
-               r.model_name.c_str(), r.x, r.y, r.angle, r.score);
+    // 4. Compare refine modes
+    struct Mode { const char* name; sbm::RefineMode mode; };
+    Mode modes[] = {
+        {"None",       sbm::RefineMode::None},
+        {"ICP_Sparse", sbm::RefineMode::ICP_Sparse},
+        {"ICP (dense)", sbm::RefineMode::ICP},
+    };
+
+    auto loaded = sbm::FeatureSet::load("rect.feat");
+    printf("ICP edges: %d (dense), %d (sparse)\n\n",
+           (int)loaded.icp_edges.size(), loaded.numFeatures());
+
+    printf("GT:  (160,120)@25   (320,240)@90   (480,360)@200\n\n");
+
+    for (auto& mode : modes) {
+        sbm::MatchConfig cfg;
+        cfg.min_score = 50;
+        cfg.nms_radius = 50;
+        cfg.refine = mode.mode;
+
+        sbm::ShapeMatcher matcher(cfg);
+        sbm::ModelConfig mcfg;
+        mcfg.angle = {0, 360, 2};
+        matcher.addModel("rect", loaded, mcfg);
+
+        auto t0 = std::chrono::high_resolution_clock::now();
+        auto results = matcher.match(scene);
+        double ms = std::chrono::duration<double, std::milli>(
+            std::chrono::high_resolution_clock::now() - t0).count();
+
+        printf("%-12s (%.1fms): ", mode.name, ms);
+        for (auto& r : results)
+            printf("(%3.0f,%3.0f)@%5.1f  ", r.x, r.y, r.angle);
+        printf("\n");
+    }
 
     return 0;
 }

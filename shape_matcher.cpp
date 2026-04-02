@@ -467,13 +467,30 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         while (user_angle < 0) user_angle += 360;
         while (user_angle >= 360) user_angle -= 360;
 
-        // ICP refinement at full resolution using dense Canny edges
-        if (cfg.refine == RefineMode::ICP && !scene.empty() && !fs.icp_edges.empty()) {
-            // Convert stored dense edges to icp_refine format
-            std::vector<icp_refine::EdgePoint> edges(fs.icp_edges.size());
-            for (size_t ei = 0; ei < fs.icp_edges.size(); ++ei) {
-                edges[ei].pos = cv::Point2f(fs.icp_edges[ei].px, fs.icp_edges[ei].py);
-                edges[ei].normal = cv::Point2f(fs.icp_edges[ei].nx, fs.icp_edges[ei].ny);
+        // ICP refinement at full resolution
+        bool do_icp = (cfg.refine == RefineMode::ICP || cfg.refine == RefineMode::ICP_Sparse)
+                      && !scene.empty();
+        if (do_icp) {
+            std::vector<icp_refine::EdgePoint> edges;
+
+            if (cfg.refine == RefineMode::ICP && !fs.icp_edges.empty()) {
+                // Dense Canny edges — accurate normals, ~200 points, <0.5 deg
+                edges.resize(fs.icp_edges.size());
+                for (size_t ei = 0; ei < fs.icp_edges.size(); ++ei) {
+                    edges[ei].pos = cv::Point2f(fs.icp_edges[ei].px, fs.icp_edges[ei].py);
+                    edges[ei].normal = cv::Point2f(fs.icp_edges[ei].nx, fs.icp_edges[ei].ny);
+                }
+            } else {
+                // Sparse matching features — quantized normals, ~50 points, ~2 deg
+                auto& lvl0 = fs.levels[0];
+                for (auto& f : lvl0.features) {
+                    icp_refine::EdgePoint ep;
+                    ep.pos = cv::Point2f((float)(f.x + lvl0.tl_x) - fs.templ_width / 2.0f,
+                                         (float)(f.y + lvl0.tl_y) - fs.templ_height / 2.0f);
+                    float tr = f.theta * (float)CV_PI / 180.0f;
+                    ep.normal = cv::Point2f(std::cos(tr), std::sin(tr));
+                    edges.push_back(ep);
+                }
             }
 
             cv::Mat roi_smooth, roi_dx, roi_dy;

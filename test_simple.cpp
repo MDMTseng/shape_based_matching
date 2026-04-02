@@ -49,6 +49,10 @@ int main() {
     // Long sides dominate, only 1 short end provides perpendicular constraint
     rectangle(templ, Point(5, 35), Point(75, 45), Scalar(200), -1);
     printf("Template: long pole (70x10)\n");
+#elif TEMPLATE_SHAPE == 7
+    // Single horizontal line — all normals vertical, no horizontal constraint
+    line(templ, Point(5, 40), Point(75, 40), Scalar(200), 3);
+    printf("Template: single horizontal line\n");
 #elif TEMPLATE_SHAPE == 4
     // Flat triangle (10-10-160 deg) — nearly degenerate, almost a straight line
     {

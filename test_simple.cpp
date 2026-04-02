@@ -27,7 +27,7 @@ static void draw_L(Mat& img, int cx, int cy, double angle, int color) {
 int main() {
     // 1. Create template — try different shapes
     Mat templ(80, 80, CV_8U, Scalar(0));
-#define TEMPLATE_SHAPE 1  // 0=L, 1=V, 2=parallel lines
+#define TEMPLATE_SHAPE 3  // 0=L, 1=V, 2=parallel lines, 3=long pole
 #if TEMPLATE_SHAPE == 0
     draw_L(templ, 40, 40, 0, 200);
     printf("Template: L-shape\n");
@@ -44,6 +44,11 @@ int main() {
     rectangle(templ, Point(15, 10), Point(22, 70), Scalar(200), -1);
     rectangle(templ, Point(58, 10), Point(65, 70), Scalar(200), -1);
     printf("Template: parallel lines (degenerate)\n");
+#elif TEMPLATE_SHAPE == 3
+    // Long thin pole (10:1 aspect ratio)
+    // Long sides dominate, only 1 short end provides perpendicular constraint
+    rectangle(templ, Point(5, 35), Point(75, 45), Scalar(200), -1);
+    printf("Template: long pole (70x10)\n");
 #endif
 
     // 2. Extract features + save

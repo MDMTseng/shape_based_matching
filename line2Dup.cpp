@@ -322,32 +322,99 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
         static const int TAN_B[4] = {1989, 6682, 14966, 50273};
 
         // Step 1: Compute magnitude + unfiltered 8-bin quantization
+        // AVX2 fast path: compute L1 magnitude for 16 pixels at once,
+        // then scalar bin computation only for above-threshold pixels.
         Mat quantized_unfiltered = Mat::zeros(src.size(), CV_8U);
-        float threshold_sq = threshold * threshold;
+        int threshold_i = (int)threshold;  // L1 threshold (not squared)
+        float threshold_sq = threshold * threshold;  // for magnitude Mat compatibility
 
         for (int r = 1; r < src.rows - 1; ++r) {
             const short *dx = sobel_dx_16s.ptr<short>(r);
             const short *dy = sobel_dy_16s.ptr<short>(r);
             float *mag_r = magnitude.ptr<float>(r);
-            float *ang_r = angle_ori.ptr<float>(r);
             uchar *qr = quantized_unfiltered.ptr<uchar>(r);
 
-            for (int c = 1; c < src.cols - 1; ++c) {
+            int c = 1;
+#ifdef __AVX2__
+            // AVX2: compute magnitude for 16 pixels, threshold, then
+            // only process above-threshold pixels with scalar bin logic.
+            const __m256i thresh_v = _mm256_set1_epi16((short)threshold_i);
+            for (; c <= src.cols - 1 - 16; c += 16) {
+                __m256i vdx = _mm256_loadu_si256((const __m256i*)(dx + c));
+                __m256i vdy = _mm256_loadu_si256((const __m256i*)(dy + c));
+                __m256i adx = _mm256_abs_epi16(vdx);
+                __m256i ady = _mm256_abs_epi16(vdy);
+                __m256i mag_l1 = _mm256_add_epi16(adx, ady);
+
+                // Store squared magnitude as float for compatibility
+                // Widen to int32 and convert
+                __m256i lo16 = _mm256_unpacklo_epi16(vdx, _mm256_setzero_si256());
+                __m256i hi16 = _mm256_unpackhi_epi16(vdx, _mm256_setzero_si256());
+                // Actually, just compute and store mag_sq with scalar below
+                // since the float store is not the bottleneck
+
+                // Check which pixels are above threshold
+                __m256i above = _mm256_cmpgt_epi16(mag_l1, thresh_v);
+                int mask = _mm256_movemask_epi8(above);
+
+                if (mask == 0) {
+                    // All below threshold: just store zero magnitudes
+                    for (int i = 0; i < 16; ++i) {
+                        int gx = dx[c+i], gy = dy[c+i];
+                        mag_r[c+i] = (float)(gx*gx + gy*gy);
+                    }
+                    continue;
+                }
+
+                // Some pixels above threshold: scalar bin computation
+                for (int i = 0; i < 16; ++i) {
+                    int gx = dx[c+i], gy = dy[c+i];
+                    int mag_sq_i = gx*gx + gy*gy;
+                    mag_r[c+i] = (float)mag_sq_i;
+
+                    int abs_gx = abs(gx), abs_gy = abs(gy);
+                    if (abs_gx + abs_gy <= threshold_i) continue;
+
+                    int ugx = gx, ugy = gy;
+                    if (ugy < 0) { ugx = -ugx; ugy = -ugy; }
+                    if (ugy == 0 && ugx < 0) ugx = -ugx;
+
+                    int bin;
+                    if (ugx >= 0) {
+                        long long test_y = (long long)ugy * 10000;
+                        if (test_y < (long long)ugx * TAN_B[0]) bin = 0;
+                        else if (test_y < (long long)ugx * TAN_B[1]) bin = 1;
+                        else if (test_y < (long long)ugx * TAN_B[2]) bin = 2;
+                        else if (test_y < (long long)ugx * TAN_B[3]) bin = 3;
+                        else bin = 4;
+                    } else {
+                        int agx = -ugx;
+                        long long test_y = (long long)ugy * 10000;
+                        if (test_y < (long long)agx * TAN_B[0]) bin = 0;
+                        else if (test_y < (long long)agx * TAN_B[1]) bin = 7;
+                        else if (test_y < (long long)agx * TAN_B[2]) bin = 6;
+                        else if (test_y < (long long)agx * TAN_B[3]) bin = 5;
+                        else bin = 4;
+                    }
+                    qr[c+i] = (uchar)bin;
+                }
+            }
+#endif
+            // Scalar tail
+            for (; c < src.cols - 1; ++c) {
                 int gx = dx[c], gy = dy[c];
-                float mag_sq = (float)(gx * gx + gy * gy);
-                mag_r[c] = mag_sq;
+                int mag_sq_i = gx*gx + gy*gy;
+                mag_r[c] = (float)mag_sq_i;
 
-                if (mag_sq <= threshold_sq) continue;
+                int abs_gx = abs(gx), abs_gy = abs(gy);
+                if (abs_gx + abs_gy <= threshold_i) continue;
 
-                // Reduce to undirected [0,180): flip if gy < 0
                 int ugx = gx, ugy = gy;
                 if (ugy < 0) { ugx = -ugx; ugy = -ugy; }
                 if (ugy == 0 && ugx < 0) ugx = -ugx;
 
-                // Now ugy >= 0, angle in [0, 180)
                 int bin;
                 if (ugx >= 0) {
-                    // angle in [0, 90]: gx >= 0, gy >= 0
                     long long test_y = (long long)ugy * 10000;
                     if (test_y < (long long)ugx * TAN_B[0]) bin = 0;
                     else if (test_y < (long long)ugx * TAN_B[1]) bin = 1;
@@ -355,44 +422,49 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
                     else if (test_y < (long long)ugx * TAN_B[3]) bin = 3;
                     else bin = 4;
                 } else {
-                    // angle in (90, 180): gx < 0, gy >= 0
                     int agx = -ugx;
                     long long test_y = (long long)ugy * 10000;
-                    if (test_y < (long long)agx * TAN_B[0]) bin = 0;  // near 180
+                    if (test_y < (long long)agx * TAN_B[0]) bin = 0;
                     else if (test_y < (long long)agx * TAN_B[1]) bin = 7;
                     else if (test_y < (long long)agx * TAN_B[2]) bin = 6;
                     else if (test_y < (long long)agx * TAN_B[3]) bin = 5;
                     else bin = 4;
                 }
-
                 qr[c] = (uchar)bin;
             }
         }
 
-        // Step 2: 3x3 neighborhood voting (same as hysteresisGradient)
+        // Step 2: Fast 3x3 neighborhood voting.
+        // Instead of full 8-bin histogram, count how many of the 8 neighbors
+        // share the center pixel's bin. Cheaper: 8 equality checks vs 9 loads +
+        // histogram + find-max. Semantically equivalent when center bin wins.
         angle = Mat::zeros(src.size(), CV_8U);
-        static const int NEIGHBOR_THRESHOLD = 5;
+        static const int NEIGHBOR_THRESHOLD = 5; // 5 of 9 (center + 4 neighbors)
+        int q_step = static_cast<int>(quantized_unfiltered.step1());
+
         for (int r = 1; r < src.rows - 1; ++r) {
             float *mag_r = magnitude.ptr<float>(r);
+            const uchar *q_prev = quantized_unfiltered.ptr<uchar>(r-1);
+            const uchar *q_curr = quantized_unfiltered.ptr<uchar>(r);
+            const uchar *q_next = quantized_unfiltered.ptr<uchar>(r+1);
+            uchar *angle_r = angle.ptr<uchar>(r);
+
             for (int c = 1; c < src.cols - 1; ++c) {
                 if (mag_r[c] > threshold_sq) {
-                    int histogram[8] = {0,0,0,0,0,0,0,0};
-                    uchar *p0 = quantized_unfiltered.ptr<uchar>(r-1) + c - 1;
-                    uchar *p1 = quantized_unfiltered.ptr<uchar>(r)   + c - 1;
-                    uchar *p2 = quantized_unfiltered.ptr<uchar>(r+1) + c - 1;
-                    histogram[p0[0]]++; histogram[p0[1]]++; histogram[p0[2]]++;
-                    histogram[p1[0]]++; histogram[p1[1]]++; histogram[p1[2]]++;
-                    histogram[p2[0]]++; histogram[p2[1]]++; histogram[p2[2]]++;
+                    uchar center_bin = q_curr[c];
+                    // Count center + 8 neighbors matching center_bin
+                    int votes = 1; // center always matches itself
+                    votes += (q_prev[c-1] == center_bin);
+                    votes += (q_prev[c]   == center_bin);
+                    votes += (q_prev[c+1] == center_bin);
+                    votes += (q_curr[c-1] == center_bin);
+                    votes += (q_curr[c+1] == center_bin);
+                    votes += (q_next[c-1] == center_bin);
+                    votes += (q_next[c]   == center_bin);
+                    votes += (q_next[c+1] == center_bin);
 
-                    int max_votes = 0, best_bin = 0;
-                    for (int i = 0; i < 8; ++i) {
-                        if (histogram[i] > max_votes) {
-                            max_votes = histogram[i];
-                            best_bin = i;
-                        }
-                    }
-                    if (max_votes >= NEIGHBOR_THRESHOLD)
-                        angle.at<uchar>(r, c) = (uchar)(1 << best_bin);
+                    if (votes >= NEIGHBOR_THRESHOLD)
+                        angle_r[c] = (uchar)(1 << center_bin);
                 }
             }
         }

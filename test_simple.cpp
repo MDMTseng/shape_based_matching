@@ -110,28 +110,58 @@ int main() {
     auto sample_pts_8 = roi_refine::selectCriticalPoints(
         positions, corner_scores, 8, loaded.templ_width, loaded.templ_height);
 
+    // First: check PCA results for sample points
+    printf("  Sample point PCA analysis:\n");
+    for (size_t i = 0; i < sample_pts_8.size(); ++i) {
+        auto& sp = sample_pts_8[i];
+        int tx = (int)(sp.pos.x + loaded.templ_width/2.0f + 0.5f);
+        int ty = (int)(sp.pos.y + loaded.templ_height/2.0f + 0.5f);
+        int h = 15;
+        if (tx-h<0||tx+h>=loaded.templ_width||ty-h<0||ty+h>=loaded.templ_height) {
+            h = std::min({tx,ty,loaded.templ_width-1-tx,loaded.templ_height-1-ty});
+        }
+        if (h < 5) continue;
+        Mat roi = loaded.templ_image(Rect(tx-h,ty-h,2*h,2*h));
+        // Quick PCA
+        Mat dx, dy, mag;
+        Sobel(roi, dx, CV_32F, 1, 0, 3);
+        Sobel(roi, dy, CV_32F, 0, 1, 3);
+        magnitude(dx, dy, mag);
+        float thr = 0.3f * *std::max_element(mag.begin<float>(), mag.end<float>());
+        float cxx=0,cyy=0,cxy=0; int n=0;
+        for(int r=0;r<roi.rows;r++) for(int c=0;c<roi.cols;c++) {
+            if(mag.at<float>(r,c)>thr) {
+                float ddx=c-h, ddy=r-h; cxx+=ddx*ddx; cyy+=ddy*ddy; cxy+=ddx*ddy; n++;
+            }
+        }
+        if(n>0){cxx/=n;cyy/=n;cxy/=n;}
+        float trace=cxx+cyy;
+        float disc=std::sqrt(std::max(0.f,(cxx-cyy)*(cxx-cyy)/4+cxy*cxy));
+        float lam1=trace/2+disc, lam2=trace/2-disc;
+        float ratio = (lam2>1e-6f) ? lam1/lam2 : 999;
+        printf("    [%d] pos=(%+5.1f,%+5.1f) eigenvals=(%.1f,%.1f) ratio=%.1f %s\n",
+               (int)i, sp.pos.x, sp.pos.y, lam1, lam2, ratio,
+               ratio < 1.5f ? "CORNER" : "EDGE");
+    }
+    printf("\n");
+
     printf("%-22s  %-22s  %-22s  %-22s\n", "Init perturbation", "ICP (dense)", "ROI 15pt×5", "ROI 8pt×3");
     printf("%-22s  %-22s  %-22s  %-22s\n", "-----------------", "----------", "----------", "---------");
 
     struct PoseError { float dx, dy, da; double noise; int blur; const char* name; };
     PoseError errors[] = {
-        // Position/angle perturbation (clean)
         { 0,  0,  0, 0, 0, "perfect"},
         { 5,  3,  5, 0, 0, "+5px +5deg"},
         {10, 10, 10, 0, 0, "+10px +10deg"},
-        {20, 15, 20, 0, 0, "+20px +20deg"},
-        { 0,  0, 30, 0, 0, "+30deg"},
-        // Noise (no pose error)
-        { 0,  0,  0, 10, 0, "noise s=10"},
+        // Edge-slide tests: slide along specific directions
+        {10,  0,  0, 0, 0, "slide X +10px"},
+        { 0, 10,  0, 0, 0, "slide Y +10px"},
+        {20,  0,  0, 0, 0, "slide X +20px"},
+        { 0, 20,  0, 0, 0, "slide Y +20px"},
+        // Noise/blur
         { 0,  0,  0, 30, 0, "noise s=30"},
-        { 0,  0,  0, 50, 0, "noise s=50"},
-        // Blur (no pose error)
-        { 0,  0,  0,  0, 5, "blur k=5"},
         { 0,  0,  0,  0,11, "blur k=11"},
-        { 0,  0,  0,  0,21, "blur k=21"},
-        // Combined
-        { 5,  3,  5, 20, 3, "+5px+5deg+noise+blur"},
-        {10, 10, 10, 30, 5, "+10px+10deg+noise+blur"},
+        { 5,  3,  5, 20, 3, "+5px+5deg+n+b"},
     };
 
     for (auto& pe : errors) {

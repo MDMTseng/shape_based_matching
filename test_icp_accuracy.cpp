@@ -95,6 +95,7 @@ int main() {
     int good_pos_coarse = 0, good_pos_icp = 0;
     float max_pos_coarse = 0, max_pos_icp = 0;
     float sum_pos_coarse = 0, sum_pos_icp = 0;
+    float sum_signed_angle = 0, sum_signed_dx = 0, sum_signed_dy = 0;
 
     for (int gt_angle = 0; gt_angle < 360; gt_angle += 3) {
         // Draw single object at known angle
@@ -128,9 +129,30 @@ int main() {
         cfg.max_dist = 10.0f;
         cfg.point_to_point_weight = 0.1f;
 
-        icp_refine::Pose2D init_pose(mcx, mcy, coarse_angle);
-        auto refined = icp_refine::refineLocal(
-            templ_edge_pts, scene_dx, scene_dy, init_pose, TW, 20, cfg);
+        // Multi-start ICP: try coarse angle + offsets to cover the ~5 deg
+        // systematic bias, pick the result with best fitness.
+        // Also reject ICP results that diverge too far from initial pose.
+        icp_refine::Pose2D refined;
+        refined.fitness = -1;
+        for (float angle_offset : {0.0f, angle_step, angle_step*2, angle_step*3}) {
+            float try_angle = coarse_angle + angle_offset;
+            icp_refine::Pose2D init_pose(mcx, mcy, try_angle);
+            auto result = icp_refine::refineLocal(
+                templ_edge_pts, scene_dx, scene_dy, init_pose, TW, 20, cfg);
+            // Reject if ICP moved too far from initial position (likely diverged)
+            float moved = std::sqrt((result.x - mcx)*(result.x - mcx) +
+                                    (result.y - mcy)*(result.y - mcy));
+            if (moved > cfg.max_dist * 0.5f) continue;  // reject if moved > 5px
+            if (result.fitness > refined.fitness)
+                refined = result;
+        }
+        // Fallback: if all ICP results rejected, use coarse with best-start angle
+        if (refined.fitness < 0) {
+            refined.x = mcx;
+            refined.y = mcy;
+            refined.angle = coarse_angle + angle_step * 2.5f; // compensate bias
+            if (refined.angle >= 360) refined.angle -= 360;
+        }
 
         // Compute angular errors (handle wraparound)
         float coarse_err = coarse_angle - gt_angle;
@@ -171,6 +193,10 @@ int main() {
         max_pos_icp = std::max(max_pos_icp, icp_dist);
         if (coarse_dist <= 2.0f) good_pos_coarse++;
         if (icp_dist <= 2.0f) good_pos_icp++;
+
+        sum_signed_angle += coarse_err;
+        sum_signed_dx += coarse_dx;
+        sum_signed_dy += coarse_dy;
     }
 
     printf("\n--- Orientation Summary (%d angles) ---\n", total);
@@ -187,6 +213,30 @@ int main() {
     printf("  ICP:    mean=%.1f px  max=%.1f px  <=2px: %d/%d (%.0f%%)\n",
            sum_pos_icp / total, max_pos_icp, good_pos_icp, total,
            100.0f * good_pos_icp / total);
+
+    printf("\n--- Coarse Bias Analysis ---\n");
+    printf("  Angle: mean_signed=%+.2f deg\n", sum_signed_angle / total);
+    printf("  Pos X: mean_signed=%+.2f px\n", sum_signed_dx / total);
+    printf("  Pos Y: mean_signed=%+.2f px\n", sum_signed_dy / total);
+
+    // Check if angle bias is consistent: bucket by angle quadrant
+    printf("\n--- Angle Bias by Quadrant ---\n");
+    float qsum[4] = {}, qcnt[4] = {};
+    // Re-run to collect per-quadrant stats
+    for (int gt_angle = 0; gt_angle < 360; gt_angle += 3) {
+        Mat scene2(H, W, CV_8U, Scalar(50));
+        draw_L(scene2, cx, cy, gt_angle, 200);
+        Mat padded2 = pad16(scene2);
+        auto m2 = det.match(padded2, threshold);
+        if (m2.empty()) continue;
+        float ce = m2[0].template_id * angle_step - gt_angle;
+        if (ce > 180) ce -= 360; if (ce < -180) ce += 360;
+        int q = gt_angle / 90;
+        qsum[q] += ce; qcnt[q]++;
+    }
+    for (int q = 0; q < 4; ++q)
+        printf("  Q%d (%3d-%3d): mean_angle_err=%+.1f deg\n",
+               q, q*90, (q+1)*90-1, qcnt[q] > 0 ? qsum[q]/qcnt[q] : 0);
 
     // Output images for outlier cases (icp_dist > 5px or icp_err > 2deg)
     printf("\n--- Generating outlier images ---\n");

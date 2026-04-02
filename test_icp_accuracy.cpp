@@ -366,6 +366,7 @@ int main() {
     float max_pos_coarse = 0, max_pos_icp = 0;
     float sum_pos_coarse = 0, sum_pos_icp = 0;
     float sum_signed_angle = 0, sum_signed_dx = 0, sum_signed_dy = 0;
+    float sum_icp_signed_angle = 0, sum_icp_signed_dx = 0, sum_icp_signed_dy = 0;
     int miss_count = 0;
 
     for (int gt_angle = 0; gt_angle < 360; gt_angle += 3) {
@@ -446,6 +447,9 @@ int main() {
         if (icp_dist <= 2.0f) good_pos_icp++;
 
         sum_signed_angle += coarse_err;
+        sum_icp_signed_angle += icp_err;
+        sum_icp_signed_dx += icp_dx;
+        sum_icp_signed_dy += icp_dy;
         sum_signed_dx += coarse_dx;
         sum_signed_dy += coarse_dy;
     }
@@ -464,6 +468,10 @@ int main() {
            100.0f*good_pos_coarse/total,
            sum_pos_icp/total, max_pos_icp, good_pos_icp, total,
            100.0f*good_pos_icp/total);
+    printf("  Signed bias:  coarse ang=%+.2f pos=(%+.2f,%+.2f)  |  "
+           "icp ang=%+.2f pos=(%+.2f,%+.2f)\n",
+           sum_signed_angle/total, sum_signed_dx/total, sum_signed_dy/total,
+           sum_icp_signed_angle/total, sum_icp_signed_dx/total, sum_icp_signed_dy/total);
 
     } // end conditions loop
 

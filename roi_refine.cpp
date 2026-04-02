@@ -227,8 +227,13 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
                     const cv::Vec3f& initial_pose,
                     const ROIConfig& config) {
 
-    float cx = initial_pose[0], cy = initial_pose[1];
-    float angle_deg = initial_pose[2];
+    cv::Vec3f pose = initial_pose;
+
+    // Iterate: match → solve → update pose → re-match
+    for (int iteration = 0; iteration < 5; ++iteration) {
+
+    float cx = pose[0], cy = pose[1];
+    float angle_deg = pose[2];
     float angle_rad = angle_deg * (float)CV_PI / 180.0f;
     float cs = std::cos(angle_rad), sn = std::sin(angle_rad);
 
@@ -305,6 +310,41 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
         }
     }
 
+    // Debug: print per-point matching accuracy
+    fprintf(stderr, "[ROI] %d constraints from %d samples (angle=%.1f)\n",
+            (int)constraints.size(), (int)sample_points.size(), angle_deg);
+    for (size_t i = 0; i < constraints.size(); ++i) {
+        auto& c = constraints[i];
+        float dx = c.dst.x - c.src.x, dy = c.dst.y - c.src.y;
+        float dist = std::sqrt(dx*dx + dy*dy);
+        fprintf(stderr, "  [%2d] src=(%.1f,%.1f) dst=(%.1f,%.1f) d=%.2f n=(%.2f,%.2f) w=%.1f\n",
+                (int)i, c.src.x, c.src.y, c.dst.x, c.dst.y, dist,
+                c.normal.x, c.normal.y, c.weight);
+    }
+
+    // Reject outliers: remove constraints with distance > 2× median
+    {
+        std::vector<float> dists;
+        for (auto& c : constraints) {
+            float dx = c.dst.x - c.src.x, dy = c.dst.y - c.src.y;
+            dists.push_back(std::sqrt(dx*dx + dy*dy));
+        }
+        std::sort(dists.begin(), dists.end());
+        float median = dists[dists.size() / 2];
+        float thresh = std::max(2.0f, median * 2.0f);
+
+        std::vector<Constraint> filtered;
+        for (size_t i = 0; i < constraints.size(); ++i) {
+            float dx = constraints[i].dst.x - constraints[i].src.x;
+            float dy = constraints[i].dst.y - constraints[i].src.y;
+            float d = std::sqrt(dx*dx + dy*dy);
+            if (d <= thresh) filtered.push_back(constraints[i]);
+        }
+        fprintf(stderr, "  outlier rejection: %d -> %d (thresh=%.1f)\n",
+                (int)constraints.size(), (int)filtered.size(), thresh);
+        constraints = filtered;
+    }
+
     if (constraints.empty())
         return initial_pose;
 
@@ -324,7 +364,13 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
     while (refined_angle < 0) refined_angle += 360;
     while (refined_angle >= 360) refined_angle -= 360;
 
-    return cv::Vec3f(cx + d_tx, cy + d_ty, refined_angle);
+    pose = cv::Vec3f(cx + d_tx, cy + d_ty, refined_angle);
+    fprintf(stderr, "  iter %d: angle=%.1f pos=(%.1f,%.1f) d_theta=%.3f d_t=(%.2f,%.2f)\n",
+            iteration, pose[2], pose[0], pose[1], d_theta*180/(float)CV_PI, d_tx, d_ty);
+
+    } // end iteration loop
+
+    return pose;
 }
 
 } // namespace roi_refine

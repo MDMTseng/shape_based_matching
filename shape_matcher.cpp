@@ -402,16 +402,21 @@ FeatureSet::QualityReport FeatureSet::evaluateQuality() const {
     }
 
     // === BALANCE (0-100) ===
-    // Median of all pairwise sin(angle): captures overall directional spread.
-    // If most pairs are perpendicular → high median → balanced.
-    // If most pairs are parallel → low median → imbalanced.
-    float median_sin = all_cross_sins.empty() ? 0 :
-        all_cross_sins[all_cross_sins.size() / 2];
-    r.balance = (int)(100.0f * std::min(1.0f, median_sin / 0.7f));
+    // sin(angle) of the best pair tells us the max angular diversity.
+    // But we also need to check that the weaker direction has enough support.
+    // Use: best_sin × (fraction of pairs above sin > 0.3) to penalize when
+    // only a few pairs are perpendicular (most are parallel).
+    int pairs_above_30 = 0;
+    for (float s : all_cross_sins)
+        if (s > 0.3f) pairs_above_30++;
+    float frac_diverse = all_cross_sins.empty() ? 0 :
+        (float)pairs_above_30 / all_cross_sins.size();
+    // balance = sin × sqrt(fraction_diverse) — penalize when few pairs are diverse
+    r.balance = (int)(100.0f * r.best_cross_sin * std::sqrt(frac_diverse));
+    r.balance = std::max(0, std::min(100, r.balance));
 
     // === STRENGTH (0-100) ===
     // Best cross product magnitude: |n1|×|n2|×sin(angle).
-    // Captures the strongest perpendicular pair's edge quality.
     r.strength = (int)(100.0f * std::min(1.0f, r.best_cross / 400000.0f));
 
     // === COMBINED ===

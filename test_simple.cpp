@@ -49,6 +49,27 @@ int main() {
     // Long sides dominate, only 1 short end provides perpendicular constraint
     rectangle(templ, Point(5, 35), Point(75, 45), Scalar(200), -1);
     printf("Template: long pole (70x10)\n");
+#elif TEMPLATE_SHAPE == 4
+    // Flat triangle (10-10-160 deg) — nearly degenerate, almost a straight line
+    {
+        Point pts[3] = {Point(5, 55), Point(75, 55), Point(40, 35)};  // ~10 deg apex, taller
+        fillConvexPoly(templ, pts, 3, Scalar(200));
+    }
+    printf("Template: flat triangle (10-10-160)\n");
+#elif TEMPLATE_SHAPE == 5
+    // Sharper triangle (30-30-120) for comparison
+    {
+        Point pts[3] = {Point(10, 55), Point(70, 55), Point(40, 25)};
+        fillConvexPoly(templ, pts, 3, Scalar(200));
+    }
+    printf("Template: triangle (30-30-120)\n");
+#elif TEMPLATE_SHAPE == 6
+    // Right triangle (90-45-45) — good constraint
+    {
+        Point pts[3] = {Point(15, 60), Point(65, 60), Point(15, 15)};
+        fillConvexPoly(templ, pts, 3, Scalar(200));
+    }
+    printf("Template: right triangle (90-45-45)\n");
 #endif
 
     // 2. Extract features + save

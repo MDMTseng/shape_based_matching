@@ -85,6 +85,112 @@ int main() {
 
     // Test: single object at center, sweep angle 0-360 in 1-degree steps
     int cx = W/2, cy = H/2;
+    // AUTO-CALIBRATION TEST
+    printf("\n=== Auto-calibrate angle bias ===\n");
+    float bias = det.calibrateAngleBias(templ, angle_step, "L", threshold);
+    printf("  Measured bias: %+.1f deg\n", bias);
+    printf("  Correction:    %+.1f deg (add to coarse angle)\n", -bias);
+
+    // Verify: sweep with compensation
+    {
+        float sum_raw = 0, sum_comp = 0, sum_interp = 0;
+        float max_raw = 0, max_comp = 0, max_interp = 0;
+        int n = 0, good_raw = 0, good_comp = 0, good_interp = 0;
+        int ntmpl = det.numTemplates("L");
+
+        for (int gt = 0; gt < 360; gt += 5) {
+            Mat scene(H, W, CV_8U, Scalar(50));
+            draw_L(scene, cx, cy, gt, 200);
+            auto m = det.match(pad16(scene), threshold);
+            if (m.empty()) continue;
+
+            int best_tid = m[0].template_id;
+            float best_score = m[0].similarity;
+            float raw_angle = best_tid * angle_step;
+
+            // Constant bias compensation
+            float comp_angle = raw_angle - bias;
+            if (comp_angle < 0) comp_angle += 360;
+            if (comp_angle >= 360) comp_angle -= 360;
+
+            // Neighbor interpolation: find scores of tid+1 and tid-1
+            // in the match results at similar position
+            int tid_prev = (best_tid - 1 + ntmpl) % ntmpl;
+            int tid_next = (best_tid + 1) % ntmpl;
+            float s_prev = best_score * 0.85f;  // default fallback
+            float s_next = best_score * 0.85f;
+
+            for (auto& mi : m) {
+                if (abs(mi.x - m[0].x) > 16 || abs(mi.y - m[0].y) > 16) continue;
+                if (mi.template_id == tid_prev && mi.similarity > s_prev)
+                    s_prev = mi.similarity;
+                if (mi.template_id == tid_next && mi.similarity > s_next)
+                    s_next = mi.similarity;
+            }
+
+            // Parabolic interpolation: peak at offset = -(s_next - s_prev) / (2*(s_prev + s_next - 2*best_score))
+            float a = (s_prev + s_next) / 2.0f - best_score;
+            float b = (s_next - s_prev) / 2.0f;
+            float offset = 0;
+            if (a < -0.01f) {
+                offset = -b / (2.0f * a);
+                offset = std::max(-1.0f, std::min(1.0f, offset));
+            }
+            float interp_angle = (best_tid + offset) * angle_step;
+            if (interp_angle < 0) interp_angle += 360;
+            if (interp_angle >= 360) interp_angle -= 360;
+
+            // Compute errors
+            auto angle_err = [](float detected, float gt) {
+                float e = detected - gt;
+                if (e > 180) e -= 360; if (e < -180) e += 360;
+                return e;
+            };
+
+            float re = angle_err(raw_angle, (float)gt);
+            float ce = angle_err(comp_angle, (float)gt);
+            float ie = angle_err(interp_angle, (float)gt);
+
+            sum_raw += std::abs(re); sum_comp += std::abs(ce); sum_interp += std::abs(ie);
+            max_raw = std::max(max_raw, std::abs(re));
+            max_comp = std::max(max_comp, std::abs(ce));
+            max_interp = std::max(max_interp, std::abs(ie));
+            if (std::abs(re) <= 2.0f) good_raw++;
+            if (std::abs(ce) <= 2.0f) good_comp++;
+            if (std::abs(ie) <= 2.0f) good_interp++;
+            n++;
+        }
+        printf("  Raw (no fix):         mean=%.1f max=%.1f <=2deg: %d/%d (%.0f%%)\n",
+               sum_raw/n, max_raw, good_raw, n, 100.0f*good_raw/n);
+        printf("  Constant bias fix:    mean=%.1f max=%.1f <=2deg: %d/%d (%.0f%%)\n",
+               sum_comp/n, max_comp, good_comp, n, 100.0f*good_comp/n);
+        printf("  Parabolic interp:     mean=%.1f max=%.1f <=2deg: %d/%d (%.0f%%)\n",
+               sum_interp/n, max_interp, good_interp, n, 100.0f*good_interp/n);
+
+        // Bias + snap to nearest half-step (removes quantization noise)
+        float sum_snap = 0, max_snap = 0;
+        int good_snap = 0;
+        for (int gt = 0; gt < 360; gt += 5) {
+            Mat scene(H, W, CV_8U, Scalar(50));
+            draw_L(scene, cx, cy, gt, 200);
+            auto m = det.match(pad16(scene), threshold);
+            if (m.empty()) continue;
+            // Apply bias, then round to nearest step
+            float corrected = m[0].template_id * angle_step - bias;
+            // Round to nearest angle_step
+            corrected = std::round(corrected / angle_step) * angle_step;
+            if (corrected < 0) corrected += 360;
+            if (corrected >= 360) corrected -= 360;
+            float se = corrected - gt;
+            if (se > 180) se -= 360; if (se < -180) se += 360;
+            sum_snap += std::abs(se);
+            max_snap = std::max(max_snap, std::abs(se));
+            if (std::abs(se) <= 2.0f) good_snap++;
+        }
+        printf("  Bias + round to step: mean=%.1f max=%.1f <=2deg: %d/%d (%.0f%%)\n",
+               sum_snap/n, max_snap, good_snap, n, 100.0f*good_snap/n);
+    }
+
     // ROOT CAUSE ANALYSIS
 
     // Test: is bias from draw_L vs warpAffine?

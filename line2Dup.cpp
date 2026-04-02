@@ -1922,6 +1922,52 @@ void Detector::refineOrientations(std::vector<Match> &matches, float angle_step,
     }
 }
 
+float Detector::calibrateAngleBias(const cv::Mat& templ_gray, float angle_step,
+                                   const std::string& class_id,
+                                   float threshold) const {
+    // Render the template at several known angles, match, measure bias.
+    // Uses a small scene (just big enough) for speed.
+    int TW = templ_gray.cols;
+    int scene_sz = TW * 4;
+    int cx = scene_sz / 2, cy = scene_sz / 2;
+    int pw = (scene_sz + 15) & ~15;
+    int ph = (scene_sz + 15) & ~15;
+
+    float sum_err = 0;
+    int count = 0;
+
+    // Test 12 evenly-spaced angles
+    for (int gt = 0; gt < 360; gt += 30) {
+        // Create scene by rotating and placing the template
+        cv::Mat scene(scene_sz, scene_sz, CV_8U, cv::Scalar(0));
+        cv::Mat M = cv::getRotationMatrix2D(
+            cv::Point2f(TW / 2.0f, TW / 2.0f), -(double)gt, 1.0);
+        M.at<double>(0, 2) += cx - TW / 2;
+        M.at<double>(1, 2) += cy - TW / 2;
+        cv::warpAffine(templ_gray, scene, M, scene.size(),
+                        cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0));
+
+        cv::Mat padded;
+        if (pw != scene_sz || ph != scene_sz)
+            cv::copyMakeBorder(scene, padded, 0, ph - scene_sz, 0, pw - scene_sz,
+                               cv::BORDER_CONSTANT, cv::Scalar(0));
+        else
+            padded = scene;
+
+        auto matches = match(padded, threshold, {class_id});
+        if (matches.empty()) continue;
+
+        float detected = matches[0].template_id * angle_step;
+        float err = detected - gt;
+        if (err > 180) err -= 360;
+        if (err < -180) err += 360;
+        sum_err += err;
+        count++;
+    }
+
+    return (count > 0) ? sum_err / count : 0.0f;
+}
+
 void enableProfiling(bool enable) { g_profile.enabled = enable; }
 void resetProfiling() { g_profile.reset(); }
 void printProfiling() { g_profile.print(); }

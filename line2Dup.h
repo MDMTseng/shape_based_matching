@@ -156,6 +156,19 @@ public:
                                                      const std::vector<std::string> &class_ids = std::vector<std::string>(),
                                                      const cv::Mat masks = cv::Mat()) const;
 
+    /// Measure and return the systematic angle bias (degrees).
+    /// Renders the template at a known angle, matches it, and returns
+    /// the mean signed error. Call once after training, store the result,
+    /// and add it to each match's angle to compensate.
+    /// @param templ_gray   The original (unrotated) template image.
+    /// @param angle_step   Degrees between consecutive template_ids.
+    /// @param class_id     Template class.
+    /// @param threshold    Match threshold.
+    /// @return Bias in degrees (typically negative, add to coarse angle to correct).
+    float calibrateAngleBias(const cv::Mat& templ_gray, float angle_step,
+                             const std::string& class_id = "default",
+                             float threshold = 50.0f) const;
+
     /// Refine orientation of matches by parabolic interpolation between
     /// neighboring template angles. Call after match() and spatial NMS.
     /// @param angle_step  Degrees between consecutive template_ids.

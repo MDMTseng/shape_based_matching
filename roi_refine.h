@@ -58,4 +58,28 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
                     const cv::Vec3f& initial_pose,
                     const ROIConfig& config = ROIConfig());
 
+/// Constraint quality analysis for a set of sample points.
+struct ConstraintQuality {
+    float condition_number;     ///< Ratio of max/min singular value of the constraint matrix.
+                                ///< < 10: excellent, 10-50: acceptable, > 50: poor, inf: degenerate.
+    float angle_coverage;       ///< Range of PCA normal directions in degrees (0-180).
+                                ///< > 60: good, 30-60: marginal, < 30: poor (near-parallel edges).
+    int num_edge;               ///< Number of edge constraints (1D).
+    int num_corner;             ///< Number of corner constraints (2D).
+    int num_directions;         ///< Number of distinct edge directions (binned to 15 deg).
+    bool is_valid;              ///< True if constraints can determine (x, y, theta).
+    std::string diagnosis;      ///< Human-readable diagnosis.
+};
+
+/// Validate whether a set of sample points provides sufficient
+/// geometric constraint for pose refinement.
+/// @param sample_points  Points to validate.
+/// @param templ_img      Template image (for PCA computation).
+/// @param config         ROI config (for roi_half, corner threshold).
+/// @return Quality analysis with diagnosis.
+ConstraintQuality validateConstraints(
+    const std::vector<SamplePoint>& sample_points,
+    const cv::Mat& templ_img,
+    const ROIConfig& config = ROIConfig());
+
 } // namespace roi_refine

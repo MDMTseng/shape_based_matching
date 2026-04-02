@@ -419,4 +419,167 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
     return pose;
 }
 
+// -----------------------------------------------------------------------
+// Constraint quality validation
+// -----------------------------------------------------------------------
+ConstraintQuality validateConstraints(
+    const std::vector<SamplePoint>& sample_points,
+    const cv::Mat& templ_img,
+    const ROIConfig& config) {
+
+    ConstraintQuality q;
+    q.num_edge = 0;
+    q.num_corner = 0;
+    q.num_directions = 0;
+    q.condition_number = 999;
+    q.angle_coverage = 0;
+    q.is_valid = false;
+
+    if (sample_points.empty()) {
+        q.diagnosis = "No sample points";
+        return q;
+    }
+
+    float tcx = templ_img.cols / 2.0f, tcy = templ_img.rows / 2.0f;
+
+    // Collect PCA normals and classify each point
+    std::vector<float> normal_angles;  // in degrees [0, 180)
+
+    // Build constraint matrix J (N×3) for condition number analysis
+    // Each edge gives 1 row, each corner gives 2 rows
+    std::vector<float> J_rows;  // flat: each row = [j0, j1, j2]
+
+    for (auto& sp : sample_points) {
+        int tx = (int)(sp.pos.x + tcx + 0.5f);
+        int ty = (int)(sp.pos.y + tcy + 0.5f);
+        int h = config.roi_half;
+        if (tx-h<0||tx+h>=templ_img.cols||ty-h<0||ty+h>=templ_img.rows) {
+            h = std::min({tx,ty,templ_img.cols-1-tx,templ_img.rows-1-ty});
+            if (h < 5) continue;
+        }
+
+        cv::Mat roi = templ_img(cv::Rect(tx-h, ty-h, 2*h, 2*h));
+
+        // PCA
+        float eigvals[2];
+        cv::Point2f eigvecs[2];
+        // inline PCA (same as roiPCA)
+        cv::Mat dx, dy, mag;
+        cv::Sobel(roi, dx, CV_32F, 1, 0, 3);
+        cv::Sobel(roi, dy, CV_32F, 0, 1, 3);
+        cv::magnitude(dx, dy, mag);
+        float thr = 0.3f * *std::max_element(mag.begin<float>(), mag.end<float>());
+        float cxx=0,cyy=0,cxy=0; int n=0;
+        for(int r=0;r<roi.rows;r++) for(int c=0;c<roi.cols;c++)
+            if(mag.at<float>(r,c)>thr) {
+                float ddx=c-h,ddy=r-h; cxx+=ddx*ddx;cyy+=ddy*ddy;cxy+=ddx*ddy;n++;
+            }
+        if(n>0){cxx/=n;cyy/=n;cxy/=n;}
+        float trace=cxx+cyy;
+        float disc=std::sqrt(std::max(0.f,(cxx-cyy)*(cxx-cyy)/4+cxy*cxy));
+        eigvals[0]=trace/2+disc; eigvals[1]=trace/2-disc;
+        if(std::abs(cxy)>1e-6f){
+            eigvecs[0]=cv::Point2f(eigvals[0]-cyy,cxy);
+            eigvecs[1]=cv::Point2f(eigvals[1]-cyy,cxy);
+        } else {
+            eigvecs[0]=(cxx>=cyy)?cv::Point2f(1,0):cv::Point2f(0,1);
+            eigvecs[1]=(cxx>=cyy)?cv::Point2f(0,1):cv::Point2f(1,0);
+        }
+        for(int i=0;i<2;i++){
+            float len=std::sqrt(eigvecs[i].x*eigvecs[i].x+eigvecs[i].y*eigvecs[i].y);
+            if(len>1e-6f) eigvecs[i]*=(1.0f/len);
+        }
+
+        float ratio = (eigvals[1]>1e-6f) ? eigvals[0]/eigvals[1] : 999;
+        bool is_corner = (ratio < config.corner_eigen_ratio);
+
+        // Normal direction (smallest eigenvalue eigenvector)
+        cv::Point2f normal = eigvecs[1];
+        float angle = std::atan2(normal.y, normal.x) * 180.0f / (float)CV_PI;
+        if (angle < 0) angle += 180;  // map to [0, 180)
+        normal_angles.push_back(angle);
+
+        if (is_corner) {
+            q.num_corner++;
+        } else {
+            q.num_edge++;
+        }
+
+        // Build constraint row: J = [-sy*nx+sx*ny, nx, ny]
+        float sx = sp.pos.x, sy = sp.pos.y;
+        float nx = normal.x, ny = normal.y;
+        float j0 = -sy*nx + sx*ny, j1 = nx, j2 = ny;
+        J_rows.push_back(j0); J_rows.push_back(j1); J_rows.push_back(j2);
+
+        if (is_corner) {
+            // Add tangent constraint
+            cv::Point2f tangent = eigvecs[0];
+            float tnx = tangent.x, tny = tangent.y;
+            float tj0 = -sy*tnx + sx*tny;
+            J_rows.push_back(tj0); J_rows.push_back(tnx); J_rows.push_back(tny);
+
+            float tang_angle = std::atan2(tny, tnx) * 180.0f / (float)CV_PI;
+            if (tang_angle < 0) tang_angle += 180;
+            normal_angles.push_back(tang_angle);
+        }
+    }
+
+    int nrows = (int)J_rows.size() / 3;
+    if (nrows < 3) {
+        q.diagnosis = "Too few constraints (" + std::to_string(nrows) + " < 3)";
+        return q;
+    }
+
+    // Condition number via SVD of the constraint matrix
+    cv::Mat J(nrows, 3, CV_32F, J_rows.data());
+    cv::Mat w;
+    cv::SVD::compute(J, w);
+    float sv_max = w.at<float>(0);
+    float sv_min = w.at<float>(std::min(2, (int)w.rows-1));
+    q.condition_number = (sv_min > 1e-8f) ? sv_max / sv_min : 999;
+
+    // Angle coverage: range of normal directions
+    if (!normal_angles.empty()) {
+        std::sort(normal_angles.begin(), normal_angles.end());
+        // Find max gap between consecutive angles (circular)
+        float max_gap = 0;
+        for (size_t i = 1; i < normal_angles.size(); ++i)
+            max_gap = std::max(max_gap, normal_angles[i] - normal_angles[i-1]);
+        max_gap = std::max(max_gap, 180.0f - normal_angles.back() + normal_angles[0]);
+        q.angle_coverage = 180.0f - max_gap;
+    }
+
+    // Count distinct directions (binned to 15 deg)
+    bool dir_bins[12] = {};  // 0-15, 15-30, ..., 165-180
+    for (float a : normal_angles) {
+        int bin = (int)(a / 15.0f);
+        if (bin >= 12) bin = 11;
+        dir_bins[bin] = true;
+    }
+    for (int i = 0; i < 12; ++i)
+        if (dir_bins[i]) q.num_directions++;
+
+    // Diagnosis
+    q.is_valid = (q.condition_number < 50 && q.angle_coverage > 30);
+
+    if (q.condition_number > 100) {
+        q.diagnosis = "DEGENERATE: constraints nearly parallel (cond=" +
+                      std::to_string((int)q.condition_number) + ")";
+    } else if (q.condition_number > 50) {
+        q.diagnosis = "POOR: weak constraint in one direction (cond=" +
+                      std::to_string((int)q.condition_number) + ")";
+    } else if (q.angle_coverage < 30) {
+        q.diagnosis = "POOR: edges too similar in direction (coverage=" +
+                      std::to_string((int)q.angle_coverage) + " deg)";
+    } else if (q.condition_number > 10) {
+        q.diagnosis = "OK: acceptable (cond=" + std::to_string((int)q.condition_number) +
+                      ", coverage=" + std::to_string((int)q.angle_coverage) + " deg)";
+    } else {
+        q.diagnosis = "GOOD: well-constrained (cond=" + std::to_string((int)q.condition_number) +
+                      ", coverage=" + std::to_string((int)q.angle_coverage) + " deg)";
+    }
+
+    return q;
+}
+
 } // namespace roi_refine

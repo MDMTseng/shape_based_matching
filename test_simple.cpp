@@ -25,23 +25,26 @@ static void draw_L(Mat& img, int cx, int cy, double angle, int color) {
 }
 
 int main() {
-    // 1. Create V-shape template (two edges, no perpendicular constraint)
+    // 1. Create template — try different shapes
     Mat templ(80, 80, CV_8U, Scalar(0));
-    // V-shape: two lines from bottom-center going up-left and up-right
+#define TEMPLATE_SHAPE 2  // 0=L, 1=V, 2=parallel lines
+#if TEMPLATE_SHAPE == 0
+    draw_L(templ, 40, 40, 0, 200);
+    printf("Template: L-shape\n");
+#elif TEMPLATE_SHAPE == 1
+    // V-shape
     for (double t = 0; t < 35; t += 0.3) {
-        // Left arm
-        int lx = (int)(40 - t * 0.7), ly = (int)(60 - t);
-        if (lx>=0&&lx<80&&ly>=0&&ly<80) {
-            for (int d = -3; d <= 3; ++d)
-                if (lx+d>=0&&lx+d<80) templ.at<uchar>(ly, lx+d) = 200;
-        }
-        // Right arm
-        int rx = (int)(40 + t * 0.7), ry = (int)(60 - t);
-        if (rx>=0&&rx<80&&ry>=0&&ry<80) {
-            for (int d = -3; d <= 3; ++d)
-                if (rx+d>=0&&rx+d<80) templ.at<uchar>(ry, rx+d) = 200;
-        }
+        int lx=(int)(40-t*0.7), ly=(int)(60-t), rx=(int)(40+t*0.7), ry=(int)(60-t);
+        if(lx>=0&&lx<80&&ly>=0&&ly<80) for(int d=-3;d<=3;d++) if(lx+d>=0&&lx+d<80) templ.at<uchar>(ly,lx+d)=200;
+        if(rx>=0&&rx<80&&ry>=0&&ry<80) for(int d=-3;d<=3;d++) if(rx+d>=0&&rx+d<80) templ.at<uchar>(ry,rx+d)=200;
     }
+    printf("Template: V-shape\n");
+#elif TEMPLATE_SHAPE == 2
+    // Parallel vertical lines (degenerate — no X constraint)
+    rectangle(templ, Point(15, 10), Point(22, 70), Scalar(200), -1);
+    rectangle(templ, Point(58, 10), Point(65, 70), Scalar(200), -1);
+    printf("Template: parallel lines (degenerate)\n");
+#endif
 
     // 2. Extract features + save
     auto features = sbm::extractFeatures(templ);
@@ -174,7 +177,32 @@ int main() {
         sample_pts_edge = roi_refine::selectCriticalPoints(
             edge_pos, edge_corn, 8, loaded.templ_width, loaded.templ_height);
     }
-    printf("  Edge-only sample points: %d\n\n", (int)sample_pts_edge.size());
+    printf("  Edge-only sample points: %d\n", (int)sample_pts_edge.size());
+
+    // Validate constraints
+    printf("\n  --- Constraint Validation ---\n");
+    roi_refine::ROIConfig vcfg;
+    vcfg.roi_half = 15;
+
+    auto q_mixed = roi_refine::validateConstraints(sample_pts_8, loaded.templ_image, vcfg);
+    printf("  Mixed 8pt:     cond=%.0f  coverage=%.0f deg  dirs=%d  %de+%dc  %s\n",
+           q_mixed.condition_number, q_mixed.angle_coverage,
+           q_mixed.num_directions, q_mixed.num_edge, q_mixed.num_corner,
+           q_mixed.diagnosis.c_str());
+
+    auto q_edge = roi_refine::validateConstraints(sample_pts_edge, loaded.templ_image, vcfg);
+    printf("  Edge-only 8pt: cond=%.0f  coverage=%.0f deg  dirs=%d  %de+%dc  %s\n",
+           q_edge.condition_number, q_edge.angle_coverage,
+           q_edge.num_directions, q_edge.num_edge, q_edge.num_corner,
+           q_edge.diagnosis.c_str());
+
+    auto q_15 = roi_refine::validateConstraints(sample_pts_15, loaded.templ_image, vcfg);
+    printf("  Mixed 15pt:    cond=%.0f  coverage=%.0f deg  dirs=%d  %de+%dc  %s\n",
+           q_15.condition_number, q_15.angle_coverage,
+           q_15.num_directions, q_15.num_edge, q_15.num_corner,
+           q_15.diagnosis.c_str());
+
+    printf("\n");
 
     printf("%-22s  %-22s  %-22s  %-22s  %-22s\n",
            "Init perturbation", "ICP (dense)", "ROI 15pt×5", "ROI 8pt×3", "ROI 8edge-only");

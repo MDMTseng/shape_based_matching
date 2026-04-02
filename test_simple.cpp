@@ -1,6 +1,8 @@
 // Minimal usage example of the ShapeMatcher API.
 
 #include "shape_matcher.h"
+#include "roi_refine.h"
+#include "icp_refine.h"
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <chrono>
@@ -69,6 +71,104 @@ int main() {
            n_edge_rp, n_corner_rp, n_edge_rp + n_corner_rp);
 
     printf("GT:  (160,120)@25   (320,240)@90   (480,360)@200\n\n");
+
+    // Robustness test: directly call refine with perturbed initial pose
+    printf("\n--- Robustness: refine from perturbed initial pose ---\n");
+    printf("GT: (160,120)@25.  Scene created with warpAffine.\n\n");
+
+    // Create scene with one L at (160,120)@25
+    Mat scene1(480, 640, CV_8U, Scalar(30));
+    {
+        Mat M1 = getRotationMatrix2D(Point2f(40,40), -25.0, 1.0);
+        Mat rot1; warpAffine(templ, rot1, M1, templ.size(), INTER_LINEAR, BORDER_CONSTANT, Scalar(0));
+        for(int r=0;r<rot1.rows;r++) for(int c=0;c<rot1.cols;c++) {
+            int sy=120-40+r, sx=160-40+c;
+            if(sy>=0&&sy<scene1.rows&&sx>=0&&sx<scene1.cols&&rot1.at<uchar>(r,c)>0)
+                scene1.at<uchar>(sy,sx)=rot1.at<uchar>(r,c);
+        }
+    }
+
+    // Prepare ICP model edges
+    std::vector<icp_refine::EdgePoint> icp_edges;
+    for (auto& rp : loaded.refine_points) {
+        icp_refine::EdgePoint ep;
+        ep.pos = cv::Point2f(rp.px, rp.py);
+        ep.normal = cv::Point2f(rp.nx, rp.ny);
+        ep.cornerness = rp.cornerness;
+        icp_edges.push_back(ep);
+    }
+
+    // Prepare ROI sample points
+    std::vector<cv::Point2f> positions;
+    std::vector<float> corner_scores;
+    for (auto& rp : loaded.refine_points) {
+        positions.push_back(cv::Point2f(rp.px, rp.py));
+        corner_scores.push_back(rp.cornerness);
+    }
+    auto sample_pts = roi_refine::selectCriticalPoints(
+        positions, corner_scores, 15, loaded.templ_width, loaded.templ_height);
+
+    printf("%-22s  %-22s  %-22s\n", "Init perturbation", "ICP (dense)", "ROI (5 iter)");
+    printf("%-22s  %-22s  %-22s\n", "-----------------", "----------", "-----------");
+
+    struct PoseError { float dx, dy, da; const char* name; };
+    PoseError errors[] = {
+        { 0,  0,  0, "perfect"},
+        { 2,  1,  2, "+2px +2deg"},
+        { 5,  3,  5, "+5px +5deg"},
+        { 8,  5,  8, "+8px +8deg"},
+        {10, 10, 10, "+10px +10deg"},
+        {15, 10, 15, "+15px +15deg"},
+        {20, 15, 20, "+20px +20deg"},
+        { 0,  0, 30, "+0px +30deg"},
+        { 0,  0, 45, "+0px +45deg"},
+        {30, 20,  0, "+30px +0deg"},
+    };
+
+    for (auto& pe : errors) {
+        float init_x = 160 + pe.dx, init_y = 120 + pe.dy, init_a = 25 + pe.da;
+
+        printf("%-22s  ", pe.name);
+
+        // ICP
+        {
+            Mat ss, sdx, sdy;
+            GaussianBlur(scene1, ss, Size(7,7), 0);
+            Sobel(ss, sdx, CV_16S, 1, 0, 3);
+            Sobel(ss, sdy, CV_16S, 0, 1, 3);
+
+            icp_refine::ICPConfig icfg;
+            icfg.max_iterations = 30;
+            icfg.max_dist = 15;
+            icfg.use_cornerness = true;
+
+            icp_refine::Pose2D ip(init_x, init_y, init_a);
+            auto ref = icp_refine::refineWithNormals(
+                icp_edges, sdx, sdy, ip, loaded.templ_width, 30, icfg);
+
+            float ae = ref.angle - 25; if(ae>180)ae-=360; if(ae<-180)ae+=360;
+            float pd = std::sqrt((ref.x-160)*(ref.x-160)+(ref.y-120)*(ref.y-120));
+            printf("@%+5.1f %4.1fpx         ", ae, pd);
+        }
+
+        // ROI
+        {
+            roi_refine::ROIConfig rcfg;
+            rcfg.roi_half = 15;
+            rcfg.search_half = 20;
+
+            cv::Vec3f ip(init_x, init_y, init_a);
+            auto ref = roi_refine::refineROI(
+                loaded.templ_image, scene1, sample_pts, ip, rcfg);
+
+            float ae = ref[2] - 25; if(ae>180)ae-=360; if(ae<-180)ae+=360;
+            float pd = std::sqrt((ref[0]-160)*(ref[0]-160)+(ref[1]-120)*(ref[1]-120));
+            printf("@%+5.1f %4.1fpx", ae, pd);
+        }
+
+        printf("\n");
+    }
+    printf("\n");
 
     for (auto& mode : modes) {
         sbm::MatchConfig cfg;

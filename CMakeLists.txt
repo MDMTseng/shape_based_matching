@@ -77,8 +77,8 @@ target_link_libraries(test_icp_bias ${OpenCV_LIBS})
 
 # New high-level API
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
-add_executable(test_api line2Dup.cpp icp_refine.cpp shape_matcher.cpp test_api.cpp)
+add_executable(test_api line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp test_api.cpp)
 target_link_libraries(test_api ${OpenCV_LIBS})
 
-add_executable(test_simple line2Dup.cpp icp_refine.cpp shape_matcher.cpp test_simple.cpp)
+add_executable(test_simple line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp test_simple.cpp)
 target_link_libraries(test_simple ${OpenCV_LIBS})

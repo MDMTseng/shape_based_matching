@@ -9,9 +9,10 @@
 using namespace cv;
 
 int main() {
-    // 1. Create a template (white rectangle on black)
-    Mat templ(60, 80, CV_8U, Scalar(0));
-    rectangle(templ, Point(10, 10), Point(70, 50), Scalar(200), -1);
+    // 1. Create a template (L-shape, asymmetric — no 180° ambiguity)
+    Mat templ(80, 80, CV_8U, Scalar(0));
+    rectangle(templ, Point(25, 10), Point(35, 70), Scalar(200), -1);
+    rectangle(templ, Point(25, 50), Point(65, 70), Scalar(200), -1);
 
     // 2. Extract features + save
     auto features = sbm::extractFeatures(templ);
@@ -41,6 +42,7 @@ int main() {
         {"None",       sbm::RefineMode::None},
         {"ICP_Sparse", sbm::RefineMode::ICP_Sparse},
         {"ICP (dense)", sbm::RefineMode::ICP},
+        {"ROI",        sbm::RefineMode::ROI},
     };
 
     auto loaded = sbm::FeatureSet::load("rect.feat");

@@ -4,6 +4,7 @@
 #include "shape_matcher.h"
 #include "line2Dup.h"
 #include "icp_refine.h"
+#include "roi_refine.h"
 
 #include <opencv2/imgproc.hpp>
 #include <fstream>
@@ -30,6 +31,15 @@ bool FeatureSet::save(const std::string& path) const {
     f.write((char*)&origin.x, 4);
     f.write((char*)&origin.y, 4);
     f.write((char*)&angle_offset, 4);
+
+    // Template image (for ROI refinement)
+    int32_t img_rows = templ_image.rows, img_cols = templ_image.cols;
+    f.write((char*)&img_rows, 4);
+    f.write((char*)&img_cols, 4);
+    if (img_rows > 0 && img_cols > 0) {
+        for (int r = 0; r < img_rows; ++r)
+            f.write((char*)templ_image.ptr(r), img_cols);
+    }
 
     // Refine points (edges + corners)
     int32_t ne = (int32_t)refine_points.size();
@@ -82,6 +92,16 @@ FeatureSet FeatureSet::load(const std::string& path) {
     f.read((char*)&fs.origin.y, 4);
     f.read((char*)&fs.angle_offset, 4);
 
+    // Template image
+    int32_t img_rows, img_cols;
+    f.read((char*)&img_rows, 4);
+    f.read((char*)&img_cols, 4);
+    if (img_rows > 0 && img_cols > 0) {
+        fs.templ_image = cv::Mat(img_rows, img_cols, CV_8U);
+        for (int r = 0; r < img_rows; ++r)
+            f.read((char*)fs.templ_image.ptr(r), img_cols);
+    }
+
     // Refine points (edges + corners)
     int32_t ne;
     f.read((char*)&ne, 4);
@@ -129,6 +149,7 @@ FeatureSet extractFeatures(const cv::Mat& templ_gray,
     fs.templ_width = templ_gray.cols;
     fs.templ_height = templ_gray.rows;
     fs.origin = cv::Point2f(templ_gray.cols / 2.0f, templ_gray.rows / 2.0f);
+    fs.templ_image = templ_gray.clone();
 
     cv::Mat use_mask = mask;
     if (use_mask.empty())
@@ -614,6 +635,44 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
                 raw_angle = refined.angle;
 
                 // Recompute user coordinates from refined pose
+                rad = -raw_angle * (float)CV_PI / 180.0f;
+                rot_ox = (std::cos(rad) * ox - std::sin(rad) * oy) * matched_scale;
+                rot_oy = (std::sin(rad) * ox + std::cos(rad) * oy) * matched_scale;
+                user_x = scene_x + rot_ox;
+                user_y = scene_y + rot_oy;
+                user_angle = raw_angle + fs.angle_offset;
+                if (is_flip) user_angle = -user_angle + 2 * fs.angle_offset;
+                while (user_angle < 0) user_angle += 360;
+                while (user_angle >= 360) user_angle -= 360;
+            }
+        }
+
+        // ROI-based refinement
+        if (cfg.refine == RefineMode::ROI && !fs.templ_image.empty() && !scene.empty()) {
+            // Select critical points from refine_points
+            std::vector<cv::Point2f> positions;
+            std::vector<float> corner_scores;
+            for (auto& rp : fs.refine_points) {
+                positions.push_back(cv::Point2f(rp.px, rp.py));
+                corner_scores.push_back(rp.cornerness);
+            }
+
+            auto sample_pts = roi_refine::selectCriticalPoints(
+                positions, corner_scores, 15, fs.templ_width, fs.templ_height);
+
+            if (!sample_pts.empty()) {
+                roi_refine::ROIConfig roi_cfg;
+                roi_cfg.roi_half = 15;
+                roi_cfg.search_half = 15;
+
+                cv::Vec3f init_pose(scene_x, scene_y, raw_angle);
+                auto refined_pose = roi_refine::refineROI(
+                    fs.templ_image, scene, sample_pts, init_pose, roi_cfg);
+
+                scene_x = refined_pose[0];
+                scene_y = refined_pose[1];
+                raw_angle = refined_pose[2];
+
                 rad = -raw_angle * (float)CV_PI / 180.0f;
                 rot_ox = (std::cos(rad) * ox - std::sin(rad) * oy) * matched_scale;
                 rot_oy = (std::sin(rad) * ox + std::cos(rad) * oy) * matched_scale;

@@ -49,9 +49,10 @@ struct FeatureSet {
     };
 
     /// All refinement points: dense Canny edges + Harris corners.
-    /// Users can filter by type or cornerness to select which regions
-    /// contribute to ICP alignment.
     std::vector<RefinePt> refine_points;
+
+    /// Template image (stored for ROI-based refinement).
+    cv::Mat templ_image;
 
     // --- User-defined reference frame ---
 
@@ -125,7 +126,11 @@ enum class RefineMode {
     None,               ///< Raw coarse result only
     BiasCorrection,     ///< Apply calibrated angle bias correction (free)
     ICP_Sparse,         ///< ICP using sparse matching features (~0.1ms/obj, ~2deg)
-    ICP                 ///< ICP using dense Canny edges (~0.3ms/obj, <0.5deg)
+    ICP,                ///< ICP using dense Canny edges (~0.3ms/obj, <0.5deg)
+    ROI                 ///< ROI template match + PCA constraint (~0.05ms/obj, <0.5deg)
+                        ///< Selects ~10-20 critical points (corners + spaced edges),
+                        ///< matches each via small ROI template match with subpixel,
+                        ///< PCA determines 1D/2D constraint, single rigid solve.
 };
 
 struct MatchConfig {

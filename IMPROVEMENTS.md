@@ -257,42 +257,122 @@ Refined pose
   Small corrections reuse cached correspondences (just rigid solve).
 - **Outlier rejection** — remove correspondences with distance > 2x median before solve.
 
-### ICP vs ROI Comparison
+### Sensitivity-Optimized Feature Selection
 
-| | ICP (dense) | ROI 8pt x 3 | ROI 15pt x 5 |
+The feature set for ROI refinement is automatically optimized for balanced sensitivity:
+
+1. **Initial greedy selection**: corners first (×10 priority), then by distance from center
+2. **Iterative swap**: remove least-sensitive feature, try all candidates from pool,
+   accept swap if it reduces worst-case sensitivity. Repeat until worst/least ratio < 2.
+3. **Corner protection**: corners are never swapped out (they provide 2D constraint)
+4. **Cache**: computed once at `addModel()`, reused at zero cost during `match()`
+
+**Sensitivity metrics** (per feature, via 1px perturbation Jacobian):
+- `d_ang`: angle change from 1px matching error (deg/px)
+- `d_pos`: position change from 1px matching error (px/px)
+- `leverage`: distance from rotation center (angular torque arm)
+
+**Key insight**: sensitivity is zero-sum — reweighting features can't reduce total
+sensitivity, only redistribute it. The fix is better feature *selection*, not weighting.
+Removing the least-sensitive feature barely changes others; removing the most-sensitive
+causes neighbors to absorb its load. Adding equally-sensitive features lowers all.
+
+| Shape | Before (greedy) worst_ang | After (optimized) worst_ang |
+|-------|--------------------------|----------------------------|
+| L-shape | 1.06 | **0.52** |
+| V-shape | 0.94 | **0.41** |
+| Parallel lines | 0.72 | **0.43** |
+| Long pole | 0.80 | **0.44** |
+| Single line | 1.32 | **0.73** |
+
+Optimization cost: 80-220ms (offline, once per template). Cached call: 0ms.
+
+### ICP vs ROI Comparison (FHD 1920x1080, 200x200 template, 10 objects)
+
+| | None (coarse) | ICP (dense) | ROI (8 optimized) |
 |---|---|---|---|
-| **Speed** | 1.3ms | **0.7ms** | 2-5ms |
-| **Accuracy** | **<0.2 deg** | <1 deg | <0.5 deg |
-| **Robustness** | +-8px/+-8deg | **+-20px/+-20deg** | **+-30px/+-30deg** |
+| **Speed** | 25ms | 31ms | **26ms** |
+| **Angle** | 10.0 deg | **0.2 deg** | 1.1 deg |
+| **Position** | 5.7px | 4.3px | **0.6px** |
 
-### Robustness Under Degradation
+### Accuracy Under Degradation (FHD, 10 objects)
 
-| Condition | ICP | ROI 8pt x 3 |
-|---|---|---|
-| Noise sigma=10 | @-0.2 deg 0.1px | @-0.1 deg 0.1px |
-| Noise sigma=30 | @-0.2 deg 0.1px | @-0.1 deg 0.2px |
-| Noise sigma=50 | @+0.1 deg 0.2px | @+0.1 deg 0.2px |
-| Blur k=5 | @-0.1 deg 0.2px | @+0.1 deg 0.1px |
-| Blur k=11 | @+0.0 deg 0.1px | @+0.2 deg 0.3px |
-| Blur k=21 | **@-0.0 deg 0.1px** | @+0.9 deg 1.1px |
-| +10px +10deg | @+2.8 deg FAIL | **@+0.3 deg 0.1px** |
-| +20px +20deg | @+8.5 deg FAIL | **@+1.0 deg 1.4px** |
-| +10px+10deg+noise+blur | @-0.2 deg 0.2px | @+0.6 deg 0.7px |
+| Condition | ICP angle | ROI angle | ICP pos | ROI pos |
+|-----------|----------|----------|---------|---------|
+| clean | **0.2 deg** | 1.1 deg | 4.3px | **0.6px** |
+| noise s=10 | **0.3 deg** | 1.1 deg | 4.6px | **0.6px** |
+| noise s=20 | 1.3 deg | **0.9 deg** | 8.0px | **0.5px** |
+| blur k=5 | **1.2 deg** | 1.2 deg | 8.5px | **0.7px** |
+| blur k=11 | **0.7 deg** | 1.6 deg | 5.2px | **1.1px** |
+| blur k=21 | **1.2 deg** | 1.7 deg | 6.2px | **1.1px** |
+| n30+b11 | **0.3 deg** | 1.6 deg | 2.1px | **0.9px** |
+| n50+b11 | **0.6 deg** | 1.7 deg | 6.0px | **0.9px** |
+
+### Why ICP Wins Angle, ROI Wins Position
+
+- **ICP** aligns hundreds of edge points along the full contour — massive angular
+  constraint via lever arm. But point-to-plane has zero constraint along edge tangent,
+  allowing position to slide. Multi-object scenes cause wrong correspondences (4.3px
+  clean; isolated single-object: 0.1-1.2px).
+
+- **ROI** matches 8 template patches via matchTemplate — each patch pins XY precisely
+  (template match is a 2D lock). But with only 8 points, angular lever arm is limited
+  and patch-level rotation signal is weak (~0.5px displacement per degree at 30px
+  from center).
 
 ### When to Use Which
 
 | Scenario | Recommended |
 |----------|-------------|
-| Good coarse init, any noise/blur | **ICP** (1.3ms, <0.2 deg) |
-| Bad coarse init, moderate conditions | **ROI 8pt x 3** (0.7ms, <1 deg) |
-| Bad coarse init, need sub-degree | **ROI 15pt x 5** (2-5ms, <0.5 deg) |
+| Best angle accuracy needed | **ICP** (0.2 deg) |
+| Best position accuracy needed | **ROI** (0.6px) |
+| Multi-object scenes (avoid cross-matching) | **ROI** |
 | Heavy blur (k > 15) | **ICP** (edge-based, blur-invariant) |
-| Real-time tracking (frame-to-frame) | **ROI 8pt x 3** (0.6ms with cache) |
+| Moderate noise (s=20-30) | **ROI** (matchTemplate averages noise) |
+| Speed-critical | **ROI** (26ms vs 31ms for 10 objects) |
+
+---
+
+## AVX2 ICP Inner Loop
+
+Vectorized the hot loop in `refineWithNormals` (correspondence matching + Jacobian
+accumulation):
+
+- **SoA layout**: model edges converted to separate pos_x/pos_y/normal_x/normal_y arrays
+  for contiguous SIMD loads
+- **8-wide transform**: `cs*px - sn*py + tx` via `_mm256_mul_ps` / `_mm256_add_ps`
+- **AVX2 gather**: `_mm256_mask_i32gather_ps` for closest_x/y and normal_x/y lookups
+  from distance transform (4 gathers per 8 points)
+- **Masked accumulation**: 11 `__m256` accumulators (6 ATA + 3 ATb + total_error +
+  inlier_count), non-inlier lanes zeroed via `_mm256_and_ps` with combined mask
+- **Branch elimination**: bounds check, distance check, normal compatibility all
+  computed as SIMD masks, combined into single inlier mask
+
+Scalar tail handles remaining N%8 points.
+
+## OpenMP Parallel Object Refinement
+
+Per-object ICP/ROI refinement parallelized with `#pragma omp parallel for schedule(dynamic)`:
+
+- Each object's refinement is independent (reads shared scene, writes own result)
+- Dynamic scheduling handles variable ICP convergence per object
+- Threshold: only parallelize if >= 4 objects (avoids thread creation overhead)
+- Thread-safe: `selectOptimizedPoints` cache pre-computed at `addModel()` time
+
+### Combined Speed Results (FHD, 10 objects)
+
+| Mode | Before | After | Speedup |
+|------|--------|-------|---------|
+| ICP dense (clean) | 42ms | **31ms** | 1.35x |
+| ICP dense (noise s=50) | 1061ms | **93ms** | 11x |
+| ROI (clean) | 33ms | **26ms** | 1.24x |
 
 ### Files
 - `roi_refine.h` / `roi_refine.cpp` — ROI refinement implementation
-- `shape_matcher.h` — RefineMode::ROI added
-- `shape_matcher.cpp` — ROI integration, template image serialization
+- `icp_refine.h` / `icp_refine.cpp` — ICP refinement (AVX2 inner loop)
+- `shape_matcher.h` — RefineMode::ROI, selectOptimizedPoints, analyzeSensitivity
+- `shape_matcher.cpp` — ROI/ICP integration, OpenMP parallel refinement,
+  sensitivity-optimized feature selection
 
 ---
 
@@ -308,5 +388,6 @@ Refined pose
 - `test_bias_final.cpp` — warpAffine vs feature rotation bias comparison
 - `test_rotate_bias.cpp` — feature rotation bias vs step size
 - `test_multires.cpp` — multi-resolution matching benchmark
-- `test_simple.cpp` — minimal API usage + ICP vs ROI robustness comparison
+- `test_simple.cpp` — API usage, ICP vs ROI comparison, FHD benchmark,
+  sensitivity analysis, per-angle isolated accuracy test
 - `test_api.cpp` — multi-model matching with visual output

@@ -31,6 +31,16 @@ bool FeatureSet::save(const std::string& path) const {
     f.write((char*)&origin.y, 4);
     f.write((char*)&angle_offset, 4);
 
+    // ICP edges
+    int32_t ne = (int32_t)icp_edges.size();
+    f.write((char*)&ne, 4);
+    for (auto& e : icp_edges) {
+        f.write((char*)&e.px, 4);
+        f.write((char*)&e.py, 4);
+        f.write((char*)&e.nx, 4);
+        f.write((char*)&e.ny, 4);
+    }
+
     // Per level
     for (auto& lv : levels) {
         int32_t nf = (int32_t)lv.features.size();
@@ -67,6 +77,17 @@ FeatureSet FeatureSet::load(const std::string& path) {
     f.read((char*)&fs.origin.x, 4);
     f.read((char*)&fs.origin.y, 4);
     f.read((char*)&fs.angle_offset, 4);
+
+    // ICP edges
+    int32_t ne;
+    f.read((char*)&ne, 4);
+    fs.icp_edges.resize(ne);
+    for (auto& e : fs.icp_edges) {
+        f.read((char*)&e.px, 4);
+        f.read((char*)&e.py, 4);
+        f.read((char*)&e.nx, 4);
+        f.read((char*)&e.ny, 4);
+    }
 
     fs.levels.resize(nl);
     for (auto& lv : fs.levels) {
@@ -128,6 +149,34 @@ FeatureSet extractFeatures(const cv::Mat& templ_gray,
             dst.features[j].theta = src.features[j].theta;
         }
     }
+
+    // Extract dense Canny edges with accurate normals for ICP
+    {
+        cv::Mat smooth, dx, dy, edges;
+        cv::GaussianBlur(templ_gray, smooth, cv::Size(5, 5), 0);
+        cv::Sobel(smooth, dx, CV_16S, 1, 0, 3);
+        cv::Sobel(smooth, dy, CV_16S, 0, 1, 3);
+        cv::Canny(dx, dy, edges, 30, 60);
+
+        float cx = templ_gray.cols / 2.0f, cy = templ_gray.rows / 2.0f;
+        for (int r = 0; r < templ_gray.rows; ++r) {
+            const short* dxr = dx.ptr<short>(r);
+            const short* dyr = dy.ptr<short>(r);
+            for (int c = 0; c < templ_gray.cols; ++c) {
+                if (edges.at<uchar>(r, c) == 0) continue;
+                float gx = (float)dxr[c], gy = (float)dyr[c];
+                float mag = std::sqrt(gx*gx + gy*gy);
+                if (mag < 1e-6f) continue;
+                FeatureSet::EdgePoint ep;
+                ep.px = c - cx;
+                ep.py = r - cy;
+                ep.nx = gx / mag;
+                ep.ny = gy / mag;
+                fs.icp_edges.push_back(ep);
+            }
+        }
+    }
+
     return fs;
 }
 
@@ -418,21 +467,13 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         while (user_angle < 0) user_angle += 360;
         while (user_angle >= 360) user_angle -= 360;
 
-        // ICP refinement at full resolution
-        if (cfg.refine == RefineMode::ICP && !scene.empty()) {
-            // Build model edges (cache per model)
-            // For simplicity, rebuild each time (could cache)
-            cv::Mat templ_img(fs.templ_height, fs.templ_width, CV_8U, cv::Scalar(0));
-            // We don't have the template image here — use features as edge points
-            std::vector<icp_refine::EdgePoint> edges;
-            auto& lvl0 = fs.levels[0];
-            for (auto& f : lvl0.features) {
-                icp_refine::EdgePoint ep;
-                ep.pos = cv::Point2f((float)(f.x + lvl0.tl_x) - fs.templ_width / 2.0f,
-                                     (float)(f.y + lvl0.tl_y) - fs.templ_height / 2.0f);
-                float tr = f.theta * (float)CV_PI / 180.0f;
-                ep.normal = cv::Point2f(std::cos(tr), std::sin(tr));
-                edges.push_back(ep);
+        // ICP refinement at full resolution using dense Canny edges
+        if (cfg.refine == RefineMode::ICP && !scene.empty() && !fs.icp_edges.empty()) {
+            // Convert stored dense edges to icp_refine format
+            std::vector<icp_refine::EdgePoint> edges(fs.icp_edges.size());
+            for (size_t ei = 0; ei < fs.icp_edges.size(); ++ei) {
+                edges[ei].pos = cv::Point2f(fs.icp_edges[ei].px, fs.icp_edges[ei].py);
+                edges[ei].normal = cv::Point2f(fs.icp_edges[ei].nx, fs.icp_edges[ei].ny);
             }
 
             cv::Mat roi_smooth, roi_dx, roi_dy;

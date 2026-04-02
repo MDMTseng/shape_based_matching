@@ -38,6 +38,14 @@ struct FeatureSet {
     int templ_width;                     ///< Original template image width
     int templ_height;                    ///< Original template image height
 
+    /// Dense edge points for ICP refinement (from Canny, not from sparse features).
+    /// Positions relative to template center, normals from actual gradient direction.
+    struct EdgePoint {
+        float px, py;   ///< Position relative to template center
+        float nx, ny;   ///< Normal direction (unit vector)
+    };
+    std::vector<EdgePoint> icp_edges;
+
     // --- User-defined reference frame ---
 
     /// Origin point in template image coords.

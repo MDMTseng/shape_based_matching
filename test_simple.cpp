@@ -25,9 +25,23 @@ static void draw_L(Mat& img, int cx, int cy, double angle, int color) {
 }
 
 int main() {
-    // 1. Create L-shape template
+    // 1. Create V-shape template (two edges, no perpendicular constraint)
     Mat templ(80, 80, CV_8U, Scalar(0));
-    draw_L(templ, 40, 40, 0, 200);
+    // V-shape: two lines from bottom-center going up-left and up-right
+    for (double t = 0; t < 35; t += 0.3) {
+        // Left arm
+        int lx = (int)(40 - t * 0.7), ly = (int)(60 - t);
+        if (lx>=0&&lx<80&&ly>=0&&ly<80) {
+            for (int d = -3; d <= 3; ++d)
+                if (lx+d>=0&&lx+d<80) templ.at<uchar>(ly, lx+d) = 200;
+        }
+        // Right arm
+        int rx = (int)(40 + t * 0.7), ry = (int)(60 - t);
+        if (rx>=0&&rx<80&&ry>=0&&ry<80) {
+            for (int d = -3; d <= 3; ++d)
+                if (rx+d>=0&&rx+d<80) templ.at<uchar>(ry, rx+d) = 200;
+        }
+    }
 
     // 2. Extract features + save
     auto features = sbm::extractFeatures(templ);

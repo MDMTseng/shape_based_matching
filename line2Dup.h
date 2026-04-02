@@ -131,12 +131,13 @@ struct Match
     int x;
     int y;
     float similarity;
+    float refined_angle;  ///< Sub-step refined angle in degrees (-1 if not refined)
     std::string class_id;
     int template_id;
 };
 
 inline Match::Match(int _x, int _y, float _similarity, const std::string &_class_id, int _template_id)
-        : x(_x), y(_y), similarity(_similarity), class_id(_class_id), template_id(_template_id)
+        : x(_x), y(_y), similarity(_similarity), refined_angle(-1), class_id(_class_id), template_id(_template_id)
 {
 }
 
@@ -154,6 +155,13 @@ public:
     std::vector<Match> match(cv::Mat sources, float threshold,
                                                      const std::vector<std::string> &class_ids = std::vector<std::string>(),
                                                      const cv::Mat masks = cv::Mat()) const;
+
+    /// Refine orientation of matches by parabolic interpolation between
+    /// neighboring template angles. Call after match() and spatial NMS.
+    /// @param angle_step  Degrees between consecutive template_ids.
+    /// @param num_templates  Total number of rotation templates (for wraparound).
+    void refineOrientations(std::vector<Match> &matches, float angle_step,
+                            int num_templates) const;
 
     int addTemplate(const cv::Mat sources, const std::string &class_id,
                                     const cv::Mat &object_mask, int num_features = 0);

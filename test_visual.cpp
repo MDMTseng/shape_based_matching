@@ -79,6 +79,41 @@ static Mat draw_matches(const Mat& scene_gray, const vector<line2Dup::Match>& ra
     // Spatial NMS to deduplicate overlapping detections
     auto matches = spatial_nms(raw_matches, (float)TW * 0.8f);
 
+    // Refine orientations: search raw_matches for angular neighbor scores,
+    // then parabolic interpolation for sub-step precision
+    int num_tmpl = det.numTemplates("L");
+    if (num_tmpl >= 3) {
+        // For each NMS match, find neighbor scores from raw matches
+        for (auto& m : matches) {
+            int tid = m.template_id;
+            int tid_prev = (tid - 1 + num_tmpl) % num_tmpl;
+            int tid_next = (tid + 1) % num_tmpl;
+            float s_center = m.similarity;
+            float s_prev = s_center * 0.9f;  // default if not found
+            float s_next = s_center * 0.9f;
+
+            for (auto& other : raw_matches) {
+                if (other.class_id != m.class_id) continue;
+                if (abs(other.x - m.x) > 16 || abs(other.y - m.y) > 16) continue;
+                if (other.template_id == tid_prev && other.similarity > s_prev)
+                    s_prev = other.similarity;
+                if (other.template_id == tid_next && other.similarity > s_next)
+                    s_next = other.similarity;
+            }
+
+            float a = (s_prev + s_next) / 2.0f - s_center;
+            float b = (s_next - s_prev) / 2.0f;
+            float offset = 0;
+            if (a < -0.001f) {
+                offset = -b / (2.0f * a);
+                offset = std::max(-0.5f, std::min(0.5f, offset));
+            }
+            m.refined_angle = (tid + offset) * (float)angle_step;
+            if (m.refined_angle < 0) m.refined_angle += 360.0f;
+            if (m.refined_angle >= 360.0f) m.refined_angle -= 360.0f;
+        }
+    }
+
     int draw_n = std::min((int)matches.size(), 50);
     double arrow_len = TW * 0.45;
 
@@ -96,8 +131,9 @@ static Mat draw_matches(const Mat& scene_gray, const vector<line2Dup::Match>& ra
         int cy = m.y + tmpl[0].height / 2;
         Point center(cx, cy);
 
-        // Orientation arrow: template_id * angle_step gives the rotation angle
-        double angle_deg = m.template_id * angle_step;
+        // Orientation arrow: use refined_angle if available, else template_id * step
+        double angle_deg = (m.refined_angle >= 0) ? m.refined_angle
+                                                   : m.template_id * angle_step;
         double angle_rad = angle_deg * CV_PI / 180.0;
         Point arrow_tip(
             cx + (int)(arrow_len * cos(angle_rad)),
@@ -109,11 +145,13 @@ static Mat draw_matches(const Mat& scene_gray, const vector<line2Dup::Match>& ra
         // Draw orientation arrow
         arrowedLine(vis, center, arrow_tip, color, 2, cv::LINE_AA, 0, 0.25);
 
-        // Draw score text
-        char buf[32];
-        snprintf(buf, sizeof(buf), "%.0f", m.similarity);
+        // Draw score + refined angle text
+        char buf[48];
+        snprintf(buf, sizeof(buf), "%.0f @%.1f", m.similarity, angle_deg);
         putText(vis, buf, Point(cx + 5, cy - 8),
-                FONT_HERSHEY_SIMPLEX, 0.4, color, 1);
+                FONT_HERSHEY_SIMPLEX, 0.35, Scalar(0,0,0), 2);
+        putText(vis, buf, Point(cx + 5, cy - 8),
+                FONT_HERSHEY_SIMPLEX, 0.35, color, 1);
     }
 
     // Show raw/NMS counts and time

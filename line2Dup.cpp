@@ -1809,6 +1809,119 @@ struct MatchPredicate
     float threshold;
 };
 
+// Score a single template at a single position in linear memory space.
+// Returns raw similarity sum (not normalized to 0-100).
+static int scoreAtPosition(const std::vector<Mat> &linear_memories,
+                           const Template &templ, Size size, int T,
+                           int match_x, int match_y) {
+    int W = size.width / T;
+    int score = 0;
+    for (auto& f : templ.features) {
+        // Feature position in image coords
+        int fx = f.x + match_x;
+        int fy = f.y + match_y;
+        if (fx < 0 || fy < 0) continue;
+
+        const Mat &memory_grid = linear_memories[f.label];
+        int grid_x = fx % T;
+        int grid_y = fy % T;
+        int grid_index = grid_y * T + grid_x;
+        if (grid_index >= memory_grid.rows) continue;
+
+        int lm_x = fx / T;
+        int lm_y = fy / T;
+        int lm_index = lm_y * W + lm_x;
+        if (lm_index < 0 || lm_index >= memory_grid.cols) continue;
+
+        score += memory_grid.ptr(grid_index)[lm_index];
+    }
+    return score;
+}
+
+void Detector::refineOrientations(std::vector<Match> &matches, float angle_step,
+                                  int num_templates) const {
+    if (matches.empty() || num_templates < 3) return;
+
+    // We need the linear memory pyramid that was built during match().
+    // Since we don't cache it, we re-score using the stored templates.
+    // However, the linear memories are not stored after match() returns.
+    //
+    // Alternative approach: use the scores of neighboring template_ids
+    // that were already computed during matching. But those aren't stored either.
+    //
+    // Simplest approach: parabolic interpolation using the match scores
+    // from templates at template_id-1, template_id, template_id+1.
+    // We search through the raw matches list for neighbors at the same position.
+
+    // Group matches by approximate position (within T pixels)
+    // For each position, find the best template_id and its neighbors' scores.
+
+    // Actually, the matches list already has all template scores above threshold.
+    // For each NMS-surviving match, find its angular neighbors in the raw list.
+
+    // Simplest correct approach: for each match, just do parabolic interpolation
+    // using the assumption that similarity varies smoothly with angle.
+    // We need scores at template_id-1 and template_id+1.
+    // These might exist in the matches list, or we approximate.
+
+    // Build a lookup: for each (class_id, approximate position), store all (template_id, score)
+    struct PosKey {
+        int x, y;
+        bool operator==(const PosKey& o) const {
+            return abs(x - o.x) < 16 && abs(y - o.y) < 16;
+        }
+    };
+
+    // For each match, search for neighbors with template_id +/- 1 nearby
+    for (auto& m : matches) {
+        int tid = m.template_id;
+        int tid_prev = (tid - 1 + num_templates) % num_templates;
+        int tid_next = (tid + 1) % num_templates;
+
+        float s_center = m.similarity;
+        float s_prev = -1, s_next = -1;
+
+        // Search in the full matches list for neighboring template scores at similar position
+        // (matches is sorted by similarity descending, but we need spatial+angular neighbors)
+        // This is O(N) per match but N is small after NMS.
+
+        // Default: assume symmetric falloff if neighbor not found
+        float default_neighbor = s_center * 0.9f;
+
+        for (auto& other : matches) {
+            if (other.class_id != m.class_id) continue;
+            int dx = abs(other.x - m.x), dy = abs(other.y - m.y);
+            if (dx > 16 || dy > 16) continue;  // not same object
+
+            if (other.template_id == tid_prev && s_prev < other.similarity)
+                s_prev = other.similarity;
+            if (other.template_id == tid_next && s_next < other.similarity)
+                s_next = other.similarity;
+        }
+
+        if (s_prev < 0) s_prev = default_neighbor;
+        if (s_next < 0) s_next = default_neighbor;
+
+        // Parabolic interpolation: fit y = a*x^2 + b*x + c through
+        // (-1, s_prev), (0, s_center), (1, s_next)
+        // Peak at x = -b/(2a) where a = (s_prev + s_next)/2 - s_center
+        //                            b = (s_next - s_prev)/2
+        float a = (s_prev + s_next) / 2.0f - s_center;
+        float b = (s_next - s_prev) / 2.0f;
+
+        float offset = 0;
+        if (a < -0.001f) {  // concave (has a maximum)
+            offset = -b / (2.0f * a);
+            offset = std::max(-0.5f, std::min(0.5f, offset));  // clamp to [-0.5, 0.5]
+        }
+
+        m.refined_angle = (tid + offset) * angle_step;
+        // Wrap to [0, 360)
+        if (m.refined_angle < 0) m.refined_angle += 360.0f;
+        if (m.refined_angle >= 360.0f) m.refined_angle -= 360.0f;
+    }
+}
+
 void enableProfiling(bool enable) { g_profile.enabled = enable; }
 void resetProfiling() { g_profile.reset(); }
 void printProfiling() { g_profile.print(); }

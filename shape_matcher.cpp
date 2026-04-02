@@ -55,6 +55,7 @@ bool FeatureSet::save(const std::string& path) const {
             f.write((char*)&ft.y, 4);
             f.write((char*)&ft.label, 4);
             f.write((char*)&ft.theta, 4);
+            f.write((char*)&ft.cornerness, 4);
         }
     }
     return f.good();
@@ -104,6 +105,7 @@ FeatureSet FeatureSet::load(const std::string& path) {
             f.read((char*)&ft.y, 4);
             f.read((char*)&ft.label, 4);
             f.read((char*)&ft.theta, 4);
+            f.read((char*)&ft.cornerness, 4);
         }
     }
     return fs;
@@ -131,6 +133,20 @@ FeatureSet extractFeatures(const cv::Mat& templ_gray,
     int id = det.addTemplate(templ_gray, "_extract_", use_mask);
     if (id < 0) return fs;
 
+    // Compute structure tensor for cornerness classification
+    cv::Mat smooth_st, dx_st, dy_st;
+    cv::GaussianBlur(templ_gray, smooth_st, cv::Size(5, 5), 0);
+    cv::Sobel(smooth_st, dx_st, CV_32F, 1, 0, 3);
+    cv::Sobel(smooth_st, dy_st, CV_32F, 0, 1, 3);
+
+    // Structure tensor components (smoothed with a window)
+    cv::Mat Ixx = dx_st.mul(dx_st);
+    cv::Mat Iyy = dy_st.mul(dy_st);
+    cv::Mat Ixy = dx_st.mul(dy_st);
+    cv::GaussianBlur(Ixx, Ixx, cv::Size(3, 3), 0);
+    cv::GaussianBlur(Iyy, Iyy, cv::Size(3, 3), 0);
+    cv::GaussianBlur(Ixy, Ixy, cv::Size(3, 3), 0);
+
     auto& tp = det.getTemplates("_extract_", id);
     fs.levels.resize(tp.size());
     for (size_t i = 0; i < tp.size(); ++i) {
@@ -147,6 +163,26 @@ FeatureSet extractFeatures(const cv::Mat& templ_gray,
             dst.features[j].y = src.features[j].y;
             dst.features[j].label = src.features[j].label;
             dst.features[j].theta = src.features[j].theta;
+
+            // Compute cornerness from structure tensor eigenvalues.
+            int fx = src.features[j].x + src.tl_x;
+            int fy = src.features[j].y + src.tl_y;
+            if (fx >= 0 && fx < templ_gray.cols && fy >= 0 && fy < templ_gray.rows) {
+                float a = Ixx.at<float>(fy, fx);
+                float b = Ixy.at<float>(fy, fx);
+                float c = Iyy.at<float>(fy, fx);
+                // Eigenvalues of [[a,b],[b,c]]:
+                // λ = (a+c)/2 ± sqrt(((a-c)/2)² + b²)
+                float trace = a + c;
+                float disc = std::sqrt(std::max(0.0f, (a-c)*(a-c)/4.0f + b*b));
+                float lam_max = trace/2.0f + disc;
+                float lam_min = trace/2.0f - disc;
+                // cornerness = λ_min / λ_max  (0=edge, 1=corner)
+                dst.features[j].cornerness = (lam_max > 1e-6f) ?
+                    std::min(1.0f, std::max(0.0f, lam_min / lam_max)) : 0;
+            } else {
+                dst.features[j].cornerness = 0;
+            }
         }
     }
 
@@ -472,6 +508,7 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
                       && !scene.empty();
         if (do_icp) {
             std::vector<icp_refine::EdgePoint> edges;
+            bool use_cornerness = false;
 
             if (cfg.refine == RefineMode::ICP && !fs.icp_edges.empty()) {
                 // Dense Canny edges — accurate normals, ~200 points, <0.5 deg
@@ -481,7 +518,9 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
                     edges[ei].normal = cv::Point2f(fs.icp_edges[ei].nx, fs.icp_edges[ei].ny);
                 }
             } else {
-                // Sparse matching features — quantized normals, ~50 points, ~2 deg
+                // Sparse matching features with cornerness-aware ICP weight.
+                // Corner features (cornerness > 0.3) use higher point_to_point_weight
+                // for 2D constraint. Edge features use point-to-plane only.
                 auto& lvl0 = fs.levels[0];
                 for (auto& f : lvl0.features) {
                     icp_refine::EdgePoint ep;
@@ -489,8 +528,10 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
                                          (float)(f.y + lvl0.tl_y) - fs.templ_height / 2.0f);
                     float tr = f.theta * (float)CV_PI / 180.0f;
                     ep.normal = cv::Point2f(std::cos(tr), std::sin(tr));
+                    ep.cornerness = f.cornerness;
                     edges.push_back(ep);
                 }
+                use_cornerness = true;
             }
 
             cv::Mat roi_smooth, roi_dx, roi_dy;
@@ -508,6 +549,7 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
                 icp_refine::ICPConfig icp_cfg;
                 icp_cfg.max_iterations = cfg.icp_iterations;
                 icp_cfg.max_dist = cfg.icp_max_dist;
+                icp_cfg.use_cornerness = use_cornerness;
 
                 icp_refine::Pose2D init(scene_x - rx, scene_y - ry, raw_angle);
                 auto refined = icp_refine::refineWithNormals(

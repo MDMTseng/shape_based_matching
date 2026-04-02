@@ -25,6 +25,7 @@ struct FeatureSet {
         int x, y;           ///< Position relative to template image origin
         int label;          ///< 8-bin orientation label (0-7)
         float theta;        ///< Orientation in degrees
+        float cornerness;   ///< 0 = pure edge, 1 = corner (from structure tensor)
     };
 
     struct PyramidLevel {

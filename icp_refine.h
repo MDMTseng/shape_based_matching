@@ -36,8 +36,9 @@ struct ICPConfig {
                                         ///< 1 = equal weight. 0.1 is a good default.
     float normal_angle_thresh = 45.0f;  ///< Max angle (degrees) between model and scene
                                         ///< edge normals to accept a correspondence.
-                                        ///< Prevents cross-part matching (e.g., vertical
-                                        ///< arm matching horizontal arm edges).
+    bool use_cornerness = false;   ///< Use per-feature cornerness to blend p2p/p2plane.
+                                        ///< Edge features (cornerness~0) → point-to-plane only.
+                                        ///< Corner features (cornerness~1) → add point-to-point.
     bool use_subpixel = false;     ///< Subpixel edge refinement via Hessian
     bool use_scale = false;        ///< Sim2 (with scale) vs SO2 (no scale)
 };
@@ -61,6 +62,7 @@ struct EdgeScene {
 struct EdgePoint {
     cv::Point2f pos;       ///< Position relative to template center
     cv::Point2f normal;    ///< Edge normal direction (unit vector)
+    float cornerness = 0;  ///< 0 = pure edge (1D), 1 = corner (2D constraint)
 };
 
 /// Extract model edge points with normals from a template image.

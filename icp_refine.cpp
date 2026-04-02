@@ -539,8 +539,15 @@ Pose2D refineWithNormals(const std::vector<EdgePoint>& model_edges,
             ATb[1] -= jp1 * e_plane;
             ATb[2] -= jp2 * e_plane;
 
-            // Point-to-point regularization
+            // Point-to-point regularization.
+            // If use_cornerness: edge features (cornerness~0) get point-to-plane only,
+            // corner features (cornerness~1) get strong point-to-point for 2D anchor.
             float w = config.point_to_point_weight;
+            if (config.use_cornerness) {
+                float c = model_edges[i].cornerness;
+                // Corners: full p2p weight. Edges: minimal p2p (just for stability).
+                w = c * 1.0f + (1.0f - c) * 0.01f;
+            }
             if (w > 0) {
                 ATA[0][0] += w * (my*my + mx*mx);
                 ATA[0][1] += w * (-my);

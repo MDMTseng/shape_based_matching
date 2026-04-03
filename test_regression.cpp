@@ -72,7 +72,6 @@ static std::map<std::string, float> g_metrics;
 static bool load_thresholds(const char* csv_path) {
     std::ifstream f(csv_path);
     if (!f.is_open()) {
-        // Try alternate paths
         std::string paths[] = {
             csv_path,
             std::string("../") + csv_path,
@@ -82,12 +81,36 @@ static bool load_thresholds(const char* csv_path) {
             f.open(p);
             if (f.is_open()) break;
         }
-        if (!f.is_open()) return false;
+        if (!f.is_open()) {
+            printf("ERROR: cannot open CSV file '%s'\n", csv_path);
+            return false;
+        }
     }
+
     std::string line;
-    std::getline(f, line); // skip header
+    int line_num = 0;
+    int errors = 0;
+
+    // Validate header
+    if (!std::getline(f, line)) {
+        printf("ERROR: CSV file '%s' is empty\n", csv_path);
+        return false;
+    }
+    line_num++;
+    // Strip trailing \r if present (Windows line endings)
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (line.find("id,type,metric,op,threshold") == std::string::npos) {
+        printf("ERROR: CSV header mismatch at line %d\n", line_num);
+        printf("  Expected: id,type,metric,op,threshold,description\n");
+        printf("  Got:      %s\n", line.c_str());
+        return false;
+    }
+
     while (std::getline(f, line)) {
+        line_num++;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
         if (line.empty() || line[0] == '#') continue;
+
         // Parse CSV: id,type,metric,op,threshold,description
         Threshold t;
         size_t p0 = 0;
@@ -98,13 +121,56 @@ static bool load_thresholds(const char* csv_path) {
             p0 = p1 + 1;
             return s;
         };
+
         t.id = next_field();
         t.type = next_field();
         t.metric = next_field();
         t.op = next_field();
-        try { t.threshold = std::stof(next_field()); } catch(...) { continue; }
+        std::string thresh_str = next_field();
         t.description = (p0 < line.size()) ? line.substr(p0) : "";
+
+        // Validate fields
+        if (t.id.empty()) {
+            printf("ERROR: line %d: empty id\n", line_num);
+            errors++; continue;
+        }
+        if (t.type != "check" && t.type != "warn") {
+            printf("ERROR: line %d (%s): type must be 'check' or 'warn', got '%s'\n",
+                   line_num, t.id.c_str(), t.type.c_str());
+            errors++; continue;
+        }
+        if (t.metric.empty()) {
+            printf("ERROR: line %d (%s): empty metric name\n", line_num, t.id.c_str());
+            errors++; continue;
+        }
+        if (t.op != "<" && t.op != ">" && t.op != "<=" && t.op != ">=" && t.op != "==") {
+            printf("ERROR: line %d (%s): invalid op '%s' (use <, >, <=, >=, ==)\n",
+                   line_num, t.id.c_str(), t.op.c_str());
+            errors++; continue;
+        }
+        try {
+            t.threshold = std::stof(thresh_str);
+        } catch (...) {
+            printf("ERROR: line %d (%s): invalid threshold '%s' (must be a number)\n",
+                   line_num, t.id.c_str(), thresh_str.c_str());
+            errors++; continue;
+        }
+
+        // Check for duplicate ids
+        for (auto& existing : g_thresholds) {
+            if (existing.id == t.id) {
+                printf("WARNING: line %d: duplicate id '%s' (overwriting previous)\n",
+                       line_num, t.id.c_str());
+                break;
+            }
+        }
+
         g_thresholds.push_back(t);
+    }
+
+    if (errors > 0) {
+        printf("CSV '%s': %d error(s), %d valid entries loaded\n",
+               csv_path, errors, (int)g_thresholds.size());
     }
     return !g_thresholds.empty();
 }

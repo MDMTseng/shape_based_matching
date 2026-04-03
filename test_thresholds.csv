@@ -34,10 +34,10 @@ id,type,metric,op,threshold,description
 # ======== 5. Sensitivity Analysis ========
 5a_lshape,check,lshape_worst_ang,<,1.5,L-shape not fragile — typical 1.0
 5b_line,check,line_worst_pos,>,0.4,Degenerate single line detected as high-sensitivity
-# ======== 6. Speed Benchmarks (warn only, ~2x actual) ========
-6_speed_coarse,warn,fhd10_coarse_ms,<,45.0,FHD 10-obj coarse speed (ms) — typical 22ms
-6_speed_icp,warn,fhd10_icp_ms,<,50.0,FHD 10-obj ICP speed (ms) — typical 23ms
-6_speed_roi,warn,fhd10_roi_ms,<,50.0,FHD 10-obj ROI speed (ms) — typical 24ms
+# ======== 6. Speed Benchmarks (warn at ~1.3x actual) ========
+6_speed_coarse,warn,fhd10_coarse_ms,<,30.0,FHD 10-obj coarse speed (ms) — typical 22ms
+6_speed_icp,warn,fhd10_icp_ms,<,30.0,FHD 10-obj ICP speed (ms) — typical 23ms
+6_speed_roi,warn,fhd10_roi_ms,<,32.0,FHD 10-obj ROI speed (ms) — typical 24ms
 # ======== 7. Cross-validation ========
 7a_roi_better_pos,check,roi_icp_pos_ratio,<,0.5,ROI position should be much better than ICP (ratio < 0.5)
 7b_icp_better_ang_clean,check,icp_roi_ang_ratio,<,1.5,ICP angle should be comparable or better than ROI on clean
@@ -78,16 +78,16 @@ id,type,metric,op,threshold,description
 9g_roi_n30b11_ang,check,roi_n30b11_ang,<,1.0,ROI angle at n=30 b=11 combined (deg)
 9g_roi_n30b11_pos,check,roi_n30b11_pos,<,0.5,ROI position at n=30 b=11 combined (px)
 9g_roi_n50b11_pos,warn,roi_n50b11_pos,<,2.0,ROI position at n=50 b=11 combined (px) — stress test
-# ======== 10. Multi-resolution Speed (warn only, ~2x actual) ========
-10_360p_coarse,warn,speed_360p_Coarse_ms,<,10.0,360p 3-obj coarse speed (ms) — typical 4ms
-10_360p_icp,warn,speed_360p_ICP_ms,<,10.0,360p 3-obj ICP speed (ms) — typical 4ms
-10_360p_roi,warn,speed_360p_ROI_ms,<,12.0,360p 3-obj ROI speed (ms) — typical 6ms
-10_1080p_coarse,warn,speed_1080p_Coarse_ms,<,70.0,1080p 20-obj coarse speed (ms) — typical 35ms
-10_1080p_icp,warn,speed_1080p_ICP_ms,<,70.0,1080p 20-obj ICP speed (ms) — typical 34ms
-10_1080p_roi,warn,speed_1080p_ROI_ms,<,80.0,1080p 20-obj ROI speed (ms) — typical 39ms
-10_20mp_coarse,warn,speed_20mp_Coarse_ms,<,360.0,20MP 20-obj coarse speed (ms) — typical 179ms
-10_20mp_icp,warn,speed_20mp_ICP_ms,<,360.0,20MP 20-obj ICP speed (ms) — typical 172ms
-10_20mp_roi,warn,speed_20mp_ROI_ms,<,360.0,20MP 20-obj ROI speed (ms) — typical 178ms
+# ======== 10. Multi-resolution Speed (warn at ~1.3x actual) ========
+10_360p_coarse,warn,speed_360p_Coarse_ms,<,6.0,360p 3-obj coarse speed (ms) — typical 4ms
+10_360p_icp,warn,speed_360p_ICP_ms,<,6.0,360p 3-obj ICP speed (ms) — typical 4ms
+10_360p_roi,warn,speed_360p_ROI_ms,<,8.0,360p 3-obj ROI speed (ms) — typical 6ms
+10_1080p_coarse,warn,speed_1080p_Coarse_ms,<,46.0,1080p 20-obj coarse speed (ms) — typical 35ms
+10_1080p_icp,warn,speed_1080p_ICP_ms,<,45.0,1080p 20-obj ICP speed (ms) — typical 34ms
+10_1080p_roi,warn,speed_1080p_ROI_ms,<,50.0,1080p 20-obj ROI speed (ms) — typical 39ms
+10_20mp_coarse,warn,speed_20mp_Coarse_ms,<,230.0,20MP 20-obj coarse speed (ms) — typical 179ms
+10_20mp_icp,warn,speed_20mp_ICP_ms,<,225.0,20MP 20-obj ICP speed (ms) — typical 172ms
+10_20mp_roi,warn,speed_20mp_ROI_ms,<,230.0,20MP 20-obj ROI speed (ms) — typical 178ms
 # Detection count (per-object GT matching within 50px)
 10_360p_roi_found,check,speed_360p_ROI_found,==,3,360p 3-obj ROI: all found
 10_1080p_roi_found,check,speed_1080p_ROI_found,>=,18,1080p 20-obj ROI: at least 18 found

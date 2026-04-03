@@ -88,3 +88,6 @@ target_link_libraries(test_regression ${OpenCV_LIBS})
 
 add_executable(test_variant line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp test_variant.cpp)
 target_link_libraries(test_variant ${OpenCV_LIBS})
+
+add_executable(test_20mp_noise line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp test_20mp_noise.cpp)
+target_link_libraries(test_20mp_noise ${OpenCV_LIBS})

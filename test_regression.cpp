@@ -234,23 +234,34 @@ static void draw_L(Mat& img, int cx, int cy, double angle, int color) {
         }
 }
 
-// Place template into scene via warpAffine, object center at (obj_cx, obj_cy).
+// Place template into scene via warpAffine with sub-pixel precision.
+// Object center at (obj_cx + sub_x, obj_cy + sub_y).
 static void place_object(const Mat& templ, Mat& scene,
                           int obj_cx, int obj_cy, double angle,
                           float sub_x = 0, float sub_y = 0) {
-    int tcx = templ.cols / 2, tcy = templ.rows / 2;
-    Mat M = getRotationMatrix2D(Point2f((float)tcx, (float)tcy), -angle, 1.0);
-    double* md = (double*)M.data;
-    md[2] += sub_x;
-    md[5] += sub_y;
+    float tcx = templ.cols / 2.0f, tcy = templ.rows / 2.0f;
+    float dst_cx = obj_cx + sub_x, dst_cy = obj_cy + sub_y;
+
+    // Warp template: rotate around center, output same size as template
+    Mat M_rot = getRotationMatrix2D(Point2f(tcx, tcy), -angle, 1.0);
+    // Add sub-pixel translation: shift so center lands at fractional offset
+    double* md = (double*)M_rot.data;
+    float frac_x = dst_cx - std::floor(dst_cx);
+    float frac_y = dst_cy - std::floor(dst_cy);
+    md[2] += frac_x;
+    md[5] += frac_y;
     Mat rot;
-    warpAffine(templ, rot, M, templ.size(), INTER_LINEAR, BORDER_CONSTANT, Scalar(0));
-    int ox = obj_cx - tcx, oy = obj_cy - tcy;
+    warpAffine(templ, rot, M_rot, Size(templ.cols + 2, templ.rows + 2),
+               INTER_LINEAR, BORDER_CONSTANT, Scalar(0));
+
+    // Copy into scene at integer position (sub-pixel handled by warpAffine)
+    int ox = (int)std::floor(dst_cx) - (int)tcx;
+    int oy = (int)std::floor(dst_cy) - (int)tcy;
     for (int r = 0; r < rot.rows; r++)
         for (int c = 0; c < rot.cols; c++) {
             int sy = oy + r, sx = ox + c;
             if (sy >= 0 && sy < scene.rows && sx >= 0 && sx < scene.cols && rot.at<uchar>(r, c) > 0)
-                scene.at<uchar>(sy, sx) = rot.at<uchar>(r, c);
+                scene.at<uchar>(sy, sx) = std::max(scene.at<uchar>(sy, sx), rot.at<uchar>(r, c));
         }
 }
 
@@ -1366,9 +1377,10 @@ static void test_resolution_speed(const sbm::FeatureSet& feat200, const Mat& tem
         // Build scene with noise=15 + blur k=3 (mild degradation)
         Mat scene(rc.height, rc.width, CV_8U, Scalar(30));
         for (int oi = 0; oi < n_obj; oi++) {
-            int ox = (int)(obj_defs[oi].rx * (rc.width - 200) + 100);
-            int oy = (int)(obj_defs[oi].ry * (rc.height - 200) + 100);
-            place_object(templ200, scene, ox, oy, obj_defs[oi].angle);
+            float fx = obj_defs[oi].rx * (rc.width - 200) + 100;
+            float fy = obj_defs[oi].ry * (rc.height - 200) + 100;
+            place_object(templ200, scene, (int)fx, (int)fy, obj_defs[oi].angle,
+                         fx - std::floor(fx), fy - std::floor(fy));
         }
         scene = add_noise(scene, 15);
         GaussianBlur(scene, scene, Size(3, 3), 0);

@@ -48,6 +48,107 @@ static FILE* g_log = nullptr;
 } while(0)
 
 // ============================================================
+// CSV-driven threshold system
+// ============================================================
+#include <map>
+#include <string>
+#include <vector>
+#include <fstream>
+
+struct Threshold {
+    std::string id;
+    std::string type;       // "check" or "warn"
+    std::string metric;     // key into measured values
+    std::string op;         // "<", ">", "<=", ">=", "=="
+    float threshold;
+    std::string description;
+};
+
+static std::vector<Threshold> g_thresholds;
+static std::map<std::string, float> g_metrics;
+
+static bool load_thresholds(const char* csv_path) {
+    std::ifstream f(csv_path);
+    if (!f.is_open()) {
+        // Try alternate paths
+        std::string paths[] = {
+            csv_path,
+            std::string("../") + csv_path,
+            std::string("../../") + csv_path
+        };
+        for (auto& p : paths) {
+            f.open(p);
+            if (f.is_open()) break;
+        }
+        if (!f.is_open()) return false;
+    }
+    std::string line;
+    std::getline(f, line); // skip header
+    while (std::getline(f, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        // Parse CSV: id,type,metric,op,threshold,description
+        Threshold t;
+        size_t p0 = 0;
+        auto next_field = [&]() -> std::string {
+            size_t p1 = line.find(',', p0);
+            if (p1 == std::string::npos) p1 = line.size();
+            std::string s = line.substr(p0, p1 - p0);
+            p0 = p1 + 1;
+            return s;
+        };
+        t.id = next_field();
+        t.type = next_field();
+        t.metric = next_field();
+        t.op = next_field();
+        try { t.threshold = std::stof(next_field()); } catch(...) { continue; }
+        t.description = (p0 < line.size()) ? line.substr(p0) : "";
+        g_thresholds.push_back(t);
+    }
+    return !g_thresholds.empty();
+}
+
+// Record a measured value
+static void RECORD(const char* metric, float value) {
+    g_metrics[metric] = value;
+    LOG("  METRIC: %s = %.4f\n", metric, value);
+}
+
+// Evaluate all thresholds against measured values
+static void evaluate_thresholds() {
+    printf("\n===== THRESHOLD EVALUATION =====\n");
+    LOG("\n===== THRESHOLD EVALUATION =====\n");
+
+    for (auto& t : g_thresholds) {
+        auto it = g_metrics.find(t.metric);
+        if (it == g_metrics.end()) {
+            printf("  SKIP: %s — metric '%s' not measured\n", t.id.c_str(), t.metric.c_str());
+            LOG("SKIP: %s — metric '%s' not measured\n", t.id.c_str(), t.metric.c_str());
+            continue;
+        }
+        float val = it->second;
+        bool pass = false;
+        if (t.op == "<")       pass = val < t.threshold;
+        else if (t.op == ">")  pass = val > t.threshold;
+        else if (t.op == "<=") pass = val <= t.threshold;
+        else if (t.op == ">=") pass = val >= t.threshold;
+        else if (t.op == "==") pass = std::abs(val - t.threshold) < 0.001f;
+
+        char msg[512];
+        snprintf(msg, sizeof(msg), "%s: %s = %.4f %s %.4f — %s",
+                 t.id.c_str(), t.metric.c_str(), val, t.op.c_str(), t.threshold,
+                 t.description.c_str());
+
+        if (t.type == "warn") {
+            if (!pass) { g_warn++; printf("  WARN: %s\n", msg); LOG("WARN: %s\n", msg); }
+            else       { printf("  OK:   %s\n", msg); LOG("OK:   %s\n", msg); }
+        } else {
+            if (pass)  { g_pass++; printf("  PASS: %s\n", msg); LOG("PASS: %s\n", msg); }
+            else       { g_fail++; printf("  FAIL: %s\n", msg); LOG("FAIL: %s\n", msg); }
+        }
+    }
+}
+
+// ============================================================
 // Helpers
 // ============================================================
 
@@ -215,6 +316,9 @@ static void test_coarse_matching(const sbm::FeatureSet& feat200, const Mat& temp
             }
         }
 
+        RECORD("coarse_detect_count", (float)n_found);
+        RECORD("coarse_worst_ang", worst_ang);
+        RECORD("coarse_worst_pos", worst_pos);
         CHECK(n_found == n_angles,
               "1a Detection: %d/%d objects found at various angles", n_found, n_angles);
         CHECK(worst_ang < 15.0f,
@@ -272,6 +376,7 @@ static void test_coarse_matching(const sbm::FeatureSet& feat200, const Mat& temp
                 }
             }
         }
+        RECORD("multi_obj_found", (float)matched);
         CHECK(matched >= 9,
               "1b Multi-object: %d/%d found with score>40 (expect >=9)", matched, n_objs);
     }
@@ -299,6 +404,7 @@ static void test_coarse_matching(const sbm::FeatureSet& feat200, const Mat& temp
             ms = std::chrono::duration<double, std::milli>(
                 std::chrono::high_resolution_clock::now() - t0).count();
         }
+        RECORD("coarse_fhd_ms", (float)ms);
         CHECK(ms < 100.0,
               "1c Speed: FHD single match %.1fms (expect <100ms)", ms);
     }
@@ -370,14 +476,18 @@ static void test_icp_refinement(const sbm::FeatureSet& feat200, const Mat& templ
         float mean_ang = count > 0 ? total_ang_err / count : 999;
         float mean_pos = count > 0 ? total_pos_err / count : 999;
 
+        RECORD("icp_ang_mean", mean_ang);
         CHECK(mean_ang < 0.2f,
               "2a Angle mean: %.3fdeg across %d angles (expect <0.2)", mean_ang, count);
+        RECORD("icp_ang_worst", worst_ang);
         CHECK(worst_ang < 1.0f,
               "2a Angle worst: %.3fdeg (expect <1.0)", worst_ang);
+        RECORD("icp_pos_mean", mean_pos);
         CHECK(mean_pos < 1.0f,
               "2a Position mean: %.3fpx (expect ~0.65)", mean_pos);
 
         float worst_old_pos = *std::max_element(old_fail_pos, old_fail_pos + 6);
+        RECORD("icp_old_fail_worst_pos", worst_old_pos);
         CHECK(worst_old_pos < 2.0f,
               "2b No divergence: old failure angles worst_pos=%.2fpx (expect <2.0)", worst_old_pos);
         for (int k = 0; k < 6; k++) {
@@ -419,6 +529,7 @@ static void test_icp_refinement(const sbm::FeatureSet& feat200, const Mat& templ
             }
         }
         float mean_ang = count > 0 ? total_ang_err / count : 999;
+        RECORD("icp_noise20_ang_mean", mean_ang);
         CHECK(mean_ang < 1.0f,
               "2c Noise sigma=20: mean_ang=%.2fdeg (expect <1.0)", mean_ang);
     }
@@ -446,6 +557,7 @@ static void test_icp_refinement(const sbm::FeatureSet& feat200, const Mat& templ
             ms = std::chrono::duration<double, std::milli>(
                 std::chrono::high_resolution_clock::now() - t0).count() / 10.0;
         }
+        RECORD("icp_250_ms", (float)ms);
         CHECK(ms < 10.0,
               "2d Speed: 250x250 ICP total %.1fms (expect <10ms)", ms);
     }
@@ -513,15 +625,20 @@ static void test_roi_refinement(const sbm::FeatureSet& feat200, const Mat& templ
         float mean_ang = total_ang_err / count;
         float mean_pos = total_pos_err / count;
 
+        RECORD("roi_ang_mean", mean_ang);
         CHECK(mean_ang < 0.15f,
               "3a Angle mean: %.3fdeg across %d angles (expect <0.15)", mean_ang, count);
+        RECORD("roi_ang_worst", worst_ang);
         CHECK(worst_ang < 0.5f,
               "3a Angle worst: %.3fdeg (expect <0.5)", worst_ang);
+        RECORD("roi_pos_mean", mean_pos);
         CHECK(mean_pos < 0.1f,
               "3a Position mean: %.3fpx (expect <0.1)", mean_pos);
 
+        RECORD("roi_pca_65_err", err_65);
         CHECK(err_65 < 1.0f,
               "3b PCA fix 65deg: err=%.3fdeg (was 5+, expect <1.0)", err_65);
+        RECORD("roi_pca_70_err", err_70);
         CHECK(err_70 < 1.0f,
               "3b PCA fix 70deg: err=%.3fdeg (was 5+, expect <1.0)", err_70);
     }
@@ -561,6 +678,7 @@ static void test_roi_refinement(const sbm::FeatureSet& feat200, const Mat& templ
             }
         }
         float mean_pos = total_pos_err / count;
+        RECORD("roi_subpx_mean_pos", mean_pos);
         CHECK(mean_pos < 0.1f,
               "3c Sub-pixel: mean_pos=%.4fpx over %d offsets (expect <0.1)", mean_pos, count);
     }
@@ -594,6 +712,7 @@ static void test_roi_refinement(const sbm::FeatureSet& feat200, const Mat& templ
             count_30++;
         }
         float mean_30 = total_pos_30 / count_30;
+        RECORD("roi_noise30_mean_pos", mean_30);
         CHECK(mean_30 < 0.2f,
               "3d Noise sigma=30: mean_pos=%.3fpx (expect <0.2)", mean_30);
 
@@ -624,6 +743,7 @@ static void test_roi_refinement(const sbm::FeatureSet& feat200, const Mat& templ
             count_40++;
         }
         float mean_40 = total_pos_40 / count_40;
+        RECORD("roi_noise40_mean_pos", mean_40);
         CHECK(mean_40 < 0.3f,
               "3d Noise sigma=40: mean_pos=%.3fpx (expect <0.3)", mean_40);
     }
@@ -651,6 +771,7 @@ static void test_roi_refinement(const sbm::FeatureSet& feat200, const Mat& templ
                 std::chrono::high_resolution_clock::now() - t0).count() / 100.0;
         }
 
+        RECORD("roi_refine_ms", (float)ms);
         CHECK(ms < 3.0,
               "3e Speed: ROI refine %.2fms/call (expect <3ms)", ms);
     }
@@ -671,12 +792,14 @@ static void test_feature_selection(const sbm::FeatureSet& feat200) {
         f.cached_opt_max_points = 0;
 
         auto pts8 = f.selectOptimizedPoints(8);
+        RECORD("opt_pts_8_count", (float)(int)pts8.size());
         CHECK((int)pts8.size() == 8 || ((int)pts8.size() > 0 && (int)pts8.size() <= 8),
               "4a selectOptimizedPoints(8) returned %d (expect <=8, >0)", (int)pts8.size());
 
         f.cached_opt_points.clear();
         f.cached_opt_max_points = 0;
         auto pts15 = f.selectOptimizedPoints(15);
+        RECORD("opt_pts_15_count", (float)(int)pts15.size());
         CHECK((int)pts15.size() > 0 && (int)pts15.size() <= 15,
               "4a selectOptimizedPoints(15) returned %d (expect <=15, >0)", (int)pts15.size());
     }
@@ -684,6 +807,7 @@ static void test_feature_selection(const sbm::FeatureSet& feat200) {
     // --- 4b: Sensitivity ---
     {
         auto sens = feat200.analyzeSensitivity();
+        RECORD("opt_pts_worst_ang", sens.worst_angle_sens);
         CHECK(sens.worst_angle_sens < 1.1f,
               "4b Sensitivity: worst_ang=%.2f (expect <1.1 for L-shape)", sens.worst_angle_sens);
     }
@@ -709,6 +833,7 @@ static void test_feature_selection(const sbm::FeatureSet& feat200) {
                 feat200.refine_points[best_j].type == sbm::FeatureSet::RefinePt::CORNER)
                 n_corners++;
         }
+        RECORD("opt_pts_corner_count", (float)n_corners);
         CHECK(n_corners >= 2,
               "4c Corner priority: %d corners in 8 selected (expect >=2)", n_corners);
     }
@@ -729,6 +854,7 @@ static void test_feature_selection(const sbm::FeatureSet& feat200) {
         double ms_cached = std::chrono::duration<double, std::milli>(
             std::chrono::high_resolution_clock::now() - t0).count();
 
+        RECORD("cache_consistent", pts_first.size() == pts_cached.size() ? 1.0f : 0.0f);
         CHECK(pts_first.size() == pts_cached.size(),
               "4d Cache: same size (%d vs %d)", (int)pts_first.size(), (int)pts_cached.size());
         LOG("  Cache timing: first=%.3fms cached=%.4fms\n", ms_first, ms_cached);
@@ -745,6 +871,7 @@ static void test_sensitivity(const sbm::FeatureSet& feat200) {
     // --- 5a: L-shape should not be fragile ---
     {
         auto sens = feat200.analyzeSensitivity();
+        RECORD("lshape_worst_ang", sens.worst_angle_sens);
         CHECK(sens.worst_angle_sens < 1.1f,
               "5a L-shape not fragile: worst_ang=%.2f (expect <1.1)", sens.worst_angle_sens);
         LOG("  Diagnosis: %s\n", sens.diagnosis.c_str());
@@ -761,6 +888,7 @@ static void test_sensitivity(const sbm::FeatureSet& feat200) {
         if (!feat_line.refine_points.empty()) {
             feat_line.selectOptimizedPoints(8);
             auto sens_line = feat_line.analyzeSensitivity();
+            RECORD("line_worst_pos", sens_line.worst_pos_sens);
             CHECK(sens_line.worst_pos_sens > 0.5f,
                   "5b Degenerate line: worst_pos=%.2f (expect >0.5)", sens_line.worst_pos_sens);
             LOG("  Line diagnosis: %s\n", sens_line.diagnosis.c_str());
@@ -823,6 +951,10 @@ static void test_speed_benchmarks(const sbm::FeatureSet& feat200, const Mat& tem
             avg_ms = total_ms / 5.0;
         }
 
+        if (bm.mode == sbm::RefineMode::None) RECORD("fhd10_coarse_ms", (float)avg_ms);
+        else if (bm.mode == sbm::RefineMode::ICP) RECORD("fhd10_icp_ms", (float)avg_ms);
+        else if (bm.mode == sbm::RefineMode::ROI) RECORD("fhd10_roi_ms", (float)avg_ms);
+
         double threshold_2x = bm.expected_ms * 2.0;
         WARN_IF(avg_ms > threshold_2x,
                 "6 %s: %.1fms (expected ~%.0fms, >2x=%.0fms)",
@@ -842,6 +974,8 @@ int main() {
 
     g_log = fopen("output/regression_log.txt", "w");
     if (!g_log) g_log = stderr;
+
+    load_thresholds("test_thresholds.csv");
 
     printf("===== SHAPE MATCHING REGRESSION TEST =====\n");
     LOG("===== SHAPE MATCHING REGRESSION TEST =====\n");
@@ -865,6 +999,8 @@ int main() {
     test_feature_selection(feat200);
     test_sensitivity(feat200);
     test_speed_benchmarks(feat200, templ200);
+
+    evaluate_thresholds();
 
     // --- Summary ---
     printf("\n===== SUMMARY =====\n");

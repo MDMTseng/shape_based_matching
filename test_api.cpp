@@ -6,6 +6,10 @@
 #include <opencv2/imgcodecs.hpp>
 #include <chrono>
 #include <cstdio>
+#include <cmath>
+
+static int g_fail = 0;
+#define CHECK(cond, msg) do { if (!(cond)) { fprintf(stderr, "FAIL: %s\n", msg); g_fail++; } } while(0)
 
 using namespace cv;
 
@@ -149,5 +153,45 @@ int main() {
     imwrite(out_dir + "api_test_result.jpg", vis);
     printf("\n  Saved: %sapi_test_result.jpg\n", out_dir.c_str());
 
-    return 0;
+    // Assertions
+    {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "API test: expected >=9 results (9 objects), got %d", (int)results.size());
+        CHECK((int)results.size() >= 9, msg);
+    }
+    // Check that all scores are reasonable (>= min_score threshold)
+    for (auto& r : results) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "API test: score %.1f < 40 for model %s", r.score, r.model_name.c_str());
+        CHECK(r.score >= 40.0f, msg);
+    }
+    // Check angle errors against ground truth
+    // Note: T-shape has angle_offset=90, so r.angle is user-space angle.
+    // GT angles in 'objects' are raw angles. Must account for offset.
+    for (auto& r : results) {
+        // Find closest GT object
+        float best_ae = 999;
+        float offset = (r.model_name == "T-shape") ? 90.0f : 0.0f;
+        for (auto& obj : objects) {
+            if ((r.model_name == "L-shape" && obj.type[0] == 'L') ||
+                (r.model_name == "T-shape" && obj.type[0] == 'T')) {
+                float dist = std::sqrt((r.x - obj.x)*(r.x - obj.x) + (r.y - obj.y)*(r.y - obj.y));
+                if (dist < 80) {
+                    float gt_user_angle = obj.angle + offset;
+                    float ae = r.angle - gt_user_angle;
+                    if (ae > 180) ae -= 360; if (ae < -180) ae += 360;
+                    if (std::abs(ae) < std::abs(best_ae)) best_ae = ae;
+                }
+            }
+        }
+        if (std::abs(best_ae) < 900) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "API test: angle error %.1f > 5 deg for %s",
+                     best_ae, r.model_name.c_str());
+            CHECK(std::abs(best_ae) < 5.0f, msg);
+        }
+    }
+
+    printf(g_fail ? "\n*** %d CHECKS FAILED ***\n" : "\nAll checks passed.\n", g_fail);
+    return g_fail ? 1 : 0;
 }

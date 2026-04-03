@@ -6,7 +6,11 @@
 #include <opencv2/imgproc.hpp>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <cmath>
+
+static int g_fail = 0;
+#define CHECK(cond, msg) do { if (!(cond)) { fprintf(stderr, "FAIL: %s\n", msg); g_fail++; } } while(0)
 
 using namespace cv;
 using namespace std;
@@ -473,7 +477,20 @@ int main() {
            sum_signed_angle/total, sum_signed_dx/total, sum_signed_dy/total,
            sum_icp_signed_angle/total, sum_icp_signed_dx/total, sum_icp_signed_dy/total);
 
+    // Assert: clean case should have >= 95% of angles within 2 deg after ICP
+    if (strcmp(cond.name, "clean") == 0) {
+        float pct_icp = 100.0f * good_icp / total;
+        char msg[128];
+        snprintf(msg, sizeof(msg), "ICP clean: %.0f%% within 2 deg, expected >=95%%", pct_icp);
+        CHECK(pct_icp >= 95.0f, msg);
+
+        float mean_icp = sum_err_icp / total;
+        snprintf(msg, sizeof(msg), "ICP clean: mean angle error %.2f >= 2.0 deg", mean_icp);
+        CHECK(mean_icp < 2.0f, msg);
+    }
+
     } // end conditions loop
 
-    return 0;
+    printf(g_fail ? "\n*** %d CHECKS FAILED ***\n" : "\nAll checks passed.\n", g_fail);
+    return g_fail ? 1 : 0;
 }

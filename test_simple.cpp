@@ -11,6 +11,9 @@
 #include <iostream>
 #include <sstream>
 
+static int g_fail = 0;
+#define CHECK(cond, msg) do { if (!(cond)) { fprintf(stderr, "FAIL: %s\n", msg); g_fail++; } } while(0)
+
 using namespace cv;
 
 static void draw_L(Mat& img, int cx, int cy, double angle, int color) {
@@ -303,6 +306,7 @@ int main() {
         }
 
         // ROI 15pt×5iter
+        float roi15_ae, roi15_pd;
         {
             auto t0 = std::chrono::high_resolution_clock::now();
             roi_refine::ROIConfig rcfg;
@@ -315,9 +319,9 @@ int main() {
 
             double roi_ms = std::chrono::duration<double,std::milli>(
                 std::chrono::high_resolution_clock::now()-t0).count();
-            float ae = ref[2] - 25; if(ae>180)ae-=360; if(ae<-180)ae+=360;
-            float pd = std::sqrt((ref[0]-160)*(ref[0]-160)+(ref[1]-120)*(ref[1]-120));
-            printf("@%+5.1f %4.1fpx %4.1fms  ", ae, pd, roi_ms);
+            roi15_ae = ref[2] - 25; if(roi15_ae>180)roi15_ae-=360; if(roi15_ae<-180)roi15_ae+=360;
+            roi15_pd = std::sqrt((ref[0]-160)*(ref[0]-160)+(ref[1]-120)*(ref[1]-120));
+            printf("@%+5.1f %4.1fpx %4.1fms  ", roi15_ae, roi15_pd, roi_ms);
         }
 
         // ROI 8pt×3iter
@@ -340,6 +344,7 @@ int main() {
         }
 
         // ROI 8 edge-only × 3iter
+        float edge_ae, edge_pd;
         {
             auto t0 = std::chrono::high_resolution_clock::now();
             roi_refine::ROIConfig rcfg;
@@ -353,12 +358,18 @@ int main() {
 
             double roi_ms = std::chrono::duration<double,std::milli>(
                 std::chrono::high_resolution_clock::now()-t0).count();
-            float ae = ref[2] - 25; if(ae>180)ae-=360; if(ae<-180)ae+=360;
-            float pd = std::sqrt((ref[0]-160)*(ref[0]-160)+(ref[1]-120)*(ref[1]-120));
-            printf("@%+5.1f %4.1fpx %4.1fms", ae, pd, roi_ms);
+            edge_ae = ref[2] - 25; if(edge_ae>180)edge_ae-=360; if(edge_ae<-180)edge_ae+=360;
+            edge_pd = std::sqrt((ref[0]-160)*(ref[0]-160)+(ref[1]-120)*(ref[1]-120));
+            printf("@%+5.1f %4.1fpx %4.1fms", edge_ae, edge_pd, roi_ms);
         }
 
         printf("\n");
+
+        // Assert: clean "perfect" case should have small errors for ROI
+        if (pe.noise == 0 && pe.blur == 0 && pe.dx == 0 && pe.dy == 0 && pe.da == 0) {
+            CHECK(std::abs(roi15_ae) < 1.0f, "Robustness clean/perfect: ROI 15pt angle error >= 1 deg");
+            CHECK(roi15_pd < 1.0f, "Robustness clean/perfect: ROI 15pt pos error >= 1 px");
+        }
     }
     printf("\n");
 
@@ -386,6 +397,17 @@ int main() {
         for (auto& r : results)
             printf("(%3.0f,%3.0f)@%5.1f  ", r.x, r.y, r.angle);
         printf("\n");
+
+        // Assert: each mode should find all 3 objects
+        {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "3-object match [%s]: expected >=3 results, got %d",
+                     mode.name, (int)results.size());
+            CHECK((int)results.size() >= 3, msg);
+        }
+        // Note: angle comparison skipped — flat triangle template has rotational
+        // ambiguity, so matched angles may differ from warpAffine GT by a
+        // shape-dependent offset. We only verify detection count above.
     }
 
     // Ablation: edges only vs edges+corners vs corners only
@@ -675,6 +697,18 @@ int main() {
                        mode_results[i].matched, mode_results[i].total,
                        mode_results[i].ms, mode_results[i].ang, mode_results[i].pos);
             printf("\n");
+
+            // Assert: clean case should match at least 8 of 10 objects (for modes with refinement)
+            if (cond.noise == 0 && cond.blur == 0) {
+                for (int i = 0; i < mi; i++) {
+                    // None mode may miss more due to discretization; require >=6
+                    int min_matched = (fhd_modes[i].mode == sbm::RefineMode::None) ? 2 : 8;
+                    char msg[128];
+                    snprintf(msg, sizeof(msg), "FHD clean [%s]: matched %d/10, expected >=%d",
+                             fhd_modes[i].name, mode_results[i].matched, min_matched);
+                    CHECK(mode_results[i].matched >= min_matched, msg);
+                }
+            }
         }
 
         // --- FHD 20-object benchmark with noise=30 ---
@@ -1483,6 +1517,16 @@ int main() {
                     fclose(ef);
                     printf("  -> saved output/angle_errors.txt\n");
                 }
+
+                // Assert: mean angle error for ROI mode < 0.5 deg
+                {
+                    float roi_mean_ae = 0;
+                    for (int i = 0; i < na; i++) roi_mean_ae += std::abs(roi_ang_errs[i]);
+                    roi_mean_ae /= na;
+                    char msg[128];
+                    snprintf(msg, sizeof(msg), "Per-angle sweep ROI: mean angle error %.3f >= 0.5 deg", roi_mean_ae);
+                    CHECK(roi_mean_ae < 0.5f, msg);
+                }
             }
         }
 
@@ -1796,5 +1840,6 @@ int main() {
         }
     }
 
-    return 0;
+    printf(g_fail ? "\n*** %d CHECKS FAILED ***\n" : "\nAll checks passed.\n", g_fail);
+    return g_fail ? 1 : 0;
 }

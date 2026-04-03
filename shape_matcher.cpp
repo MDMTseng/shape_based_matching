@@ -394,164 +394,94 @@ std::vector<cv::Point2f> FeatureSet::selectOptimizedPoints(int max_points) const
     if (refine_points.empty() || templ_image.empty())
         return result;
 
-    // Collect all valid candidate points with margin check
-    float max_lev = std::sqrt((float)(templ_width*templ_width + templ_height*templ_height)) / 2.0f;
-    struct CandPt { int rp_idx; float corn; float score; };
-    std::vector<CandPt> all_cands;
+    // Minimum spacing between selected features
+    float min_dist = std::max(templ_width, templ_height) / 16.0f * 1.5f;
+    float min_dist_sq = min_dist * min_dist;
+
+    // Collect all valid candidates, split into corners and edges
+    struct Cand { int rp_idx; float px, py, R; };
+    std::vector<Cand> corners, edges;
     for (size_t i = 0; i < refine_points.size(); i++) {
         auto& rp = refine_points[i];
         if (std::abs(rp.px) > templ_width/2.0f - 5 || std::abs(rp.py) > templ_height/2.0f - 5)
             continue;
-        float lev = std::sqrt(rp.px*rp.px + rp.py*rp.py);
-        // Score: corners high priority, then distance from center
-        // cornerness [0,1] boosted to dominate, leverage normalized to [0,1]
-        float score = rp.cornerness * kCornerScoreMultiplier + lev / (max_lev + 1e-6f);
-        all_cands.push_back({(int)i, rp.cornerness, score});
+        Cand c;
+        c.rp_idx = (int)i;
+        c.px = rp.px; c.py = rp.py;
+        c.R = std::sqrt(rp.px*rp.px + rp.py*rp.py);
+        if (rp.cornerness > kCornerThreshold) corners.push_back(c);
+        else edges.push_back(c);
     }
 
-    // Initial greedy selection: corners + far-from-center first
-    // min spacing = template_size / 16 * 1.5 (ensures features aren't clustered)
-    float min_dist = std::max(templ_width, templ_height) / 16.0f * 1.5f;
-    float min_dist_sq = min_dist * min_dist;
-    std::sort(all_cands.begin(), all_cands.end(),
-              [](const CandPt& a, const CandPt& b){ return a.score > b.score; });
+    // Sort corners by R descending (farthest corners = most angular leverage)
+    std::sort(corners.begin(), corners.end(),
+              [](const Cand& a, const Cand& b) { return a.R > b.R; });
 
-    std::vector<int> selected;  // indices into refine_points
-    for (auto& c : all_cands) {
-        if ((int)selected.size() >= max_points) break;
-        auto& rp = refine_points[c.rp_idx];
-        cv::Point2f p(rp.px, rp.py);
-        bool too_close = false;
+    std::vector<int> selected;
+    auto isTooClose = [&](float px, float py) {
         for (int si : selected) {
-            float dx = p.x - refine_points[si].px, dy = p.y - refine_points[si].py;
-            if (dx*dx + dy*dy < min_dist_sq) { too_close = true; break; }
+            float dx = px - refine_points[si].px, dy = py - refine_points[si].py;
+            if (dx*dx + dy*dy < min_dist_sq) return true;
         }
-        if (too_close) continue;
+        return false;
+    };
+
+    // Phase 1: Seed with well-spaced corners (farthest first).
+    // Corners are preferred first because matchTemplate gives sharp 2D peaks
+    // (reliable position in both directions). The det(J^T J) metric doesn't
+    // capture this — it only sees Jacobian structure, not match quality.
+    for (auto& c : corners) {
+        if ((int)selected.size() >= max_points) break;
+        if (isTooClose(c.px, c.py)) continue;
         selected.push_back(c.rp_idx);
+    }
+
+    // Phase 2: Fill remaining slots with edges via D-optimal greedy selection.
+    // Each step picks the edge that maximizes det(J^T J) — this naturally
+    // prefers edges with novel normal directions and high leverage.
+    auto computeDetJTJ = [&](const std::vector<int>& sel) -> float {
+        float JTJ[3][3] = {};
+        for (int idx : sel) {
+            SensConstraint sc;
+            if (!buildConstraint(*this, idx, sc)) continue;
+            float nx = sc.normal.x, ny = sc.normal.y;
+            float j0 = -sc.src.y * nx + sc.src.x * ny;
+            float j1 = nx, j2 = ny;
+            JTJ[0][0]+=j0*j0; JTJ[0][1]+=j0*j1; JTJ[0][2]+=j0*j2;
+            JTJ[1][1]+=j1*j1; JTJ[1][2]+=j1*j2;
+            JTJ[2][2]+=j2*j2;
+        }
+        JTJ[1][0]=JTJ[0][1]; JTJ[2][0]=JTJ[0][2]; JTJ[2][1]=JTJ[1][2];
+        for (int i=0;i<3;i++) JTJ[i][i] += kSolverRegularization;
+        return JTJ[0][0]*(JTJ[1][1]*JTJ[2][2]-JTJ[1][2]*JTJ[2][1])
+             - JTJ[0][1]*(JTJ[1][0]*JTJ[2][2]-JTJ[1][2]*JTJ[2][0])
+             + JTJ[0][2]*(JTJ[1][0]*JTJ[2][1]-JTJ[1][1]*JTJ[2][0]);
+    };
+
+    while ((int)selected.size() < max_points) {
+        float best_det = -1e30f;
+        int best_cand = -1;
+
+        for (auto& e : edges) {
+            bool used = false;
+            for (int si : selected) if (si == e.rp_idx) { used = true; break; }
+            if (used) continue;
+            if (isTooClose(e.px, e.py)) continue;
+
+            auto trial = selected;
+            trial.push_back(e.rp_idx);
+            float det = computeDetJTJ(trial);
+            if (det > best_det) { best_det = det; best_cand = e.rp_idx; }
+        }
+
+        if (best_cand < 0) break;
+        selected.push_back(best_cand);
     }
 
     if ((int)selected.size() < 3) {
         for (int idx : selected)
             result.push_back(cv::Point2f(refine_points[idx].px, refine_points[idx].py));
         return result;
-    }
-
-    // Build constraints for selected points
-    auto buildSet = [&](const std::vector<int>& sel) -> std::vector<SensConstraint> {
-        std::vector<SensConstraint> cs;
-        for (int idx : sel) {
-            SensConstraint c;
-            if (buildConstraint(*this, idx, c))
-                cs.push_back(c);
-        }
-        return cs;
-    };
-
-    auto inSelected = [&](int idx) {
-        for (int s : selected) if (s == idx) return true;
-        return false;
-    };
-
-    // Analytic leverage computation (hat matrix diagonal).
-    // For constraint set cs, compute J^T J, invert, then h_ii = J_i * (J^T J)^{-1} * J_i^T.
-    // This replaces the O(N^2) perturbation-based sensitivity with O(N) after one 3x3 inversion.
-    auto computeLeverages = [&](const std::vector<SensConstraint>& cs,
-                                std::vector<float>& leverages) {
-        // Build J^T J (3x3)
-        float JTJ[3][3] = {};
-        std::vector<float> j0s(cs.size()), j1s(cs.size()), j2s(cs.size());
-        for (size_t i = 0; i < cs.size(); i++) {
-            auto& c = cs[i];
-            float nx = c.normal.x, ny = c.normal.y;
-            j0s[i] = -c.src.y * nx + c.src.x * ny;  // angular Jacobian
-            j1s[i] = nx;
-            j2s[i] = ny;
-            JTJ[0][0] += j0s[i]*j0s[i]; JTJ[0][1] += j0s[i]*j1s[i]; JTJ[0][2] += j0s[i]*j2s[i];
-            JTJ[1][1] += j1s[i]*j1s[i]; JTJ[1][2] += j1s[i]*j2s[i];
-            JTJ[2][2] += j2s[i]*j2s[i];
-        }
-        JTJ[1][0]=JTJ[0][1]; JTJ[2][0]=JTJ[0][2]; JTJ[2][1]=JTJ[1][2];
-        for (int i=0;i<3;i++) JTJ[i][i] += kSolverRegularization;
-
-        // Invert 3x3 via cv::solve
-        cv::Mat A(3,3,CV_32F,JTJ), Ainv;
-        cv::invert(A, Ainv, cv::DECOMP_LU);
-        float* M = (float*)Ainv.data;  // row-major 3x3
-
-        // Compute leverage h_ii = J_i * Ainv * J_i^T for each feature
-        leverages.resize(cs.size());
-        for (size_t i = 0; i < cs.size(); i++) {
-            // s = Ainv * J_i^T  (3x1)
-            float s0 = M[0]*j0s[i] + M[1]*j1s[i] + M[2]*j2s[i];
-            float s1 = M[3]*j0s[i] + M[4]*j1s[i] + M[5]*j2s[i];
-            float s2 = M[6]*j0s[i] + M[7]*j1s[i] + M[8]*j2s[i];
-            // h_ii = J_i * s = j0*s0 + j1*s1 + j2*s2
-            leverages[i] = j0s[i]*s0 + j1s[i]*s1 + j2s[i]*s2;
-        }
-    };
-
-    // Compute max leverage for a candidate set
-    auto computeMaxLeverage = [&](const std::vector<int>& sel) -> float {
-        auto cs = buildSet(sel);
-        if ((int)cs.size() < 3) return 1e9f;
-        std::vector<float> levs;
-        computeLeverages(cs, levs);
-        float mx = 0;
-        for (auto h : levs) mx = std::max(mx, h);
-        return mx;
-    };
-
-    // Fedorov exchange: swap least-leverage with candidate that minimizes max leverage
-    float opt_min_dist_sq = (min_dist * kOptMinDistFactor) * (min_dist * kOptMinDistFactor);
-
-    for (int opt_iter = 0; opt_iter < kMaxOptIterations; ++opt_iter) {
-        auto baseline = buildSet(selected);
-        if ((int)baseline.size() < 3) break;
-
-        std::vector<float> leverages;
-        computeLeverages(baseline, leverages);
-
-        int least_idx = 0;
-        float least_lev = 1e9f;
-        float worst_lev = 0;
-        for (size_t fi = 0; fi < leverages.size(); fi++) {
-            worst_lev = std::max(worst_lev, leverages[fi]);
-            // Don't swap out corners
-            bool is_corner = refine_points[selected[fi]].cornerness > kCornerThreshold;
-            if (leverages[fi] < least_lev && !is_corner) {
-                least_lev = leverages[fi]; least_idx = (int)fi;
-            }
-        }
-
-        if (least_lev > 1e-6f && worst_lev / least_lev < kSensitivityBalanceRatio) break;
-
-        int remove_rp_idx = selected[least_idx];
-        float best_worst = worst_lev;
-        int best_cand = -1;
-
-        for (auto& c : all_cands) {
-            if (inSelected(c.rp_idx)) continue;
-            auto& rp = refine_points[c.rp_idx];
-            cv::Point2f p(rp.px, rp.py);
-            bool too_close = false;
-            for (int si : selected) {
-                if (si == remove_rp_idx) continue;
-                float dx = p.x - refine_points[si].px, dy = p.y - refine_points[si].py;
-                if (dx*dx + dy*dy < opt_min_dist_sq) { too_close = true; break; }
-            }
-            if (too_close) continue;
-
-            auto trial = selected;
-            trial[least_idx] = c.rp_idx;
-            float trial_worst = computeMaxLeverage(trial);
-            if (trial_worst < best_worst) {
-                best_worst = trial_worst;
-                best_cand = c.rp_idx;
-            }
-        }
-
-        if (best_cand < 0 || best_worst >= worst_lev * kMinImprovementFactor) break;
-        selected[least_idx] = best_cand;
     }
 
     for (int idx : selected)

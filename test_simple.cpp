@@ -677,15 +677,531 @@ int main() {
             printf("\n");
         }
 
+        // --- FHD 20-object benchmark with noise=30 ---
+        printf("\n--- FHD 20 objects, noise=30 benchmark ---\n");
+        {
+            FHDObj objs20[] = {
+                {150, 100, 7},   {450, 150, 23},  {750, 100, 51},   {1050, 150, 78},
+                {1350, 100, 102},{1650, 150, 133}, {1850, 100, 157}, {250, 350, 189},
+                {550, 400, 212}, {850, 350, 238},  {1150, 400, 267}, {1450, 350, 291},
+                {1750, 400, 319},{200, 600, 342},  {500, 650, 12},   {800, 600, 67},
+                {1100, 650, 112},{1400, 600, 167}, {1700, 650, 222}, {300, 900, 277},
+            };
+            int n20 = sizeof(objs20)/sizeof(objs20[0]);
+
+            // Build scene
+            Mat scene20(1080, 1920, CV_8U, Scalar(30));
+            for (auto& obj : objs20) {
+                Mat M = getRotationMatrix2D(Point2f(100, 100), -obj.angle, 1.0);
+                Mat rot; warpAffine(templ_fhd, rot, M, templ_fhd.size(),
+                                    INTER_LINEAR, BORDER_CONSTANT, Scalar(0));
+                int ox = obj.x - 100, oy = obj.y - 100;
+                for (int r = 0; r < rot.rows; r++)
+                    for (int c = 0; c < rot.cols; c++) {
+                        int sy = oy + r, sx = ox + c;
+                        if (sy >= 0 && sy < scene20.rows && sx >= 0 &&
+                            sx < scene20.cols && rot.at<uchar>(r, c) > 0)
+                            scene20.at<uchar>(sy, sx) = rot.at<uchar>(r, c);
+                    }
+            }
+            // Add noise=30
+            {
+                Mat nm(scene20.size(), CV_64F);
+                RNG rng20(42); rng20.fill(nm, RNG::NORMAL, 0, 30);
+                Mat t20; scene20.convertTo(t20, CV_64F);
+                t20 += nm; t20.convertTo(scene20, CV_8U);
+            }
+
+            // Save scene
+            imwrite("output/fhd20_n30_scene.png", scene20);
+
+            Mode bench_modes[] = {
+                {"None",        sbm::RefineMode::None},
+                {"ICP (inv)",   sbm::RefineMode::ICP},
+                {"ROI",         sbm::RefineMode::ROI},
+            };
+
+            FILE* bf = fopen("output/fhd20_n30.txt", "w");
+            fprintf(bf, "FHD 1920x1080, 20 objects, noise=30, 200x200 L-shape\n\n");
+
+            for (auto& mode : bench_modes) {
+                sbm::MatchConfig cfg;
+                cfg.min_score = 30;
+                cfg.nms_radius = 80;
+                cfg.refine = mode.mode;
+
+                sbm::ShapeMatcher matcher(cfg);
+                sbm::ModelConfig mcfg;
+                mcfg.angle = {0, 360, 2};
+
+                std::cout.rdbuf(null_stream.rdbuf());
+                matcher.addModel("L", feat_fhd, mcfg);
+                matcher.match(scene20); // warm up
+                std::cout.rdbuf(orig_cout);
+                null_stream.str(""); null_stream.clear();
+
+                // Average 5 runs
+                double total_ms = 0;
+                std::vector<sbm::MatchResult> results;
+                std::cout.rdbuf(null_stream.rdbuf());
+                for (int i = 0; i < 5; i++) {
+                    auto t0 = std::chrono::high_resolution_clock::now();
+                    results = matcher.match(scene20);
+                    total_ms += std::chrono::duration<double, std::milli>(
+                        std::chrono::high_resolution_clock::now() - t0).count();
+                }
+                std::cout.rdbuf(orig_cout);
+                null_stream.str(""); null_stream.clear();
+                double avg_ms = total_ms / 5.0;
+
+                // Per-object errors
+                float total_ae = 0, total_pe = 0;
+                int matched = 0;
+                for (auto& r : results) {
+                    float best_d = 1e9f; int best_j = -1;
+                    for (int j = 0; j < n20; j++) {
+                        float o2 = 0, oo = -25;
+                        float rd = -(float)objs20[j].angle*(float)CV_PI/180.0f;
+                        float gx = objs20[j].x + std::cos(rd)*o2 - std::sin(rd)*oo;
+                        float gy = objs20[j].y + std::sin(rd)*o2 + std::cos(rd)*oo;
+                        float d = std::sqrt((r.x-gx)*(r.x-gx)+(r.y-gy)*(r.y-gy));
+                        if (d < best_d) { best_d = d; best_j = j; }
+                    }
+                    if (best_j >= 0 && best_d < 50) {
+                        float ae = r.angle - (float)objs20[best_j].angle;
+                        if (ae > 180) ae -= 360; if (ae < -180) ae += 360;
+                        total_ae += std::abs(ae);
+                        total_pe += best_d;
+                        matched++;
+                    }
+                }
+                float ma = matched > 0 ? total_ae / matched : -1;
+                float mp = matched > 0 ? total_pe / matched : -1;
+
+                fprintf(bf, "%-12s  %2d/%d found  %.1fms  ang=%.2fdeg  pos=%.2fpx\n",
+                        mode.name, matched, n20, avg_ms, ma, mp);
+                // Per-object detail
+                for (auto& r : results) {
+                    float best_d = 1e9f; int best_j = -1;
+                    for (int j = 0; j < n20; j++) {
+                        float o2b=0, oob=-25;
+                        float rdb=-(float)objs20[j].angle*(float)CV_PI/180.0f;
+                        float gxb=objs20[j].x+std::cos(rdb)*o2b-std::sin(rdb)*oob;
+                        float gyb=objs20[j].y+std::sin(rdb)*o2b+std::cos(rdb)*oob;
+                        float db=std::sqrt((r.x-gxb)*(r.x-gxb)+(r.y-gyb)*(r.y-gyb));
+                        if(db<best_d){best_d=db;best_j=j;}
+                    }
+                    float aeb = r.angle-(float)objs20[best_j].angle;
+                    if(aeb>180)aeb-=360;if(aeb<-180)aeb+=360;
+                    fprintf(bf, "  gt=(%4d,%4d)@%3d  got=(%5.1f,%5.1f)@%5.1f  err=%+5.1fdeg %4.1fpx%s\n",
+                            objs20[best_j].x, objs20[best_j].y, (int)objs20[best_j].angle,
+                            r.x, r.y, r.angle, aeb, best_d,
+                            best_d >= 50 ? " ** UNMATCHED" : "");
+                }
+                fprintf(bf, "\n");
+            }
+            fclose(bf);
+            printf("  -> saved output/fhd20_n30.txt, fhd20_n30_scene.png\n");
+        }
+
         // --- GT orientation debug: single objects at known angles ---
         {
-            // Finer angle sweep: every 5 degrees, no skew
+            // Sub-pixel position sweep: place object at fractional pixel positions
+            int cell = 250;
+            printf("\n--- Sub-pixel position sweep (angle=25deg) ---\n");
+            {
+                float test_ang = 25;
+                int n_steps = 10;
+                // Coarse matching accuracy under noise (no refinement)
+                {
+                    float noise_sweep[] = {0, 10, 20, 30, 40, 50, 60, 80, 100};
+                    int n_ns = sizeof(noise_sweep)/sizeof(noise_sweep[0]);
+                    FILE* cf = fopen("output/coarse_vs_noise.txt", "w");
+                    fprintf(cf, "%-8s  %6s  %8s  %8s\n", "Noise", "Found", "Ang_err", "Pos_err");
+
+                    for (int ni2 = 0; ni2 < n_ns; ni2++) {
+                        float ns2 = noise_sweep[ni2];
+                        // Place object at sub-pixel position
+                        Mat scene_cn(cell, cell, CV_8U, Scalar(0));
+                        Mat Mc = getRotationMatrix2D(Point2f(100,100), -test_ang, 1.0);
+                        double* mdc = (double*)Mc.data;
+                        mdc[2] += 0.3; mdc[5] += 0.7;
+                        Mat rotc; warpAffine(templ_fhd, rotc, Mc, templ_fhd.size(),
+                                             INTER_LINEAR, BORDER_CONSTANT, Scalar(0));
+                        int oxc=cell/2-100, oyc=cell/2-100;
+                        for(int r=0;r<rotc.rows;r++) for(int c=0;c<rotc.cols;c++){
+                            int sy=oyc+r,sx=oxc+c;
+                            if(sy>=0&&sy<cell&&sx>=0&&sx<cell&&rotc.at<uchar>(r,c)>0)
+                                scene_cn.at<uchar>(sy,sx)=rotc.at<uchar>(r,c);
+                        }
+                        if (ns2 > 0) {
+                            Mat nm3(scene_cn.size(), CV_64F);
+                            RNG rng3(42); rng3.fill(nm3, RNG::NORMAL, 0, ns2);
+                            Mat t3; scene_cn.convertTo(t3, CV_64F);
+                            t3 += nm3; t3.convertTo(scene_cn, CV_8U);
+                        }
+                        float gt_cx3 = cell/2.0f+0.3f, gt_cy3 = cell/2.0f+0.7f;
+
+                        // Run coarse only, ICP, ROI — average over 5 angles to reduce variance
+                        float angles_test[] = {10, 25, 60, 130, 200};
+                        float c_ae=0,c_pe=0, i_ae=0,i_pe=0, r_ae=0,r_pe=0;
+                        int c_found=0, i_found=0, r_found=0;
+
+                        for (float ta : angles_test) {
+                            // Recreate scene at this angle
+                            Mat scene_a(cell, cell, CV_8U, Scalar(0));
+                            Mat Ma = getRotationMatrix2D(Point2f(100,100), -ta, 1.0);
+                            double* mda = (double*)Ma.data;
+                            mda[2] += 0.3; mda[5] += 0.7;
+                            Mat rota; warpAffine(templ_fhd, rota, Ma, templ_fhd.size(),
+                                                 INTER_LINEAR, BORDER_CONSTANT, Scalar(0));
+                            for(int r=0;r<rota.rows;r++) for(int c=0;c<rota.cols;c++){
+                                int sy=oyc+r,sx=oxc+c;
+                                if(sy>=0&&sy<cell&&sx>=0&&sx<cell)
+                                    scene_a.at<uchar>(sy,sx) = rota.at<uchar>(r,c)>0 ? rota.at<uchar>(r,c) : 0;
+                            }
+                            if (ns2 > 0) {
+                                Mat nm4(scene_a.size(), CV_64F);
+                                RNG rng4(42+(int)ta); rng4.fill(nm4, RNG::NORMAL, 0, ns2);
+                                Mat t4; scene_a.convertTo(t4, CV_64F);
+                                t4 += nm4; t4.convertTo(scene_a, CV_8U);
+                            }
+
+                            float o_x3=0, o_y3=-25;
+                            sbm::RefineMode modes3[] = {sbm::RefineMode::None, sbm::RefineMode::ICP, sbm::RefineMode::ROI};
+                            for (int mi3=0; mi3<3; mi3++) {
+                                sbm::MatchConfig cfg3; cfg3.min_score=30; cfg3.nms_radius=80;
+                                cfg3.refine = modes3[mi3];
+                                sbm::ShapeMatcher m3(cfg3);
+                                sbm::ModelConfig mc3; mc3.angle={0,360,2};
+                                std::cout.rdbuf(null_stream.rdbuf());
+                                m3.addModel("L", feat_fhd, mc3);
+                                auto res3 = m3.match(scene_a);
+                                std::cout.rdbuf(orig_cout);
+                                null_stream.str(""); null_stream.clear();
+
+                                if (!res3.empty()) {
+                                    float rr3=-res3[0].angle*(float)CV_PI/180.0f;
+                                    float mcx3=res3[0].x-(std::cos(rr3)*o_x3-std::sin(rr3)*o_y3);
+                                    float mcy3=res3[0].y-(std::sin(rr3)*o_x3+std::cos(rr3)*o_y3);
+                                    float ae3=res3[0].angle-ta;
+                                    if(ae3>180)ae3-=360;if(ae3<-180)ae3+=360;
+                                    float pe3=std::sqrt((mcx3-gt_cx3)*(mcx3-gt_cx3)+(mcy3-gt_cy3)*(mcy3-gt_cy3));
+                                    if(mi3==0){c_ae+=std::abs(ae3);c_pe+=pe3;c_found++;}
+                                    if(mi3==1){i_ae+=std::abs(ae3);i_pe+=pe3;i_found++;}
+                                    if(mi3==2){r_ae+=std::abs(ae3);r_pe+=pe3;r_found++;}
+                                }
+                            }
+                        }
+                        int na2 = sizeof(angles_test)/sizeof(angles_test[0]);
+                            // Time each mode on a single scene
+                        float c_ms=0, i_ms=0, r_ms=0;
+                        {
+                            // Build a scene for timing
+                            Mat sa(cell, cell, CV_8U, Scalar(0));
+                            {
+                                Mat Mt = getRotationMatrix2D(Point2f(100,100), -test_ang, 1.0);
+                                double* mdt = (double*)Mt.data; mdt[2]+=0.3; mdt[5]+=0.7;
+                                Mat rott; warpAffine(templ_fhd, rott, Mt, templ_fhd.size(),
+                                    INTER_LINEAR, BORDER_CONSTANT, Scalar(0));
+                                for(int r=0;r<rott.rows;r++) for(int c=0;c<rott.cols;c++){
+                                    int sy=oyc+r,sx=oxc+c;
+                                    if(sy>=0&&sy<cell&&sx>=0&&sx<cell&&rott.at<uchar>(r,c)>0)
+                                        sa.at<uchar>(sy,sx)=rott.at<uchar>(r,c);
+                                }
+                                if (ns2 > 0) {
+                                    Mat nm5(sa.size(), CV_64F);
+                                    RNG rng5(42); rng5.fill(nm5, RNG::NORMAL, 0, ns2);
+                                    Mat t5; sa.convertTo(t5, CV_64F);
+                                    t5 += nm5; t5.convertTo(sa, CV_8U);
+                                }
+                            }
+                            sbm::RefineMode modes4[] = {sbm::RefineMode::None, sbm::RefineMode::ICP, sbm::RefineMode::ROI};
+                            for (int mi4=0; mi4<3; mi4++) {
+                                sbm::MatchConfig cfg4; cfg4.min_score=30; cfg4.nms_radius=80;
+                                cfg4.refine = modes4[mi4];
+                                sbm::ShapeMatcher m4(cfg4);
+                                sbm::ModelConfig mc4; mc4.angle={0,360,2};
+                                std::cout.rdbuf(null_stream.rdbuf());
+                                m4.addModel("L", feat_fhd, mc4);
+                                m4.match(sa); // warm up
+                                auto t0 = std::chrono::high_resolution_clock::now();
+                                m4.match(sa);
+                                float ms = (float)std::chrono::duration<double,std::milli>(
+                                    std::chrono::high_resolution_clock::now()-t0).count();
+                                std::cout.rdbuf(orig_cout);
+                                null_stream.str(""); null_stream.clear();
+                                if(mi4==0) c_ms=ms; if(mi4==1) i_ms=ms; if(mi4==2) r_ms=ms;
+                            }
+                        }
+
+                    fprintf(cf, "%-8.0f  %d/%d  %5.1f/%5.1f/%5.1fms  C:%5.1fdeg %4.1fpx  I:%5.2fdeg %4.2fpx  R:%5.2fdeg %4.2fpx\n",
+                                ns2, c_found, na2, c_ms, i_ms, r_ms,
+                                c_found>0?c_ae/c_found:-1.f, c_found>0?c_pe/c_found:-1.f,
+                                i_found>0?i_ae/i_found:-1.f, i_found>0?i_pe/i_found:-1.f,
+                                r_found>0?r_ae/r_found:-1.f, r_found>0?r_pe/r_found:-1.f);
+                    }
+                    fclose(cf);
+                    printf("  -> saved output/coarse_vs_noise.txt\n");
+                }
+
+                // Test different ROI sizes under noise
+                int roi_sizes[] = {10, 15, 20, 30};
+                float noise_for_roi[] = {0, 20, 40, 60};
+                {
+                    FILE* rf = fopen("output/roi_size_sweep.txt", "w");
+                    fprintf(rf, "%-8s", "ROI_half");
+                    for (float ns : noise_for_roi) fprintf(rf, "  n=%-5.0f         ", ns);
+                    fprintf(rf, "\n");
+
+                    for (int rh : roi_sizes) {
+                        fprintf(rf, "%-8d", rh);
+                        for (float ns : noise_for_roi) {
+                            // Single test: dx=0.3, dy=0.7 (arbitrary sub-pixel)
+                            Mat scene_rt(cell, cell, CV_8U, Scalar(0));
+                            Mat Mr = getRotationMatrix2D(Point2f(100,100), -test_ang, 1.0);
+                            double* mdr = (double*)Mr.data;
+                            mdr[2] += 0.3; mdr[5] += 0.7;
+                            Mat rotr; warpAffine(templ_fhd, rotr, Mr, templ_fhd.size(),
+                                                 INTER_LINEAR, BORDER_CONSTANT, Scalar(0));
+                            int oxr=cell/2-100, oyr=cell/2-100;
+                            for(int r=0;r<rotr.rows;r++) for(int c=0;c<rotr.cols;c++){
+                                int sy=oyr+r,sx=oxr+c;
+                                if(sy>=0&&sy<cell&&sx>=0&&sx<cell&&rotr.at<uchar>(r,c)>0)
+                                    scene_rt.at<uchar>(sy,sx)=rotr.at<uchar>(r,c);
+                            }
+                            if (ns > 0) {
+                                Mat nm2(scene_rt.size(), CV_64F);
+                                RNG rng2(42); rng2.fill(nm2, RNG::NORMAL, 0, ns);
+                                Mat t2; scene_rt.convertTo(t2, CV_64F);
+                                t2 += nm2; t2.convertTo(scene_rt, CV_8U);
+                            }
+                            float gt_cx2 = cell/2.0f+0.3f, gt_cy2 = cell/2.0f+0.7f;
+
+                            // ROI with custom roi_half
+                            auto opt_pts = feat_fhd.selectOptimizedPoints(8);
+                            std::vector<roi_refine::SamplePoint> spts;
+                            for(auto&p:opt_pts){roi_refine::SamplePoint sp;sp.pos=p;spts.push_back(sp);}
+                            roi_refine::ROIConfig rcfg;
+                            rcfg.roi_half = rh;
+                            rcfg.search_half = rh;
+                            rcfg.max_iters = 3;
+                            // Quantize angle to 2deg step (simulate coarse)
+                            float coarse_a = std::round(test_ang/2.0f)*2.0f;
+                            cv::Vec3f ip(gt_cx2, gt_cy2, coarse_a);
+                            auto ref = roi_refine::refineROI(
+                                feat_fhd.templ_image, scene_rt, spts, ip, rcfg);
+                            float ae2 = ref[2] - test_ang;
+                            if(ae2>180)ae2-=360;if(ae2<-180)ae2+=360;
+                            float pe2 = std::sqrt((ref[0]-gt_cx2)*(ref[0]-gt_cx2)+
+                                                   (ref[1]-gt_cy2)*(ref[1]-gt_cy2));
+                            fprintf(rf, "  %+.2fdeg %.3fpx", ae2, pe2);
+                        }
+                        fprintf(rf, "\n");
+                    }
+                    fclose(rf);
+                    printf("  -> saved output/roi_size_sweep.txt\n");
+                }
+
+                float noise_levels[] = {0, 10, 20, 30, 40, 50, 60};
+                int n_noise = sizeof(noise_levels)/sizeof(noise_levels[0]);
+
+                FILE* sumf = fopen("output/subpixel_summary.txt", "w");
+
+                for (int ni = 0; ni < n_noise; ni++) {
+                float noise_sigma = noise_levels[ni];
+
+                std::vector<float> icp_pos_all, roi_pos_all, icp_ang_all, roi_ang_all;
+
+                for (int yi = 0; yi < n_steps; yi++) {
+                for (int xi = 0; xi < n_steps; xi++) {
+                    float dx = xi * 0.1f, dy = yi * 0.1f;
+
+                    Mat scene_sp(cell, cell, CV_8U, Scalar(0));
+                    // Rotate template
+                    Mat M = getRotationMatrix2D(Point2f(100, 100), -test_ang, 1.0);
+                    // Add sub-pixel translation to the rotation matrix
+                    double* md2 = (double*)M.data;
+                    md2[2] += dx;  // add fractional X offset
+                    md2[5] += dy;  // add fractional Y offset
+                    Mat rot;
+                    warpAffine(templ_fhd, rot, M, templ_fhd.size(),
+                               INTER_LINEAR, BORDER_CONSTANT, Scalar(0));
+                    int ox2 = cell/2 - 100, oy2 = cell/2 - 100;
+                    for (int r = 0; r < rot.rows; r++)
+                        for (int c = 0; c < rot.cols; c++) {
+                            int sy = oy2+r, sx = ox2+c;
+                            if (sy>=0 && sy<cell && sx>=0 && sx<cell && rot.at<uchar>(r,c)>0)
+                                scene_sp.at<uchar>(sy, sx) = rot.at<uchar>(r, c);
+                        }
+
+                    // Add noise
+                    if (noise_sigma > 0) {
+                        Mat nm(scene_sp.size(), CV_64F);
+                        RNG rng_n(42 + xi*100 + yi);
+                        rng_n.fill(nm, RNG::NORMAL, 0, noise_sigma);
+                        Mat tmp_n; scene_sp.convertTo(tmp_n, CV_64F);
+                        tmp_n += nm; tmp_n.convertTo(scene_sp, CV_8U);
+                    }
+
+                    // Save one sample scene per noise level
+                    if (xi == 0 && yi == 0) {
+                        char sfn[64];
+                        snprintf(sfn,sizeof(sfn),"output/scene_n%.0f.png", noise_sigma);
+                        imwrite(sfn, scene_sp);
+                    }
+
+                    // GT center (with sub-pixel offset)
+                    float gt_cx = cell/2.0f + dx, gt_cy = cell/2.0f + dy;
+
+                    // Run ICP
+                    sbm::MatchConfig cfg_i; cfg_i.min_score=35; cfg_i.nms_radius=80;
+                    cfg_i.refine = sbm::RefineMode::ICP;
+                    sbm::ShapeMatcher mi2(cfg_i);
+                    sbm::ModelConfig mc2; mc2.angle = {0, 360, 2};
+                    std::cout.rdbuf(null_stream.rdbuf());
+                    mi2.addModel("L", feat_fhd, mc2);
+                    auto ri = mi2.match(scene_sp);
+                    std::cout.rdbuf(orig_cout);
+                    null_stream.str(""); null_stream.clear();
+
+                    // Run ROI
+                    sbm::MatchConfig cfg_r; cfg_r.min_score=35; cfg_r.nms_radius=80;
+                    cfg_r.refine = sbm::RefineMode::ROI;
+                    sbm::ShapeMatcher mr2(cfg_r);
+                    std::cout.rdbuf(null_stream.rdbuf());
+                    mr2.addModel("L", feat_fhd, mc2);
+                    auto rr = mr2.match(scene_sp);
+                    std::cout.rdbuf(orig_cout);
+                    null_stream.str(""); null_stream.clear();
+
+                    // Compute errors (convert user origin back to center)
+                    float o_x2=0, o_y2=-25;
+                    float icp_ae=99, icp_pe=99, roi_ae=99, roi_pe=99;
+                    if (!ri.empty()) {
+                        float rr3 = -ri[0].angle*(float)CV_PI/180.0f;
+                        float icx = ri[0].x-(std::cos(rr3)*o_x2-std::sin(rr3)*o_y2);
+                        float icy = ri[0].y-(std::sin(rr3)*o_x2+std::cos(rr3)*o_y2);
+                        icp_ae = ri[0].angle - test_ang;
+                        if (icp_ae>180) icp_ae-=360; if (icp_ae<-180) icp_ae+=360;
+                        icp_pe = std::sqrt((icx-gt_cx)*(icx-gt_cx)+(icy-gt_cy)*(icy-gt_cy));
+                    }
+                    if (!rr.empty()) {
+                        float rr3 = -rr[0].angle*(float)CV_PI/180.0f;
+                        float rcx = rr[0].x-(std::cos(rr3)*o_x2-std::sin(rr3)*o_y2);
+                        float rcy = rr[0].y-(std::sin(rr3)*o_x2+std::cos(rr3)*o_y2);
+                        roi_ae = rr[0].angle - test_ang;
+                        if (roi_ae>180) roi_ae-=360; if (roi_ae<-180) roi_ae+=360;
+                        roi_pe = std::sqrt((rcx-gt_cx)*(rcx-gt_cx)+(rcy-gt_cy)*(rcy-gt_cy));
+                    }
+
+                    icp_ang_all.push_back(std::abs(icp_ae));
+                    icp_pos_all.push_back(icp_pe);
+                    roi_ang_all.push_back(std::abs(roi_ae));
+                    roi_pos_all.push_back(roi_pe);
+                }
+                }
+
+                // Summary
+                float icp_a_mean=0,icp_p_mean=0,roi_a_mean=0,roi_p_mean=0;
+                float icp_p_max=0,roi_p_max=0;
+                int nn = (int)icp_ang_all.size();
+                for (int i=0;i<nn;i++) {
+                    icp_a_mean+=icp_ang_all[i]; icp_p_mean+=icp_pos_all[i];
+                    roi_a_mean+=roi_ang_all[i]; roi_p_mean+=roi_pos_all[i];
+                    icp_p_max=std::max(icp_p_max,icp_pos_all[i]);
+                    roi_p_max=std::max(roi_p_max,roi_pos_all[i]);
+                }
+                icp_a_mean/=nn; icp_p_mean/=nn; roi_a_mean/=nn; roi_p_mean/=nn;
+
+                fprintf(sumf, "noise=%.0f: angle=%g, %dx%d grid\n",
+                        noise_sigma, test_ang, n_steps, n_steps);
+                fprintf(sumf, "  ICP: mean_ang=%.3f mean_pos=%.3f max_pos=%.3f\n",
+                        icp_a_mean, icp_p_mean, icp_p_max);
+                fprintf(sumf, "  ROI: mean_ang=%.3f mean_pos=%.3f max_pos=%.3f\n\n",
+                        roi_a_mean, roi_p_mean, roi_p_max);
+
+                // Draw 2D heatmap: position error as function of (dx, dy)
+                {
+                    int hm_cell = 40;
+                    int hm_w = n_steps * hm_cell, hm_h = n_steps * hm_cell;
+                    int chart_w = hm_w * 2 + 80 + 60;  // two heatmaps side by side + gap + colorbar
+                    int chart_h = hm_h + 80;
+                    Mat chart(chart_h, chart_w, CV_8UC3, Scalar(255,255,255));
+
+                    // Find max for color scale
+                    float max_pe = 0;
+                    for (int i = 0; i < nn; i++)
+                        max_pe = std::max(max_pe, std::max(icp_pos_all[i], roi_pos_all[i]));
+                    max_pe = std::max(max_pe, 0.2f);  // minimum scale
+
+                    auto drawHeatmap = [&](const std::vector<float>& errs, int x_off, const char* title) {
+                        cv::putText(chart, title, Point(x_off + 10, 25),
+                            FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0,0,0), 1);
+                        for (int yi = 0; yi < n_steps; yi++) {
+                            for (int xi = 0; xi < n_steps; xi++) {
+                                float e = errs[yi * n_steps + xi];
+                                float t = std::min(1.0f, e / max_pe);
+                                // Blue (0) -> Red (max)
+                                int b = (int)(255 * (1-t));
+                                int r = (int)(255 * t);
+                                int g = (int)(255 * (1 - 2*std::abs(t-0.5f)));
+                                Rect rc(x_off + xi*hm_cell, 35 + yi*hm_cell, hm_cell-1, hm_cell-1);
+                                cv::rectangle(chart, rc, Scalar(b,g,r), -1);
+                                // Value label
+                                char vl[16]; snprintf(vl,sizeof(vl),"%.2f", e);
+                                cv::putText(chart, vl, Point(rc.x+2, rc.y+hm_cell/2+4),
+                                    FONT_HERSHEY_SIMPLEX, 0.28, Scalar(255,255,255), 1);
+                            }
+                        }
+                        // Axis labels
+                        for (int i = 0; i < n_steps; i++) {
+                            char xl[8]; snprintf(xl,sizeof(xl),".%d", i);
+                            cv::putText(chart, xl, Point(x_off+i*hm_cell+5, 35+hm_h+20),
+                                FONT_HERSHEY_SIMPLEX, 0.35, Scalar(0,0,0), 1);
+                            cv::putText(chart, xl, Point(x_off-25, 35+i*hm_cell+hm_cell/2+4),
+                                FONT_HERSHEY_SIMPLEX, 0.35, Scalar(0,0,0), 1);
+                        }
+                        cv::putText(chart, "dx", Point(x_off+hm_w/2-10, 35+hm_h+40),
+                            FONT_HERSHEY_SIMPLEX, 0.4, Scalar(0,0,0), 1);
+                    };
+
+                    char t1[64], t2[64];
+                    snprintf(t1,sizeof(t1),"ICP pos err (noise=%.0f)", noise_sigma);
+                    snprintf(t2,sizeof(t2),"ROI pos err (noise=%.0f)", noise_sigma);
+                    drawHeatmap(icp_pos_all, 30, t1);
+                    drawHeatmap(roi_pos_all, 30 + hm_w + 50, t2);
+
+                    // Color bar
+                    int cb_x = chart_w - 30, cb_h = hm_h;
+                    for (int i = 0; i < cb_h; i++) {
+                        float t = 1.0f - (float)i / cb_h;
+                        int b = (int)(255*(1-t)), r = (int)(255*t);
+                        int g = (int)(255*(1-2*std::abs(t-0.5f)));
+                        cv::line(chart, Point(cb_x, 35+i), Point(cb_x+15, 35+i), Scalar(b,g,r));
+                    }
+                    char cbl[16];
+                    snprintf(cbl,sizeof(cbl),"%.2f", max_pe);
+                    cv::putText(chart, cbl, Point(cb_x-5, 30), FONT_HERSHEY_SIMPLEX, 0.3, Scalar(0,0,0), 1);
+                    cv::putText(chart, "0", Point(cb_x+3, 35+cb_h+15), FONT_HERSHEY_SIMPLEX, 0.3, Scalar(0,0,0), 1);
+
+                    char hfn[64];
+                    snprintf(hfn,sizeof(hfn),"output/subpixel_n%.0f.png", noise_sigma);
+                    imwrite(hfn, chart);
+                    printf("  -> saved output/subpixel_heatmap.png\n");
+                }
+
+                } // end noise loop
+                fclose(sumf);
+                printf("  -> saved output/subpixel_n*.png, subpixel_summary.txt\n");
+            }
+
+            // Angle sweep for chart
             std::vector<float> dbg_angles;
             for (float a = 0; a < 360; a += 5) dbg_angles.push_back(a);
             float dbg_skews[] = {0};
             int n_skews = 1;
             int na = (int)dbg_angles.size();
-            int cell = 250;
 
             // Collect errors for chart
             std::vector<float> icp_ang_errs(na), roi_ang_errs(na);

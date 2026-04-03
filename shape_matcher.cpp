@@ -452,44 +452,81 @@ std::vector<cv::Point2f> FeatureSet::selectOptimizedPoints(int max_points) const
         return false;
     };
 
-    // Iterative optimization: swap least sensitive with best candidate
+    // Analytic leverage computation (hat matrix diagonal).
+    // For constraint set cs, compute J^T J, invert, then h_ii = J_i * (J^T J)^{-1} * J_i^T.
+    // This replaces the O(N^2) perturbation-based sensitivity with O(N) after one 3x3 inversion.
+    auto computeLeverages = [&](const std::vector<SensConstraint>& cs,
+                                std::vector<float>& leverages) {
+        // Build J^T J (3x3)
+        float JTJ[3][3] = {};
+        std::vector<float> j0s(cs.size()), j1s(cs.size()), j2s(cs.size());
+        for (size_t i = 0; i < cs.size(); i++) {
+            auto& c = cs[i];
+            float nx = c.normal.x, ny = c.normal.y;
+            j0s[i] = -c.src.y * nx + c.src.x * ny;  // angular Jacobian
+            j1s[i] = nx;
+            j2s[i] = ny;
+            JTJ[0][0] += j0s[i]*j0s[i]; JTJ[0][1] += j0s[i]*j1s[i]; JTJ[0][2] += j0s[i]*j2s[i];
+            JTJ[1][1] += j1s[i]*j1s[i]; JTJ[1][2] += j1s[i]*j2s[i];
+            JTJ[2][2] += j2s[i]*j2s[i];
+        }
+        JTJ[1][0]=JTJ[0][1]; JTJ[2][0]=JTJ[0][2]; JTJ[2][1]=JTJ[1][2];
+        for (int i=0;i<3;i++) JTJ[i][i] += kSolverRegularization;
+
+        // Invert 3x3 via cv::solve
+        cv::Mat A(3,3,CV_32F,JTJ), Ainv;
+        cv::invert(A, Ainv, cv::DECOMP_LU);
+        float* M = (float*)Ainv.data;  // row-major 3x3
+
+        // Compute leverage h_ii = J_i * Ainv * J_i^T for each feature
+        leverages.resize(cs.size());
+        for (size_t i = 0; i < cs.size(); i++) {
+            // s = Ainv * J_i^T  (3x1)
+            float s0 = M[0]*j0s[i] + M[1]*j1s[i] + M[2]*j2s[i];
+            float s1 = M[3]*j0s[i] + M[4]*j1s[i] + M[5]*j2s[i];
+            float s2 = M[6]*j0s[i] + M[7]*j1s[i] + M[8]*j2s[i];
+            // h_ii = J_i * s = j0*s0 + j1*s1 + j2*s2
+            leverages[i] = j0s[i]*s0 + j1s[i]*s1 + j2s[i]*s2;
+        }
+    };
+
+    // Compute max leverage for a candidate set
+    auto computeMaxLeverage = [&](const std::vector<int>& sel) -> float {
+        auto cs = buildSet(sel);
+        if ((int)cs.size() < 3) return 1e9f;
+        std::vector<float> levs;
+        computeLeverages(cs, levs);
+        float mx = 0;
+        for (auto h : levs) mx = std::max(mx, h);
+        return mx;
+    };
+
+    // Fedorov exchange: swap least-leverage with candidate that minimizes max leverage
     float opt_min_dist_sq = (min_dist * kOptMinDistFactor) * (min_dist * kOptMinDistFactor);
 
     for (int opt_iter = 0; opt_iter < kMaxOptIterations; ++opt_iter) {
         auto baseline = buildSet(selected);
         if ((int)baseline.size() < 3) break;
 
-        cv::Vec3f base_pose = solveSens(baseline);
-        std::vector<float> sens(baseline.size());
+        std::vector<float> leverages;
+        computeLeverages(baseline, leverages);
+
         int least_idx = 0;
-        float least_sens = 1e9f;
-        float worst_sens = 0;
-        for (size_t fi = 0; fi < baseline.size(); ++fi) {
-            auto perturbed = baseline;
-            perturbed[fi].dst.x += 1.0f;
-            cv::Vec3f pdx = solveSens(perturbed);
-            float ang_dx = std::abs(pdx[0] - base_pose[0]);
-            float pos_dx = std::sqrt((pdx[1]-base_pose[1])*(pdx[1]-base_pose[1]) +
-                                      (pdx[2]-base_pose[2])*(pdx[2]-base_pose[2]));
-            perturbed = baseline;
-            perturbed[fi].dst.y += 1.0f;
-            cv::Vec3f pdy = solveSens(perturbed);
-            float ang_dy = std::abs(pdy[0] - base_pose[0]);
-            float pos_dy = std::sqrt((pdy[1]-base_pose[1])*(pdy[1]-base_pose[1]) +
-                                      (pdy[2]-base_pose[2])*(pdy[2]-base_pose[2]));
-            float d_ang = ang_dx + ang_dy;
-            float d_pos = std::sqrt(pos_dx*pos_dx + pos_dy*pos_dy);
-            sens[fi] = d_ang + d_pos;
-            // Don't swap out corners — they provide 2D constraint
+        float least_lev = 1e9f;
+        float worst_lev = 0;
+        for (size_t fi = 0; fi < leverages.size(); fi++) {
+            worst_lev = std::max(worst_lev, leverages[fi]);
+            // Don't swap out corners
             bool is_corner = refine_points[selected[fi]].cornerness > kCornerThreshold;
-            if (sens[fi] < least_sens && !is_corner) { least_sens = sens[fi]; least_idx = (int)fi; }
-            worst_sens = std::max(worst_sens, sens[fi]);
+            if (leverages[fi] < least_lev && !is_corner) {
+                least_lev = leverages[fi]; least_idx = (int)fi;
+            }
         }
 
-        if (least_sens > 1e-6f && worst_sens / least_sens < kSensitivityBalanceRatio) break;
+        if (least_lev > 1e-6f && worst_lev / least_lev < kSensitivityBalanceRatio) break;
 
         int remove_rp_idx = selected[least_idx];
-        float best_worst = worst_sens;
+        float best_worst = worst_lev;
         int best_cand = -1;
 
         for (auto& c : all_cands) {
@@ -506,17 +543,14 @@ std::vector<cv::Point2f> FeatureSet::selectOptimizedPoints(int max_points) const
 
             auto trial = selected;
             trial[least_idx] = c.rp_idx;
-            auto trial_cs = buildSet(trial);
-            if ((int)trial_cs.size() < 3) continue;
-
-            float trial_worst = computeMaxSens(trial_cs);
+            float trial_worst = computeMaxLeverage(trial);
             if (trial_worst < best_worst) {
                 best_worst = trial_worst;
                 best_cand = c.rp_idx;
             }
         }
 
-        if (best_cand < 0 || best_worst >= worst_sens * kMinImprovementFactor) break;
+        if (best_cand < 0 || best_worst >= worst_lev * kMinImprovementFactor) break;
         selected[least_idx] = best_cand;
     }
 

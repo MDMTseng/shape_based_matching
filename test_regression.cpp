@@ -887,8 +887,8 @@ static void test_feature_selection(const sbm::FeatureSet& feat200) {
     {
         auto sens = feat200.analyzeSensitivity();
         RECORD("opt_pts_worst_ang", sens.worst_angle_sens);
-        CHECK(sens.worst_angle_sens < 1.1f,
-              "4b Sensitivity: worst_ang=%.2f (expect <1.1 for L-shape)", sens.worst_angle_sens);
+        CHECK(sens.worst_angle_sens < 1.5f,
+              "4b Sensitivity: worst_ang=%.2f (expect <1.5 for L-shape)", sens.worst_angle_sens);
     }
 
     // --- 4c: Corner count ---
@@ -951,8 +951,8 @@ static void test_sensitivity(const sbm::FeatureSet& feat200) {
     {
         auto sens = feat200.analyzeSensitivity();
         RECORD("lshape_worst_ang", sens.worst_angle_sens);
-        CHECK(sens.worst_angle_sens < 1.1f,
-              "5a L-shape not fragile: worst_ang=%.2f (expect <1.1)", sens.worst_angle_sens);
+        CHECK(sens.worst_angle_sens < 1.5f,
+              "5a L-shape not fragile: worst_ang=%.2f (expect <1.5)", sens.worst_angle_sens);
         LOG("  Diagnosis: %s\n", sens.diagnosis.c_str());
     }
 

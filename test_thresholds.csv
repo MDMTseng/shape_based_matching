@@ -102,3 +102,37 @@ id,type,metric,op,threshold,description
 # Per-object accuracy for ICP
 10_1080p_icp_ang,check,speed_1080p_ICP_mean_ang,<,1.0,1080p ICP mean angle error (deg)
 10_20mp_icp_ang,check,speed_20mp_ICP_mean_ang,<,1.0,20MP ICP mean angle error (deg)
+# ======== 11. Determinism ========
+11a_pos_diff,check,determinism_pos_max_diff,<,0.001,Determinism: max position diff across 5 runs (px)
+11a_ang_diff,check,determinism_ang_max_diff,<,0.001,Determinism: max angle diff across 5 runs (deg)
+# ======== 12. Serialization Round-trip ========
+12a_pos_diff,check,serial_pos_diff,<,0.01,Serialization: position diff original vs loaded (px)
+12a_ang_diff,check,serial_ang_diff,<,0.01,Serialization: angle diff original vs loaded (deg)
+12a_feat_count,check,serial_feature_count_match,==,1,Serialization: feature count matches after round-trip
+# ======== 13. False Positives ========
+13a_empty,check,fp_empty_count,==,0,False positive: empty scene should have 0 matches
+13b_noise,check,fp_noise_count,==,0,False positive: noise-only scene should have 0 matches
+13c_wrong,check,fp_wrong_shape_count,==,0,False positive: wrong shape should have 0 matches
+# ======== 14. API Contract ========
+14a_origin,check,api_origin_pos_err,<,5.0,API origin: custom origin position error (px)
+14b_angle_offset,check,api_angle_offset_err,<,2.0,API angle offset: angle offset error (deg)
+# ======== 15. Crash Safety ========
+15a_empty_scene,check,crash_empty_scene,==,1,Crash safety: match() with empty scene survived
+15b_empty_extract,check,crash_empty_extract,==,1,Crash safety: extractFeatures() empty survived
+15c_load_missing,check,crash_load_missing,==,1,Crash safety: load() non-existent file survived
+15d_load_garbage,check,crash_load_garbage,==,1,Crash safety: load() garbage file survived
+15e_select_empty,check,crash_select_empty,==,1,Crash safety: selectOptimizedPoints() empty survived
+15f_analyze_empty,check,crash_analyze_empty,==,1,Crash safety: analyzeSensitivity() empty survived
+# ======== 16. Multi-template ========
+16a_l_found,check,multi_templ_l_found,==,1,Multi-template: L-shape found
+16b_tri_found,check,multi_templ_tri_found,==,1,Multi-template: Triangle found
+# ======== 17. Score Consistency ========
+17a_clean,check,score_clean,>,50,Score consistency: clean score > 50
+17b_noise,check,score_noise,>,30,Score consistency: noise score still detectable
+17c_blur,check,score_blur,>,30,Score consistency: blur score still detectable
+# ======== 18. Different Template Shapes ========
+18a_rect,check,shape_rect_found,==,1,Shape test: rectangle detected
+18b_pole,check,shape_pole_found,==,1,Shape test: thin pole detected
+18c_tri,check,shape_tri_found,==,1,Shape test: triangle detected
+18d_rect_roi,check,shape_rect_roi_ang,<,1.0,Shape test: rectangle ROI angle error (deg)
+18e_tri_roi,check,shape_tri_roi_ang,<,1.0,Shape test: triangle ROI angle error (deg)

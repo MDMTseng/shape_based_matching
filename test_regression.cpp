@@ -1490,6 +1490,634 @@ static void test_resolution_speed(const sbm::FeatureSet& feat200, const Mat& tem
 }
 
 // ============================================================
+// Section 11: Determinism
+// ============================================================
+static void test_determinism(const sbm::FeatureSet& feat200, const Mat& templ200) {
+    printf("\n======== 11. DETERMINISM ========\n");
+    LOG("\n======== 11. DETERMINISM ========\n");
+
+    const int scene_sz = 250;
+    Mat scene(scene_sz, scene_sz, CV_8U, Scalar(0));
+    place_object(templ200, scene, scene_sz/2, scene_sz/2, 37);
+
+    // Run match 5 times with identical params
+    std::vector<std::vector<sbm::MatchResult>> all_results(5);
+    for (int run = 0; run < 5; run++) {
+        sbm::MatchConfig cfg;
+        cfg.min_score = 40;
+        cfg.refine = sbm::RefineMode::ICP;
+        sbm::ShapeMatcher matcher(cfg);
+        sbm::ModelConfig mcfg;
+        mcfg.angle = {0, 360, 2};
+        {
+            CoutSuppressor s;
+            matcher.addModel("L", feat200, mcfg);
+            all_results[run] = matcher.match(scene);
+        }
+    }
+
+    float max_pos_diff = 0, max_ang_diff = 0;
+    bool count_match = true;
+    for (int run = 1; run < 5; run++) {
+        if (all_results[run].size() != all_results[0].size()) {
+            count_match = false;
+            break;
+        }
+        for (size_t i = 0; i < all_results[0].size(); i++) {
+            float pd = pos_err(all_results[run][i].x, all_results[run][i].y,
+                               all_results[0][i].x, all_results[0][i].y);
+            float ad = angle_err(all_results[run][i].angle, all_results[0][i].angle);
+            max_pos_diff = std::max(max_pos_diff, pd);
+            max_ang_diff = std::max(max_ang_diff, ad);
+        }
+    }
+
+    RECORD("determinism_pos_max_diff", max_pos_diff);
+    RECORD("determinism_ang_max_diff", max_ang_diff);
+    CHECK(count_match, "11 Determinism: same result count across 5 runs (%d)",
+          (int)all_results[0].size());
+    CHECK(max_pos_diff < 0.001f,
+          "11 Determinism: max pos diff=%.4fpx (expect <0.001)", max_pos_diff);
+    CHECK(max_ang_diff < 0.001f,
+          "11 Determinism: max ang diff=%.4fdeg (expect <0.001)", max_ang_diff);
+}
+
+// ============================================================
+// Section 12: Serialization Round-trip
+// ============================================================
+static void test_serialization(const sbm::FeatureSet& feat200, const Mat& templ200) {
+    printf("\n======== 12. SERIALIZATION ROUND-TRIP ========\n");
+    LOG("\n======== 12. SERIALIZATION ROUND-TRIP ========\n");
+
+    const int scene_sz = 250;
+    const float org_x = 100, org_y = 75;
+
+    // Save and reload
+    feat200.save("output/test_roundtrip.feat");
+    auto loaded = sbm::FeatureSet::load("output/test_roundtrip.feat");
+
+    RECORD("serial_feature_count_match",
+           loaded.numFeatures() == feat200.numFeatures() ? 1.0f : 0.0f);
+
+    // Match with original
+    Mat scene(scene_sz, scene_sz, CV_8U, Scalar(0));
+    place_object(templ200, scene, scene_sz/2, scene_sz/2, 45);
+
+    float gt_x, gt_y;
+    compute_gt_origin(scene_sz/2, scene_sz/2, 45,
+                     org_x, org_y, 200, 200, gt_x, gt_y);
+
+    sbm::MatchResult res_orig, res_loaded;
+    bool found_orig = false, found_loaded = false;
+
+    {
+        sbm::MatchConfig cfg;
+        cfg.min_score = 40;
+        cfg.refine = sbm::RefineMode::ICP;
+        sbm::ShapeMatcher matcher(cfg);
+        sbm::ModelConfig mcfg;
+        mcfg.angle = {0, 360, 2};
+        CoutSuppressor s;
+        matcher.addModel("L", feat200, mcfg);
+        auto results = matcher.match(scene);
+        if (!results.empty()) { res_orig = results[0]; found_orig = true; }
+    }
+
+    {
+        sbm::MatchConfig cfg;
+        cfg.min_score = 40;
+        cfg.refine = sbm::RefineMode::ICP;
+        sbm::ShapeMatcher matcher(cfg);
+        sbm::ModelConfig mcfg;
+        mcfg.angle = {0, 360, 2};
+        CoutSuppressor s;
+        loaded.setOrigin(org_x, org_y);
+        loaded.selectOptimizedPoints(15);
+        matcher.addModel("L", loaded, mcfg);
+        auto results = matcher.match(scene);
+        if (!results.empty()) { res_loaded = results[0]; found_loaded = true; }
+    }
+
+    float pdiff = 99.0f, adiff = 99.0f;
+    if (found_orig && found_loaded) {
+        pdiff = pos_err(res_orig.x, res_orig.y, res_loaded.x, res_loaded.y);
+        adiff = angle_err(res_orig.angle, res_loaded.angle);
+    }
+
+    RECORD("serial_pos_diff", pdiff);
+    RECORD("serial_ang_diff", adiff);
+    CHECK(pdiff < 0.01f,
+          "12 Serialization: pos diff=%.4fpx (expect <0.01)", pdiff);
+    CHECK(adiff < 0.01f,
+          "12 Serialization: ang diff=%.4fdeg (expect <0.01)", adiff);
+    CHECK(loaded.numFeatures() == feat200.numFeatures(),
+          "12 Serialization: feature count %d vs %d",
+          loaded.numFeatures(), feat200.numFeatures());
+}
+
+// ============================================================
+// Section 13: False Positives
+// ============================================================
+static void test_false_positives(const sbm::FeatureSet& feat200, const Mat& templ200) {
+    printf("\n======== 13. FALSE POSITIVES ========\n");
+    LOG("\n======== 13. FALSE POSITIVES ========\n");
+
+    // 13a: Empty (all black) scene
+    {
+        Mat scene(250, 250, CV_8U, Scalar(0));
+        sbm::MatchConfig cfg;
+        cfg.min_score = 50;
+        cfg.refine = sbm::RefineMode::None;
+        sbm::ShapeMatcher matcher(cfg);
+        sbm::ModelConfig mcfg;
+        mcfg.angle = {0, 360, 2};
+        int count = 0;
+        {
+            CoutSuppressor s;
+            matcher.addModel("L", feat200, mcfg);
+            auto results = matcher.match(scene);
+            count = (int)results.size();
+        }
+        RECORD("fp_empty_count", (float)count);
+        CHECK(count == 0, "13a Empty scene: %d matches (expect 0)", count);
+    }
+
+    // 13b: Random noise scene (moderate noise, high threshold)
+    {
+        Mat scene(250, 250, CV_8U, Scalar(128));
+        scene = add_noise(scene, 30);
+        sbm::MatchConfig cfg;
+        cfg.min_score = 70;
+        cfg.refine = sbm::RefineMode::None;
+        sbm::ShapeMatcher matcher(cfg);
+        sbm::ModelConfig mcfg;
+        mcfg.angle = {0, 360, 2};
+        int count = 0;
+        {
+            CoutSuppressor s;
+            matcher.addModel("L", feat200, mcfg);
+            auto results = matcher.match(scene);
+            count = (int)results.size();
+        }
+        RECORD("fp_noise_count", (float)count);
+        CHECK(count == 0, "13b Noise scene: %d matches (expect 0)", count);
+    }
+
+    // 13c: Wrong shape (rectangle, not L)
+    {
+        Mat scene(250, 250, CV_8U, Scalar(0));
+        rectangle(scene, Point(80, 80), Point(170, 170), Scalar(200), 3);
+        sbm::MatchConfig cfg;
+        cfg.min_score = 60;
+        cfg.refine = sbm::RefineMode::None;
+        sbm::ShapeMatcher matcher(cfg);
+        sbm::ModelConfig mcfg;
+        mcfg.angle = {0, 360, 2};
+        int count = 0;
+        {
+            CoutSuppressor s;
+            matcher.addModel("L", feat200, mcfg);
+            auto results = matcher.match(scene);
+            count = (int)results.size();
+        }
+        RECORD("fp_wrong_shape_count", (float)count);
+        CHECK(count == 0, "13c Wrong shape (rect): %d matches (expect 0)", count);
+    }
+}
+
+// ============================================================
+// Section 14: API Contract (origin/angle offset)
+// ============================================================
+static void test_api_contract(const sbm::FeatureSet& feat200, const Mat& templ200) {
+    printf("\n======== 14. API CONTRACT ========\n");
+    LOG("\n======== 14. API CONTRACT ========\n");
+
+    const int scene_sz = 250;
+
+    // 14a: Custom origin (150,100) instead of default center
+    {
+        Mat templ(200, 200, CV_8U, Scalar(0));
+        draw_L(templ, 100, 100, 0, 200);
+
+        float custom_org_x = 150, custom_org_y = 100;
+        double gt_ang = 30;
+
+        sbm::FeatureSet feat;
+        {
+            CoutSuppressor s;
+            feat = sbm::extractFeatures(templ);
+        }
+        feat.setOrigin(custom_org_x, custom_org_y);
+        feat.selectOptimizedPoints(15);
+
+        Mat scene(scene_sz, scene_sz, CV_8U, Scalar(0));
+        place_object(templ, scene, scene_sz/2, scene_sz/2, gt_ang);
+
+        float gt_x, gt_y;
+        compute_gt_origin(scene_sz/2, scene_sz/2, gt_ang,
+                         custom_org_x, custom_org_y, 200, 200, gt_x, gt_y);
+
+        sbm::MatchConfig cfg;
+        cfg.min_score = 40;
+        cfg.refine = sbm::RefineMode::ICP;
+        sbm::ShapeMatcher matcher(cfg);
+        sbm::ModelConfig mcfg;
+        mcfg.angle = {0, 360, 2};
+
+        float pe = 99.0f;
+        {
+            CoutSuppressor s;
+            matcher.addModel("L", feat, mcfg);
+            auto results = matcher.match(scene);
+            if (!results.empty()) {
+                pe = pos_err(results[0].x, results[0].y, gt_x, gt_y);
+                LOG("  14a origin: result=(%.1f,%.1f) gt=(%.1f,%.1f) err=%.1fpx\n",
+                    results[0].x, results[0].y, gt_x, gt_y, pe);
+            } else {
+                LOG("  14a origin: NOT FOUND\n");
+            }
+        }
+        RECORD("api_origin_pos_err", pe);
+        CHECK(pe < 5.0f,
+              "14a Custom origin: pos_err=%.1fpx (expect <5.0)", pe);
+    }
+
+    // 14b: Angle offset
+    {
+        Mat templ(200, 200, CV_8U, Scalar(0));
+        draw_L(templ, 100, 100, 0, 200);
+
+        float angle_offset = 45.0f;
+        double gt_ang = 30;
+
+        sbm::FeatureSet feat;
+        {
+            CoutSuppressor s;
+            feat = sbm::extractFeatures(templ);
+        }
+        feat.setOrigin(100, 75);
+        feat.setAngleOffset(angle_offset);
+        feat.selectOptimizedPoints(15);
+
+        Mat scene(scene_sz, scene_sz, CV_8U, Scalar(0));
+        place_object(templ, scene, scene_sz/2, scene_sz/2, gt_ang);
+
+        sbm::MatchConfig cfg;
+        cfg.min_score = 40;
+        cfg.refine = sbm::RefineMode::ICP;
+        sbm::ShapeMatcher matcher(cfg);
+        sbm::ModelConfig mcfg;
+        mcfg.angle = {0, 360, 2};
+
+        float ae = 99.0f;
+        {
+            CoutSuppressor s;
+            matcher.addModel("L", feat, mcfg);
+            auto results = matcher.match(scene);
+            if (!results.empty()) {
+                float expected_angle = (float)gt_ang + angle_offset;
+                ae = angle_err(results[0].angle, expected_angle);
+                LOG("  14b angle offset: result_angle=%.1f expected=%.1f err=%.1fdeg\n",
+                    results[0].angle, expected_angle, ae);
+            } else {
+                LOG("  14b angle offset: NOT FOUND\n");
+            }
+        }
+        RECORD("api_angle_offset_err", ae);
+        CHECK(ae < 2.0f,
+              "14b Angle offset: err=%.1fdeg (expect <2.0)", ae);
+    }
+}
+
+// ============================================================
+// Section 15: Crash Safety
+// ============================================================
+static void test_crash_safety() {
+    printf("\n======== 15. CRASH SAFETY ========\n");
+    LOG("\n======== 15. CRASH SAFETY ========\n");
+
+    // 15a: match() with empty scene (0x0 Mat)
+    {
+        float survived = 0.0f;
+        try {
+            CoutSuppressor s;
+            Mat empty_scene;
+            sbm::MatchConfig cfg;
+            sbm::ShapeMatcher matcher(cfg);
+            // No model added, just call match on empty
+            auto results = matcher.match(empty_scene);
+            survived = 1.0f;
+        } catch (...) {
+            survived = 1.0f; // exception is OK, not a crash
+        }
+        RECORD("crash_empty_scene", survived);
+        CHECK(survived > 0.5f, "15a match() with empty scene: survived");
+    }
+
+    // 15b: extractFeatures() with empty image
+    {
+        float survived = 0.0f;
+        try {
+            CoutSuppressor s;
+            Mat empty_img;
+            auto feat = sbm::extractFeatures(empty_img);
+            survived = 1.0f;
+        } catch (...) {
+            survived = 1.0f;
+        }
+        RECORD("crash_empty_extract", survived);
+        CHECK(survived > 0.5f, "15b extractFeatures() with empty image: survived");
+    }
+
+    // 15c: FeatureSet::load() with non-existent file
+    {
+        float survived = 0.0f;
+        try {
+            CoutSuppressor s;
+            auto feat = sbm::FeatureSet::load("nonexistent_file_xyz.feat");
+            survived = 1.0f;
+        } catch (...) {
+            survived = 1.0f;
+        }
+        RECORD("crash_load_missing", survived);
+        CHECK(survived > 0.5f, "15c load() non-existent file: survived");
+    }
+
+    // 15d: FeatureSet::load() with garbage file
+    {
+        float survived = 0.0f;
+        try {
+            // Write garbage bytes
+            FILE* f = fopen("output/test_garbage.feat", "wb");
+            if (f) {
+                const char garbage[] = "\x00\xFF\xDE\xAD\xBE\xEF\x01\x02\x03\x04";
+                fwrite(garbage, 1, sizeof(garbage), f);
+                fclose(f);
+            }
+            CoutSuppressor s;
+            auto feat = sbm::FeatureSet::load("output/test_garbage.feat");
+            survived = 1.0f;
+        } catch (...) {
+            survived = 1.0f;
+        }
+        RECORD("crash_load_garbage", survived);
+        CHECK(survived > 0.5f, "15d load() garbage file: survived");
+    }
+
+    // 15e: selectOptimizedPoints() on empty FeatureSet
+    {
+        float survived = 0.0f;
+        try {
+            CoutSuppressor s;
+            sbm::FeatureSet empty_feat;
+            empty_feat.templ_width = 0;
+            empty_feat.templ_height = 0;
+            auto pts = empty_feat.selectOptimizedPoints(8);
+            survived = 1.0f;
+        } catch (...) {
+            survived = 1.0f;
+        }
+        RECORD("crash_select_empty", survived);
+        CHECK(survived > 0.5f, "15e selectOptimizedPoints() empty: survived");
+    }
+
+    // 15f: analyzeSensitivity() on empty FeatureSet
+    {
+        float survived = 0.0f;
+        try {
+            CoutSuppressor s;
+            sbm::FeatureSet empty_feat;
+            empty_feat.templ_width = 0;
+            empty_feat.templ_height = 0;
+            auto sens = empty_feat.analyzeSensitivity();
+            survived = 1.0f;
+        } catch (...) {
+            survived = 1.0f;
+        }
+        RECORD("crash_analyze_empty", survived);
+        CHECK(survived > 0.5f, "15f analyzeSensitivity() empty: survived");
+    }
+}
+
+// ============================================================
+// Section 16: Multi-template
+// ============================================================
+static void test_multi_template(const sbm::FeatureSet& feat200, const Mat& templ200) {
+    printf("\n======== 16. MULTI-TEMPLATE ========\n");
+    LOG("\n======== 16. MULTI-TEMPLATE ========\n");
+
+    // Create triangle template
+    Mat templ_tri(200, 200, CV_8U, Scalar(0));
+    {
+        std::vector<Point> pts = {Point(100, 30), Point(30, 170), Point(170, 170)};
+        fillConvexPoly(templ_tri, pts, Scalar(200));
+    }
+
+    sbm::FeatureSet feat_tri;
+    {
+        CoutSuppressor s;
+        feat_tri = sbm::extractFeatures(templ_tri);
+    }
+    feat_tri.setOrigin(100, 100);
+    feat_tri.selectOptimizedPoints(15);
+
+    // Build scene with both shapes
+    Mat scene(500, 500, CV_8U, Scalar(0));
+    place_object(templ200, scene, 150, 150, 20);     // L-shape
+    place_object(templ_tri, scene, 350, 350, 60);    // Triangle
+
+    sbm::MatchConfig cfg;
+    cfg.min_score = 40;
+    cfg.nms_radius = 80;
+    cfg.refine = sbm::RefineMode::ICP;
+    sbm::ShapeMatcher matcher(cfg);
+    sbm::ModelConfig mcfg;
+    mcfg.angle = {0, 360, 2};
+
+    float l_found = 0.0f, tri_found = 0.0f;
+    {
+        CoutSuppressor s;
+        matcher.addModel("L_shape", feat200, mcfg);
+        matcher.addModel("Triangle", feat_tri, mcfg);
+        auto results = matcher.match(scene);
+
+        for (auto& r : results) {
+            LOG("  16 result: model=%s pos=(%.1f,%.1f) angle=%.1f score=%.1f\n",
+                r.model_name.c_str(), r.x, r.y, r.angle, r.score);
+            if (r.model_name == "L_shape") l_found = 1.0f;
+            if (r.model_name == "Triangle") tri_found = 1.0f;
+        }
+    }
+
+    RECORD("multi_templ_l_found", l_found);
+    RECORD("multi_templ_tri_found", tri_found);
+    CHECK(l_found > 0.5f, "16 Multi-template: L-shape found");
+    CHECK(tri_found > 0.5f, "16 Multi-template: Triangle found");
+}
+
+// ============================================================
+// Section 17: Score Consistency
+// ============================================================
+static void test_score_consistency(const sbm::FeatureSet& feat200, const Mat& templ200) {
+    printf("\n======== 17. SCORE CONSISTENCY ========\n");
+    LOG("\n======== 17. SCORE CONSISTENCY ========\n");
+
+    const int scene_sz = 250;
+
+    auto get_score = [&](const Mat& scene) -> float {
+        sbm::MatchConfig cfg;
+        cfg.min_score = 20;
+        cfg.refine = sbm::RefineMode::None;
+        sbm::ShapeMatcher matcher(cfg);
+        sbm::ModelConfig mcfg;
+        mcfg.angle = {0, 360, 2};
+        float score = 0;
+        {
+            CoutSuppressor s;
+            matcher.addModel("L", feat200, mcfg);
+            auto results = matcher.match(scene);
+            if (!results.empty()) score = results[0].score;
+        }
+        return score;
+    };
+
+    // Clean scene
+    Mat scene_clean(scene_sz, scene_sz, CV_8U, Scalar(0));
+    place_object(templ200, scene_clean, scene_sz/2, scene_sz/2, 30);
+
+    float score_clean = get_score(scene_clean);
+
+    // Noise scene
+    Mat scene_noise = add_noise(scene_clean, 20);
+    float score_noise = get_score(scene_noise);
+
+    // Blur scene
+    Mat scene_blur;
+    GaussianBlur(scene_clean, scene_blur, Size(11, 11), 0);
+    float score_blur = get_score(scene_blur);
+
+    RECORD("score_clean", score_clean);
+    RECORD("score_noise", score_noise);
+    RECORD("score_blur", score_blur);
+
+    // Record ratio: clean/noise >= 0.9 is acceptable (noise can add spurious edges
+    // that inflate coarse scores slightly)
+    float ratio = (score_noise > 0) ? score_clean / score_noise : 99.0f;
+    RECORD("score_clean_noise_ratio", ratio);
+
+    CHECK(score_clean > 50,
+          "17 Score clean=%.1f (expect >50)", score_clean);
+    CHECK(score_noise > 30,
+          "17 Score noise=%.1f still detectable (expect >30)", score_noise);
+    CHECK(score_blur > 30,
+          "17 Score blur=%.1f still detectable (expect >30)", score_blur);
+
+    LOG("  17 Scores: clean=%.1f noise=%.1f blur=%.1f ratio=%.2f\n",
+        score_clean, score_noise, score_blur, ratio);
+}
+
+// ============================================================
+// Section 18: Different Template Shapes
+// ============================================================
+static void test_different_shapes(const Mat& templ200) {
+    printf("\n======== 18. DIFFERENT TEMPLATE SHAPES ========\n");
+    LOG("\n======== 18. DIFFERENT TEMPLATE SHAPES ========\n");
+
+    const int scene_sz = 300;
+
+    // Helper: create template, place in scene, match
+    auto test_shape = [&](const char* name, const Mat& templ, double gt_ang,
+                          sbm::RefineMode mode) -> std::pair<float, float> {
+        sbm::FeatureSet feat;
+        {
+            CoutSuppressor s;
+            feat = sbm::extractFeatures(templ);
+        }
+        feat.setOrigin(templ.cols / 2.0f, templ.rows / 2.0f);
+        feat.selectOptimizedPoints(15);
+
+        if (feat.numFeatures() == 0) {
+            LOG("  18 %s: no features extracted\n", name);
+            return {0.0f, 99.0f};
+        }
+
+        Mat scene(scene_sz, scene_sz, CV_8U, Scalar(0));
+        place_object(templ, scene, scene_sz/2, scene_sz/2, gt_ang);
+
+        sbm::MatchConfig cfg;
+        cfg.min_score = 30;
+        cfg.refine = mode;
+        sbm::ShapeMatcher matcher(cfg);
+        sbm::ModelConfig mcfg;
+        mcfg.angle = {0, 360, 2};
+
+        float found = 0.0f, ae = 99.0f;
+        {
+            CoutSuppressor s;
+            matcher.addModel(name, feat, mcfg);
+            auto results = matcher.match(scene);
+            if (!results.empty()) {
+                found = 1.0f;
+                ae = angle_err(results[0].angle, (float)gt_ang);
+                LOG("  18 %s: found at (%.1f,%.1f)@%.1f err=%.2fdeg\n",
+                    name, results[0].x, results[0].y, results[0].angle, ae);
+            } else {
+                LOG("  18 %s: NOT FOUND\n", name);
+            }
+        }
+        return {found, ae};
+    };
+
+    // Rectangle template (200x120, thick border)
+    Mat templ_rect(200, 200, CV_8U, Scalar(0));
+    rectangle(templ_rect, Point(30, 50), Point(170, 150), Scalar(200), 4);
+
+    // Thin pole template (200x20)
+    Mat templ_pole(200, 200, CV_8U, Scalar(0));
+    rectangle(templ_pole, Point(90, 10), Point(110, 190), Scalar(200), -1);
+
+    // Triangle template
+    Mat templ_tri(200, 200, CV_8U, Scalar(0));
+    {
+        std::vector<Point> pts = {Point(100, 20), Point(20, 180), Point(180, 180)};
+        fillConvexPoly(templ_tri, pts, Scalar(200));
+    }
+
+    // Test with coarse detection first
+    auto res_rect = test_shape("Rect", templ_rect, 25, sbm::RefineMode::None);
+    auto res_pole = test_shape("Pole", templ_pole, 40, sbm::RefineMode::None);
+    auto res_tri  = test_shape("Tri",  templ_tri,  55, sbm::RefineMode::None);
+    float rect_found = res_rect.first;
+    float pole_found = res_pole.first;
+    float tri_found  = res_tri.first;
+
+    // Test ROI refinement angle accuracy for rect and triangle
+    float rect_roi_ang = 99.0f, tri_roi_ang = 99.0f;
+    if (rect_found > 0.5f) {
+        auto rr = test_shape("Rect_ROI", templ_rect, 25, sbm::RefineMode::ROI);
+        rect_roi_ang = rr.second;
+    }
+    if (tri_found > 0.5f) {
+        auto tr = test_shape("Tri_ROI", templ_tri, 55, sbm::RefineMode::ROI);
+        tri_roi_ang = tr.second;
+    }
+
+    RECORD("shape_rect_found", rect_found);
+    RECORD("shape_pole_found", pole_found);
+    RECORD("shape_tri_found", tri_found);
+    RECORD("shape_rect_roi_ang", rect_roi_ang);
+    RECORD("shape_tri_roi_ang", tri_roi_ang);
+
+    CHECK(rect_found > 0.5f, "18 Rectangle detected");
+    CHECK(pole_found > 0.5f, "18 Thin pole detected");
+    CHECK(tri_found > 0.5f,  "18 Triangle detected");
+    CHECK(rect_roi_ang < 1.0f,
+          "18 Rectangle ROI angle err=%.2fdeg (expect <1.0)", rect_roi_ang);
+    CHECK(tri_roi_ang < 1.0f,
+          "18 Triangle ROI angle err=%.2fdeg (expect <1.0)", tri_roi_ang);
+}
+
+// ============================================================
 // Main
 // ============================================================
 static void print_help(const char* prog) {
@@ -1505,6 +2133,14 @@ static void print_help(const char* prog) {
     printf("  8  Edge cases (near-edge object, small template)\n");
     printf("  9  Noise & blur stability limits\n");
     printf("  10 Multi-resolution speed (360p, 1080p, 20MP)\n");
+    printf("  11 Determinism (repeated match consistency)\n");
+    printf("  12 Serialization round-trip (save/load features)\n");
+    printf("  13 False positives (empty, noise, wrong shape)\n");
+    printf("  14 API contract (origin, angle offset)\n");
+    printf("  15 Crash safety (empty inputs, bad files)\n");
+    printf("  16 Multi-template (L-shape + triangle)\n");
+    printf("  17 Score consistency (clean vs noise vs blur)\n");
+    printf("  18 Different template shapes (rect, pole, triangle)\n");
     printf("  all  Run all sections (default)\n");
     printf("\nExamples:\n");
     printf("  %s                        # print this help\n", prog);
@@ -1542,7 +2178,7 @@ int main(int argc, char** argv) {
         }
     }
     if (run_all || sections.empty()) {
-        for (int i = 1; i <= 10; i++) sections.insert(i);
+        for (int i = 1; i <= 18; i++) sections.insert(i);
     }
 
 #ifdef _WIN32
@@ -1587,6 +2223,14 @@ int main(int argc, char** argv) {
     if (sections.count(8))  test_edge_cases(feat200, templ200);
     if (sections.count(9))  test_noise_blur_stability(feat200, templ200);
     if (sections.count(10)) test_resolution_speed(feat200, templ200);
+    if (sections.count(11)) test_determinism(feat200, templ200);
+    if (sections.count(12)) test_serialization(feat200, templ200);
+    if (sections.count(13)) test_false_positives(feat200, templ200);
+    if (sections.count(14)) test_api_contract(feat200, templ200);
+    if (sections.count(15)) test_crash_safety();
+    if (sections.count(16)) test_multi_template(feat200, templ200);
+    if (sections.count(17)) test_score_consistency(feat200, templ200);
+    if (sections.count(18)) test_different_shapes(templ200);
 
     // Compute cross-validation metrics before evaluation
     {

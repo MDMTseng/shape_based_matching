@@ -942,14 +942,20 @@ static void test_speed_benchmarks(const sbm::FeatureSet& feat200, const Mat& tem
             matcher.addModel("L", feat200, mcfg);
             matcher.match(scene_fhd);  // warmup
 
-            double total_ms = 0;
-            for (int i = 0; i < 5; i++) {
+            // 10 runs, sort, middle 33% mean
+            const int NR = 10;
+            std::vector<double> times(NR);
+            for (int i = 0; i < NR; i++) {
                 auto t0 = std::chrono::high_resolution_clock::now();
                 matcher.match(scene_fhd);
-                total_ms += std::chrono::duration<double, std::milli>(
+                times[i] = std::chrono::duration<double, std::milli>(
                     std::chrono::high_resolution_clock::now() - t0).count();
             }
-            avg_ms = total_ms / 5.0;
+            std::sort(times.begin(), times.end());
+            int lo = NR / 3, hi = NR * 2 / 3;
+            double sum = 0;
+            for (int i = lo; i <= hi; i++) sum += times[i];
+            avg_ms = sum / (hi - lo + 1);
         }
 
         if (bm.mode == sbm::RefineMode::None) RECORD("fhd10_coarse_ms", (float)avg_ms);
@@ -1325,16 +1331,23 @@ static void test_resolution_speed(const sbm::FeatureSet& feat200, const Mat& tem
             // Warm up
             { CoutSuppressor sup; matcher.match(scene); }
 
-            // Average 3 runs
-            double total_ms = 0;
+            // 10 runs, sort, take middle 33% (runs 4-6), average
+            const int N_RUNS = 10;
+            std::vector<double> run_times(N_RUNS);
             std::vector<sbm::MatchResult> last_results;
-            for (int r = 0; r < 3; r++) {
+            for (int r = 0; r < N_RUNS; r++) {
                 auto t0 = std::chrono::high_resolution_clock::now();
                 { CoutSuppressor sup; last_results = matcher.match(scene); }
-                total_ms += std::chrono::duration<double, std::milli>(
+                run_times[r] = std::chrono::duration<double, std::milli>(
                     std::chrono::high_resolution_clock::now() - t0).count();
             }
-            double avg_ms = total_ms / 3.0;
+            std::sort(run_times.begin(), run_times.end());
+            // Middle 33%: indices 3,4,5,6 (4 values out of 10)
+            int lo = N_RUNS / 3;       // 3
+            int hi = N_RUNS * 2 / 3;   // 6
+            double avg_ms = 0;
+            for (int r = lo; r <= hi; r++) avg_ms += run_times[r];
+            avg_ms /= (hi - lo + 1);
 
             // Per-object GT matching: greedy nearest assignment
             int n_matched = 0;

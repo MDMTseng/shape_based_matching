@@ -28,11 +28,13 @@ id,type,metric,op,threshold,description
 4a_pts8,check,opt_pts_8_count,>=,1,selectOptimizedPoints(8) returns at least 1 point
 4a_pts8_max,check,opt_pts_8_count,<=,8,selectOptimizedPoints(8) returns at most 8
 4a_pts15,check,opt_pts_15_count,>=,1,selectOptimizedPoints(15) returns at least 1 point
-4b_sens,check,opt_pts_worst_ang,<,2.0,Sensitivity worst_ang for L-shape 8pts — typical 1.0
+# NOTE: 4b_sens original threshold was 1.1, relaxed to 1.5 (Fedorov), then 2.0 (D-optimal). Track drift.
+4b_sens,check,opt_pts_worst_ang,<,2.0,Sensitivity worst_ang for L-shape 8pts — typical 1.0 (original: 1.1)
 4c_corners,check,opt_pts_corner_count,>=,2,Corner priority: at least 2 corners in 8 selected points
 4d_cache,check,cache_consistent,==,1,Cache returns consistent result on second call
 # ======== 5. Sensitivity Analysis ========
-5a_lshape,check,lshape_worst_ang,<,2.0,L-shape not fragile — typical 1.0
+# NOTE: 5a_lshape original threshold was 1.1, relaxed to 1.5, then 2.0. Track drift.
+5a_lshape,check,lshape_worst_ang,<,2.0,L-shape not fragile — typical 1.0 (original: 1.1)
 5b_line,check,line_worst_pos,>,0.4,Degenerate single line detected as high-sensitivity
 # ======== 6. Speed Benchmarks (warn at ~1.3x actual) ========
 6_speed_coarse,warn,fhd10_coarse_ms,<,30.0,FHD 10-obj coarse speed (ms) — typical 22ms

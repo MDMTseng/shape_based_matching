@@ -1000,6 +1000,18 @@ int main() {
     test_sensitivity(feat200);
     test_speed_benchmarks(feat200, templ200);
 
+    // Compute cross-validation metrics before evaluation
+    {
+        auto it_roi_pos = g_metrics.find("roi_pos_mean");
+        auto it_icp_pos = g_metrics.find("icp_pos_mean");
+        auto it_roi_ang = g_metrics.find("roi_ang_mean");
+        auto it_icp_ang = g_metrics.find("icp_ang_mean");
+        if (it_roi_pos != g_metrics.end() && it_icp_pos != g_metrics.end() && it_icp_pos->second > 0)
+            RECORD("roi_icp_pos_ratio", it_roi_pos->second / it_icp_pos->second);
+        if (it_icp_ang != g_metrics.end() && it_roi_ang != g_metrics.end() && it_roi_ang->second > 0)
+            RECORD("icp_roi_ang_ratio", it_icp_ang->second / it_roi_ang->second);
+    }
+
     evaluate_thresholds();
 
     // --- Summary ---

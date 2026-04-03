@@ -166,3 +166,46 @@ No, for two reasons: (1) the selection happens once at template registration tim
 
 **Q5: Unified objective without two-phase?**
 Yes, this is exactly what `max log det(I_w(S))` with `w_i = 1/sigma_i^2` provides. The weight encodes match quality; the Jacobian encodes geometric contribution. The greedy gain `log(1 + w_i * J_i * I_w^{-1} * J_i^T)` automatically balances both in a single scalar score. No corner-first or edge-second logic is needed.
+
+## Implementation Attempt: Results
+
+The unified approach was implemented and tested. **It failed in practice:**
+
+- ROI accuracy degraded from 0.064° to 0.62° (10x worse)
+- Only 4 features selected (instead of 8) due to blocking
+- All selected features were edges with same normal direction
+
+### Root Cause
+
+The weight `w_i = n^T M n / kappa^2` gives edges **higher** weight than corners because:
+- Edge: `n` aligns with the gradient direction → `n^T M n ≈ lambda_1` (large)
+- Corner: `n` is at an angle to both gradient directions → `n^T M n ≈ lambda_2` (smaller)
+
+This causes edges to dominate the det(I_w), but they only provide 1D constraint.
+The Jacobian `J_i = [a_i, nx, ny]` is already 1D (one row), so weighting by `1/sigma_normal^2`
+correctly measures the normal-direction precision but OVERWEIGHTS the total information
+contribution of edges relative to corners.
+
+### The Fundamental Issue
+
+The point-to-plane formulation already handles the anisotropy by projecting error onto the
+normal. The `sigma_i` from the structure tensor measures precision *along that projection*,
+which is correct. But det(I_w) doesn't know that an edge feature is "missing" the tangential
+constraint — it sees a well-weighted 1D constraint and is satisfied.
+
+A corner provides the same normal constraint PLUS an implicit tangential constraint that
+prevents the matched position from sliding. This implicit constraint is not captured by
+the Jacobian rows (only one row per feature) but is real in practice (matchTemplate pins
+the position in 2D).
+
+### Practical Conclusion
+
+The two-phase approach (corners first by leverage, edges by det) works because:
+1. Phase 1 ensures corners are selected — they provide 2D position anchoring
+2. Phase 2 fills geometric gaps — diverse normals and high angular leverage
+
+The unified `det(I_w)` fails because the Jacobian formulation is structurally blind to
+the 2D vs 1D matching quality difference. A fix would require modeling corners as
+contributing TWO Jacobian rows (normal + tangent), but this changes the problem structure.
+
+**Current best: two-phase selection with 0.064° / 0.054px accuracy.**

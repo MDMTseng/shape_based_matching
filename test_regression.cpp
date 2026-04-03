@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <numeric>
 #include <tuple>
+#include <set>
 #ifdef _WIN32
 #include <io.h>
 #include <fcntl.h>
@@ -1425,7 +1426,54 @@ static void test_resolution_speed(const sbm::FeatureSet& feat200, const Mat& tem
 // ============================================================
 // Main
 // ============================================================
-int main() {
+static void print_help(const char* prog) {
+    printf("Usage: %s [sections...]\n\n", prog);
+    printf("Sections:\n");
+    printf("  1  Coarse matching (detection, accuracy, multi-object, speed)\n");
+    printf("  2  ICP inverse refinement (angle/pos accuracy, divergence, noise)\n");
+    printf("  3  ROI refinement (angle/pos, PCA fix, sub-pixel, noise)\n");
+    printf("  4  Feature selection (point count, sensitivity, corners, cache)\n");
+    printf("  5  Sensitivity analysis (L-shape, degenerate line)\n");
+    printf("  6  Speed benchmarks FHD 10-obj (coarse, ICP, ROI)\n");
+    printf("  7  Cross-validation (ROI vs ICP ratios) [auto if 2+3 run]\n");
+    printf("  8  Edge cases (near-edge object, small template)\n");
+    printf("  9  Noise & blur stability limits\n");
+    printf("  10 Multi-resolution speed (360p, 1080p, 20MP)\n");
+    printf("  all  Run all sections (default)\n");
+    printf("\nExamples:\n");
+    printf("  %s           # print this help\n", prog);
+    printf("  %s all       # run all 98 checks\n", prog);
+    printf("  %s 2 3       # run ICP + ROI refinement only\n", prog);
+    printf("  %s 6 10      # speed benchmarks only\n", prog);
+    printf("  %s 9         # noise/blur stability only\n", prog);
+    printf("\nThresholds loaded from test_thresholds.csv (editable without recompile).\n");
+    printf("Results logged to output/regression_log.txt.\n");
+}
+
+int main(int argc, char** argv) {
+    // Parse which sections to run
+    std::set<int> sections;
+    bool run_all = false;
+
+    if (argc < 2) {
+        print_help(argv[0]);
+        return 0;
+    }
+
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "all") { run_all = true; break; }
+        if (arg == "-h" || arg == "--help") { print_help(argv[0]); return 0; }
+        try { sections.insert(std::stoi(arg)); } catch (...) {
+            printf("Unknown argument: %s\n", argv[i]);
+            print_help(argv[0]);
+            return 1;
+        }
+    }
+    if (run_all) {
+        for (int i = 1; i <= 10; i++) sections.insert(i);
+    }
+
 #ifdef _WIN32
     system("if not exist output mkdir output");
 #else
@@ -1438,6 +1486,9 @@ int main() {
     load_thresholds("test_thresholds.csv");
 
     printf("===== SHAPE MATCHING REGRESSION TEST =====\n");
+    printf("Sections: ");
+    for (int s : sections) printf("%d ", s);
+    printf("\n");
     LOG("===== SHAPE MATCHING REGRESSION TEST =====\n");
 
     // --- Create 200x200 L-shape template ---
@@ -1445,23 +1496,22 @@ int main() {
     draw_L(templ200, 100, 100, 0, 200);
 
     auto feat200 = sbm::extractFeatures(templ200);
-    feat200.setOrigin(100, 75);  // user origin offset (0, -25) from center
+    feat200.setOrigin(100, 75);
     printf("Template: 200x200 L-shape, %d features, origin=(100,75)\n", feat200.numFeatures());
     LOG("Template: 200x200 L-shape, %d features, origin=(100,75)\n", feat200.numFeatures());
 
-    // Pre-compute optimized points (also seeds the cache)
     feat200.selectOptimizedPoints(15);
 
-    // --- Run all sections ---
-    test_coarse_matching(feat200, templ200);
-    test_icp_refinement(feat200, templ200);
-    test_roi_refinement(feat200, templ200);
-    test_feature_selection(feat200);
-    test_sensitivity(feat200);
-    test_speed_benchmarks(feat200, templ200);
-    test_edge_cases(feat200, templ200);
-    test_noise_blur_stability(feat200, templ200);
-    test_resolution_speed(feat200, templ200);
+    // --- Run selected sections ---
+    if (sections.count(1))  test_coarse_matching(feat200, templ200);
+    if (sections.count(2))  test_icp_refinement(feat200, templ200);
+    if (sections.count(3))  test_roi_refinement(feat200, templ200);
+    if (sections.count(4))  test_feature_selection(feat200);
+    if (sections.count(5))  test_sensitivity(feat200);
+    if (sections.count(6))  test_speed_benchmarks(feat200, templ200);
+    if (sections.count(8))  test_edge_cases(feat200, templ200);
+    if (sections.count(9))  test_noise_blur_stability(feat200, templ200);
+    if (sections.count(10)) test_resolution_speed(feat200, templ200);
 
     // Compute cross-validation metrics before evaluation
     {

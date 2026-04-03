@@ -679,12 +679,23 @@ int main() {
 
         // --- GT orientation debug: single objects at known angles ---
         {
-            float dbg_angles[] = {0, 45, 90, 135, 180, 270};
-            float dbg_skews[] = {0, 0.05f, 0.10f, 0.15f};
-            int n_skews = sizeof(dbg_skews)/sizeof(dbg_skews[0]);
-            int na = sizeof(dbg_angles)/sizeof(dbg_angles[0]);
+            // Finer angle sweep: every 5 degrees, no skew
+            std::vector<float> dbg_angles;
+            for (float a = 0; a < 360; a += 5) dbg_angles.push_back(a);
+            float dbg_skews[] = {0};
+            int n_skews = 1;
+            int na = (int)dbg_angles.size();
             int cell = 250;
-            Mat dbg(cell * n_skews, cell * na, CV_8UC3, Scalar(30,30,30));
+
+            // Collect errors for chart
+            std::vector<float> icp_ang_errs(na), roi_ang_errs(na);
+            std::vector<float> icp_pos_errs(na), roi_pos_errs(na);
+
+            // Skip image grid for large angle count
+            bool make_grid = (na <= 12);
+            Mat dbg;
+            if (make_grid)
+                dbg = Mat(cell * n_skews, cell * na, CV_8UC3, Scalar(30,30,30));
 
             for (int si = 0; si < n_skews; si++) {
             float cur_skew = dbg_skews[si];
@@ -820,38 +831,143 @@ int main() {
                 std::cout.rdbuf(orig_cout);
                 null_stream.str(""); null_stream.clear();
 
-                // Draw: ICP=red, ROI=cyan (coarse hidden)
-                if (!icp_results.empty()) drawResult(icp_results[0], Scalar(0,0,255), 0.8f);
-                if (!roi_results.empty()) drawResult(roi_results[0], Scalar(255,255,0), 0.7f);
-
-                // Labels at bottom
+                // Collect errors
+                float icp_ae = 0, roi_ae = 0, icp_pe = 0, roi_pe = 0;
                 if (!icp_results.empty()) {
-                    float ae = icp_results[0].angle - ang;
-                    if (ae>180) ae-=360; if (ae<-180) ae+=360;
-                    snprintf(lbl,sizeof(lbl),"I:%+.1f", ae);
-                    cv::putText(cell_color, lbl, Point(5,cell-15),
-                        FONT_HERSHEY_SIMPLEX, 0.4, Scalar(0,0,255), 1);
+                    icp_ae = icp_results[0].angle - ang;
+                    if (icp_ae>180) icp_ae-=360; if (icp_ae<-180) icp_ae+=360;
+                    float o_x2=0, o_y2=-25;
+                    float rr3 = -icp_results[0].angle*(float)CV_PI/180.0f;
+                    float icx = icp_results[0].x-(std::cos(rr3)*o_x2-std::sin(rr3)*o_y2);
+                    float icy = icp_results[0].y-(std::sin(rr3)*o_x2+std::cos(rr3)*o_y2);
+                    icp_pe = std::sqrt((icx-cx)*(icx-cx)+(icy-cy)*(icy-cy));
                 }
                 if (!roi_results.empty()) {
-                    float ae = roi_results[0].angle - ang;
-                    if (ae>180) ae-=360; if (ae<-180) ae+=360;
-                    snprintf(lbl,sizeof(lbl),"R:%+.1f", ae);
+                    roi_ae = roi_results[0].angle - ang;
+                    if (roi_ae>180) roi_ae-=360; if (roi_ae<-180) roi_ae+=360;
+                    float o_x2=0, o_y2=-25;
+                    float rr3 = -roi_results[0].angle*(float)CV_PI/180.0f;
+                    float rcx = roi_results[0].x-(std::cos(rr3)*o_x2-std::sin(rr3)*o_y2);
+                    float rcy = roi_results[0].y-(std::sin(rr3)*o_x2+std::cos(rr3)*o_y2);
+                    roi_pe = std::sqrt((rcx-cx)*(rcx-cx)+(rcy-cy)*(rcy-cy));
+                }
+                icp_ang_errs[ai] = icp_ae;
+                roi_ang_errs[ai] = roi_ae;
+                icp_pos_errs[ai] = icp_pe;
+                roi_pos_errs[ai] = roi_pe;
+
+                if (make_grid) {
+                    if (!icp_results.empty()) drawResult(icp_results[0], Scalar(0,0,255), 0.8f);
+                    if (!roi_results.empty()) drawResult(roi_results[0], Scalar(255,255,0), 0.7f);
+                    snprintf(lbl,sizeof(lbl),"I:%+.1f", icp_ae);
+                    cv::putText(cell_color, lbl, Point(5,cell-15),
+                        FONT_HERSHEY_SIMPLEX, 0.4, Scalar(0,0,255), 1);
+                    snprintf(lbl,sizeof(lbl),"R:%+.1f", roi_ae);
                     cv::putText(cell_color, lbl, Point(cell/2,cell-15),
                         FONT_HERSHEY_SIMPLEX, 0.4, Scalar(255,255,0), 1);
+                    if (ai == 0) {
+                        char slbl[32]; snprintf(slbl,sizeof(slbl),"skew=%.2f", cur_skew);
+                        cv::putText(cell_color, slbl, Point(5,45),
+                            FONT_HERSHEY_SIMPLEX, 0.45, Scalar(200,200,200), 1);
+                    }
+                    cell_color.copyTo(dbg(Rect(ai*cell, si*cell, cell, cell)));
                 }
-
-                // Skew label on left side
-                if (ai == 0) {
-                    char slbl[32]; snprintf(slbl,sizeof(slbl),"skew=%.2f", cur_skew);
-                    cv::putText(cell_color, slbl, Point(5,45),
-                        FONT_HERSHEY_SIMPLEX, 0.45, Scalar(200,200,200), 1);
-                }
-
-                cell_color.copyTo(dbg(Rect(ai*cell, si*cell, cell, cell)));
             }
             }
-            imwrite("output/gt_debug.png", dbg);
-            printf("  -> saved output/gt_debug.png\n");
+
+            if (make_grid) {
+                imwrite("output/gt_debug.png", dbg);
+                printf("  -> saved output/gt_debug.png\n");
+            }
+
+            // Draw error chart
+            {
+                int chart_w = 800, chart_h = 400;
+                int margin_l = 60, margin_r = 20, margin_t = 40, margin_b = 50;
+                int plot_w = chart_w - margin_l - margin_r;
+                int plot_h = chart_h - margin_t - margin_b;
+                Mat chart(chart_h, chart_w, CV_8UC3, Scalar(255,255,255));
+
+                // Find max error for Y scale
+                float max_ang = 0;
+                for (int i = 0; i < na; i++) {
+                    max_ang = std::max(max_ang, std::abs(icp_ang_errs[i]));
+                    max_ang = std::max(max_ang, std::abs(roi_ang_errs[i]));
+                }
+                max_ang = std::ceil(max_ang + 0.5f);
+                if (max_ang < 2) max_ang = 2;
+
+                // Grid lines
+                for (int g = -(int)max_ang; g <= (int)max_ang; g++) {
+                    int y = margin_t + plot_h/2 - (int)(g * plot_h / (2*max_ang));
+                    cv::line(chart, Point(margin_l, y), Point(margin_l+plot_w, y),
+                             Scalar(230,230,230), 1);
+                    if (g % 2 == 0) {
+                        char gl[16]; snprintf(gl,sizeof(gl),"%+d", g);
+                        cv::putText(chart, gl, Point(5, y+5),
+                            FONT_HERSHEY_SIMPLEX, 0.35, Scalar(100,100,100), 1);
+                    }
+                }
+                // Zero line
+                int y0 = margin_t + plot_h/2;
+                cv::line(chart, Point(margin_l, y0), Point(margin_l+plot_w, y0),
+                         Scalar(180,180,180), 2);
+
+                // X axis labels
+                for (int x = 0; x <= 360; x += 45) {
+                    int px = margin_l + x * plot_w / 360;
+                    cv::line(chart, Point(px, margin_t), Point(px, margin_t+plot_h),
+                             Scalar(230,230,230), 1);
+                    char xl[16]; snprintf(xl,sizeof(xl),"%d", x);
+                    cv::putText(chart, xl, Point(px-10, chart_h-10),
+                        FONT_HERSHEY_SIMPLEX, 0.35, Scalar(100,100,100), 1);
+                }
+
+                // Plot ICP errors (red) and ROI errors (cyan)
+                auto plotLine = [&](const std::vector<float>& errs, Scalar color) {
+                    for (int i = 1; i < na; i++) {
+                        int x1 = margin_l + (int)(dbg_angles[i-1] * plot_w / 360);
+                        int x2 = margin_l + (int)(dbg_angles[i] * plot_w / 360);
+                        int y1 = margin_t + plot_h/2 - (int)(errs[i-1] * plot_h / (2*max_ang));
+                        int y2 = margin_t + plot_h/2 - (int)(errs[i] * plot_h / (2*max_ang));
+                        cv::line(chart, Point(x1,y1), Point(x2,y2), color, 2, LINE_AA);
+                    }
+                    // Dots
+                    for (int i = 0; i < na; i++) {
+                        int x = margin_l + (int)(dbg_angles[i] * plot_w / 360);
+                        int y = margin_t + plot_h/2 - (int)(errs[i] * plot_h / (2*max_ang));
+                        cv::circle(chart, Point(x,y), 3, color, -1, LINE_AA);
+                    }
+                };
+                plotLine(icp_ang_errs, Scalar(0,0,255));    // red = ICP
+                plotLine(roi_ang_errs, Scalar(255,200,0));   // cyan = ROI
+
+                // Title and legend
+                cv::putText(chart, "Angle Error vs GT Angle (deg)", Point(margin_l, 25),
+                    FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0,0,0), 1);
+                cv::putText(chart, "ICP", Point(chart_w-100, 20),
+                    FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0,0,255), 2);
+                cv::putText(chart, "ROI", Point(chart_w-100, 40),
+                    FONT_HERSHEY_SIMPLEX, 0.5, Scalar(255,200,0), 2);
+                cv::putText(chart, "angle (deg)", Point(chart_w/2-30, chart_h-2),
+                    FONT_HERSHEY_SIMPLEX, 0.4, Scalar(100,100,100), 1);
+
+                imwrite("output/angle_error_chart.png", chart);
+                printf("  -> saved output/angle_error_chart.png\n");
+
+                // Also write data file
+                FILE* ef = fopen("output/angle_errors.txt", "w");
+                if (ef) {
+                    fprintf(ef, "%-8s  %8s  %8s  %8s  %8s\n",
+                            "Angle", "ICP_ang", "ICP_pos", "ROI_ang", "ROI_pos");
+                    for (int i = 0; i < na; i++)
+                        fprintf(ef, "%-8.0f  %+8.2f  %8.2f  %+8.2f  %8.2f\n",
+                                dbg_angles[i], icp_ang_errs[i], icp_pos_errs[i],
+                                roi_ang_errs[i], roi_pos_errs[i]);
+                    fclose(ef);
+                    printf("  -> saved output/angle_errors.txt\n");
+                }
+            }
         }
 
         // --- Skew test: objects with perspective distortion ---

@@ -313,9 +313,21 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
                                                      cv::Point2f(ex, ey),
                                                      config.search_half);
 
+            // PCA on UNROTATED template patch (eigenvectors in template space)
+            int tx = (int)(sp.pos.x + tcx + 0.5f);
+            int ty = (int)(sp.pos.y + tcy + 0.5f);
+            int h = config.roi_half;
+            if (tx-h<0||tx+h>=templ_img.cols||ty-h<0||ty+h>=templ_img.rows)
+                h = std::min({tx,ty,templ_img.cols-1-tx,templ_img.rows-1-ty});
             float eigvals[2];
             cv::Point2f eigvecs[2];
-            roiPCA(roi, eigvals, eigvecs);
+            if (h >= 5) {
+                cv::Mat roi_unrot = templ_img(cv::Rect(tx-h, ty-h, 2*h, 2*h));
+                roiPCA(roi_unrot, eigvals, eigvecs);
+            } else {
+                eigvals[0] = eigvals[1] = 0;
+                eigvecs[0] = cv::Point2f(1,0); eigvecs[1] = cv::Point2f(0,1);
+            }
 
             MatchedPoint mp;
             mp.dst = matched;

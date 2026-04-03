@@ -963,6 +963,130 @@ static void test_speed_benchmarks(const sbm::FeatureSet& feat200, const Mat& tem
 }
 
 // ============================================================
+// Section 8: Edge Case Templates
+// ============================================================
+static void test_edge_cases(const sbm::FeatureSet& feat200, const Mat& templ200) {
+    printf("\n======== 8. EDGE CASE TEMPLATES ========\n");
+    LOG("\n======== 8. EDGE CASE TEMPLATES ========\n");
+
+    const float org_x = 100, org_y = 75;
+
+    // --- 8a: Near-edge object ---
+    {
+        const int scene_sz = 250;
+        const int obj_cx = 100, obj_cy = 50;  // close to top edge
+        const double gt_ang = 0;
+
+        Mat scene(scene_sz, scene_sz, CV_8U, Scalar(0));
+        place_object(templ200, scene, obj_cx, obj_cy, gt_ang);
+
+        float gt_x, gt_y;
+        compute_gt_origin(obj_cx, obj_cy, gt_ang,
+                         org_x, org_y, 200, 200, gt_x, gt_y);
+
+        // ICP
+        {
+            sbm::MatchConfig cfg;
+            cfg.min_score = 40;
+            cfg.refine = sbm::RefineMode::ICP;
+            sbm::ShapeMatcher matcher(cfg);
+            sbm::ModelConfig mcfg;
+            mcfg.angle = {0, 360, 2};
+
+            float found = 0.0f;
+            {
+                CoutSuppressor s;
+                matcher.addModel("L", feat200, mcfg);
+                auto results = matcher.match(scene);
+                if (!results.empty()) {
+                    found = 1.0f;
+                    LOG("  8a ICP: found at (%.1f,%.1f)@%.1f\n",
+                        results[0].x, results[0].y, results[0].angle);
+                } else {
+                    LOG("  8a ICP: NOT FOUND\n");
+                }
+            }
+            RECORD("edge_icp_found", found);
+        }
+
+        // ROI
+        {
+            sbm::MatchConfig cfg;
+            cfg.min_score = 40;
+            cfg.refine = sbm::RefineMode::ROI;
+            sbm::ShapeMatcher matcher(cfg);
+            sbm::ModelConfig mcfg;
+            mcfg.angle = {0, 360, 2};
+
+            float found = 0.0f;
+            {
+                CoutSuppressor s;
+                matcher.addModel("L", feat200, mcfg);
+                auto results = matcher.match(scene);
+                if (!results.empty()) {
+                    found = 1.0f;
+                    LOG("  8a ROI: found at (%.1f,%.1f)@%.1f\n",
+                        results[0].x, results[0].y, results[0].angle);
+                } else {
+                    LOG("  8a ROI: NOT FOUND\n");
+                }
+            }
+            RECORD("edge_roi_found", found);
+        }
+
+        CHECK(g_metrics["edge_icp_found"] > 0.5f,
+              "8a Near-edge object found by ICP");
+        CHECK(g_metrics["edge_roi_found"] > 0.5f,
+              "8a Near-edge object found by ROI");
+    }
+
+    // --- 8b: Small template ---
+    {
+        const int scene_sz = 250;
+
+        // Create small 40x40 L-shape template with clear edges
+        Mat small_templ(40, 40, CV_8U, Scalar(0));
+        // Vertical bar: 5px wide, 25px tall
+        rectangle(small_templ, Point(8, 5), Point(12, 30), Scalar(200), -1);
+        // Horizontal bar: 15px wide, 5px tall (forms L)
+        rectangle(small_templ, Point(8, 25), Point(25, 30), Scalar(200), -1);
+
+        float found = 0.0f;
+        {
+            CoutSuppressor s;
+            // Use single pyramid level with small T for small template
+            auto small_feat = sbm::extractFeatures(small_templ, cv::Mat(), 64, {2});
+            LOG("  8b Small template features: %d\n", small_feat.numFeatures());
+            if (small_feat.numFeatures() > 0) {
+                Mat scene(scene_sz, scene_sz, CV_8U, Scalar(0));
+                place_object(small_templ, scene, scene_sz / 2, scene_sz / 2, 0);
+
+                sbm::MatchConfig cfg;
+                cfg.min_score = 30;
+                cfg.refine = sbm::RefineMode::None;
+                sbm::ShapeMatcher matcher(cfg);
+                sbm::ModelConfig mcfg;
+                mcfg.angle = {0, 360, 5};
+
+                matcher.addModel("SmallL", small_feat, mcfg);
+                auto results = matcher.match(scene);
+                if (!results.empty()) {
+                    found = 1.0f;
+                    LOG("  8b Small template: found at (%.1f,%.1f)@%.1f\n",
+                        results[0].x, results[0].y, results[0].angle);
+                } else {
+                    LOG("  8b Small template: NOT FOUND\n");
+                }
+            } else {
+                LOG("  8b Small template: no features extracted\n");
+            }
+        }
+        RECORD("small_templ_found", found);
+        CHECK(found > 0.5f, "8b Small 40x40 template detection");
+    }
+}
+
+// ============================================================
 // Main
 // ============================================================
 int main() {
@@ -999,6 +1123,7 @@ int main() {
     test_feature_selection(feat200);
     test_sensitivity(feat200);
     test_speed_benchmarks(feat200, templ200);
+    test_edge_cases(feat200, templ200);
 
     // Compute cross-validation metrics before evaluation
     {

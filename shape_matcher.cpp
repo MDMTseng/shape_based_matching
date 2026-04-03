@@ -149,6 +149,10 @@ FeatureSet FeatureSet::load(const std::string& path) {
             f.read((char*)&ft.cornerness, 4);
         }
     }
+    if (!f.good()) {
+        fprintf(stderr, "Warning: FeatureSet::load('%s') read error\n", path.c_str());
+        return FeatureSet{};
+    }
     return fs;
 }
 

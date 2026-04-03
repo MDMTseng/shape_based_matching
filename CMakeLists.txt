@@ -82,3 +82,6 @@ target_link_libraries(test_api ${OpenCV_LIBS})
 
 add_executable(test_simple line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp test_simple.cpp)
 target_link_libraries(test_simple ${OpenCV_LIBS})
+
+add_executable(test_regression line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp test_regression.cpp)
+target_link_libraries(test_regression ${OpenCV_LIBS})

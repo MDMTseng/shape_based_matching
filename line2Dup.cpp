@@ -2251,6 +2251,11 @@ int Detector::addRotatedTemplates(const cv::Mat& templ_gray, const cv::Mat& obje
     cv::Point2f center(templ_gray.cols / 2.0f, templ_gray.rows / 2.0f);
 
     // Step 2: Rotate features for all other angles
+    int num_angles = 0;
+    for (float a = angle_start + angle_step; a < angle_end; a += angle_step)
+        ++num_angles;
+    template_pyramids.reserve(template_pyramids.size() + num_angles);
+
     int count = 1;  // already have the 0-degree template
     for (float angle = angle_start + angle_step; angle < angle_end; angle += angle_step) {
         auto tp = rotateTemplatePyramid(base_tp, angle, center, pyramid_levels);

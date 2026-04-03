@@ -2,6 +2,7 @@
 /// @brief Edge-based ICP pose refinement implementation.
 
 #include "icp_refine.h"
+#include "rigid_solve.h"
 #include <opencv2/imgproc.hpp>
 #include <algorithm>
 #include <cstring>
@@ -35,49 +36,10 @@ static constexpr int   kMinROIDimension     =  10;      // minimum ROI width/hei
 static constexpr float kCornerP2PWeight     =  1.0f;    // point-to-point weight for corners
 static constexpr float kEdgeP2PWeight       =  0.01f;   // point-to-point weight for edges
 
-// Simple 3x3 symmetric positive-definite solver (Cholesky-like)
-// Solves A*x = b where A is 3x3 SPD. Returns x.
+// 3x3 rigid-body solver: delegates to shared solve3x3_ldl() from rigid_solve.h.
+// The local wrapper preserves the original call signature used throughout this file.
 static bool solve3x3(const float A[3][3], const float b[3], float x[3]) {
-    // LDL^T decomposition for 3x3
-    float L[3][3] = {};
-    float D[3] = {};
-
-    // Row 0
-    D[0] = A[0][0];
-    if (std::abs(D[0]) < kSolverEpsilon) return false;
-    L[0][0] = 1;
-
-    // Row 1
-    L[1][0] = A[1][0] / D[0];
-    D[1] = A[1][1] - L[1][0] * L[1][0] * D[0];
-    if (std::abs(D[1]) < kSolverEpsilon) return false;
-    L[1][1] = 1;
-
-    // Row 2
-    L[2][0] = A[2][0] / D[0];
-    L[2][1] = (A[2][1] - L[2][0] * L[1][0] * D[0]) / D[1];
-    D[2] = A[2][2] - L[2][0] * L[2][0] * D[0] - L[2][1] * L[2][1] * D[1];
-    if (std::abs(D[2]) < kSolverEpsilon) return false;
-    L[2][2] = 1;
-
-    // Forward substitution: L*y = b
-    float y[3];
-    y[0] = b[0];
-    y[1] = b[1] - L[1][0] * y[0];
-    y[2] = b[2] - L[2][0] * y[0] - L[2][1] * y[1];
-
-    // Diagonal: D*z = y
-    float z[3];
-    z[0] = y[0] / D[0];
-    z[1] = y[1] / D[1];
-    z[2] = y[2] / D[2];
-
-    // Back substitution: L^T * x = z
-    x[2] = z[2];
-    x[1] = z[1] - L[2][1] * x[2];
-    x[0] = z[0] - L[1][0] * x[1] - L[2][0] * x[2];
-
-    return true;
+    return solve3x3_ldl(A, b, x, kSolverEpsilon);
 }
 
 // Simple 4x4 solver for Sim2 (with scale)

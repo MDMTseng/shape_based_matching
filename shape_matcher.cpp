@@ -394,88 +394,190 @@ std::vector<cv::Point2f> FeatureSet::selectOptimizedPoints(int max_points) const
     if (refine_points.empty() || templ_image.empty())
         return result;
 
-    // Minimum spacing between selected features
-    float min_dist = std::max(templ_width, templ_height) / 16.0f * 1.5f;
-    float min_dist_sq = min_dist * min_dist;
+    float tcx = templ_width / 2.0f, tcy = templ_height / 2.0f;
 
-    // Collect all valid candidates, split into corners and edges
-    struct Cand { int rp_idx; float px, py, R; };
+    // ================================================================
+    // Grid-based spatial distribution (replaces fixed d_min)
+    // Divides template into KxK cells. Each cell allows max_per_cell features.
+    // Handles asymmetric templates better than fixed radius.
+    // ================================================================
+    static const int kGridK = 5;
+    static const int kMaxPerCell = 2;
+    float cell_w = templ_width / (float)kGridK;
+    float cell_h = templ_height / (float)kGridK;
+
+    int grid_count[kGridK][kGridK] = {};
+    auto gridCell = [&](float px, float py, int& gx, int& gy) {
+        gx = std::max(0, std::min(kGridK-1, (int)((px + tcx) / cell_w)));
+        gy = std::max(0, std::min(kGridK-1, (int)((py + tcy) / cell_h)));
+    };
+    auto gridFull = [&](float px, float py) -> bool {
+        int gx, gy; gridCell(px, py, gx, gy);
+        return grid_count[gy][gx] >= kMaxPerCell;
+    };
+    auto gridAdd = [&](float px, float py) {
+        int gx, gy; gridCell(px, py, gx, gy);
+        grid_count[gy][gx]++;
+    };
+
+    // ================================================================
+    // Collect candidates with precomputed properties
+    // Fix #3: Use Shi-Tomasi score min(lambda1, lambda2) instead of ratio.
+    //         Apply slight blur before structure tensor for stability.
+    // Fix #1: Compute gradient magnitude for edge precision weighting.
+    // ================================================================
+    struct Cand {
+        int rp_idx;
+        float px, py, R;
+        float j0, j1, j2;      // Jacobian row
+        float shi_tomasi;       // min(lambda1, lambda2) — corner strength
+        float grad_mag;         // gradient magnitude — edge precision proxy
+        bool is_corner;
+    };
     std::vector<Cand> corners, edges;
+
+    // Slight blur for stable structure tensor (Fix #3)
+    cv::Mat templ_blur;
+    cv::GaussianBlur(templ_image, templ_blur, cv::Size(3, 3), 1.0);
+
     for (size_t i = 0; i < refine_points.size(); i++) {
         auto& rp = refine_points[i];
         if (std::abs(rp.px) > templ_width/2.0f - 5 || std::abs(rp.py) > templ_height/2.0f - 5)
             continue;
-        Cand c;
-        c.rp_idx = (int)i;
-        c.px = rp.px; c.py = rp.py;
-        c.R = std::sqrt(rp.px*rp.px + rp.py*rp.py);
-        if (rp.cornerness > kCornerThreshold) corners.push_back(c);
-        else edges.push_back(c);
+
+        // Get normal from Sobel
+        SensConstraint sc;
+        if (!buildConstraint(*this, (int)i, sc)) continue;
+        float nx = sc.normal.x, ny = sc.normal.y;
+
+        // Compute structure tensor on blurred template for stable corner detection
+        int tx = (int)(rp.px + tcx + 0.5f), ty = (int)(rp.py + tcy + 0.5f);
+        int h = 8;
+        if (tx-h<0||tx+h>=templ_blur.cols||ty-h<0||ty+h>=templ_blur.rows)
+            h = std::min({tx, ty, templ_blur.cols-1-tx, templ_blur.rows-1-ty});
+        if (h < 3) continue;
+
+        cv::Mat roi = templ_blur(cv::Rect(tx-h, ty-h, 2*h, 2*h));
+        cv::Mat dx, dy;
+        cv::Sobel(roi, dx, CV_32F, 1, 0, 3);
+        cv::Sobel(roi, dy, CV_32F, 0, 1, 3);
+
+        // Structure tensor eigenvalues
+        float m00=0, m01=0, m11=0, mag_sum=0;
+        int n_pix = 0;
+        for (int r = 0; r < roi.rows; r++) {
+            const float* dxr = dx.ptr<float>(r);
+            const float* dyr = dy.ptr<float>(r);
+            for (int c = 0; c < roi.cols; c++) {
+                m00 += dxr[c]*dxr[c]; m01 += dxr[c]*dyr[c]; m11 += dyr[c]*dyr[c];
+                mag_sum += std::sqrt(dxr[c]*dxr[c] + dyr[c]*dyr[c]);
+                n_pix++;
+            }
+        }
+
+        // Eigenvalues of [[m00,m01],[m01,m11]]
+        float trace = m00 + m11;
+        float disc = std::sqrt(std::max(0.0f, (m00-m11)*(m00-m11)/4.0f + m01*m01));
+        float lam1 = trace/2.0f + disc;  // larger
+        float lam2 = trace/2.0f - disc;  // smaller
+
+        Cand cd;
+        cd.rp_idx = (int)i;
+        cd.px = rp.px; cd.py = rp.py;
+        cd.R = std::sqrt(rp.px*rp.px + rp.py*rp.py);
+        cd.j0 = -rp.py * nx + rp.px * ny;
+        cd.j1 = nx; cd.j2 = ny;
+        cd.shi_tomasi = std::max(0.0f, lam2);  // min eigenvalue = Shi-Tomasi score
+        cd.grad_mag = n_pix > 0 ? mag_sum / n_pix : 0;
+        // Corner classification: use original cornerness from feature extraction
+        // (Harris-based, already calibrated) combined with Shi-Tomasi min eigenvalue
+        // from the blurred structure tensor as a stability filter.
+        cd.is_corner = (rp.cornerness > kCornerThreshold && cd.shi_tomasi > 5.0f);
+
+        if (cd.is_corner) corners.push_back(cd);
+        else edges.push_back(cd);
     }
 
-    // Sort corners by R descending (farthest corners = most angular leverage)
+    std::vector<int> selected;
+
+    // ================================================================
+    // Phase 1: Corners by Shi-Tomasi score × leverage
+    // Sort by R (leverage) since all corners have strong 2D constraint.
+    // Grid bucketing ensures spatial distribution.
+    // ================================================================
     std::sort(corners.begin(), corners.end(),
               [](const Cand& a, const Cand& b) { return a.R > b.R; });
 
-    std::vector<int> selected;
-    auto isTooClose = [&](float px, float py) {
-        for (int si : selected) {
-            float dx = px - refine_points[si].px, dy = py - refine_points[si].py;
-            if (dx*dx + dy*dy < min_dist_sq) return true;
-        }
-        return false;
-    };
-
-    // Phase 1: Seed with well-spaced corners (farthest first).
-    // Corners are preferred first because matchTemplate gives sharp 2D peaks
-    // (reliable position in both directions). The det(J^T J) metric doesn't
-    // capture this — it only sees Jacobian structure, not match quality.
     for (auto& c : corners) {
         if ((int)selected.size() >= max_points) break;
-        if (isTooClose(c.px, c.py)) continue;
+        if (gridFull(c.px, c.py)) continue;
         selected.push_back(c.rp_idx);
+        gridAdd(c.px, c.py);
     }
 
-    // Phase 2: Fill remaining slots with edges via D-optimal greedy selection.
-    // Each step picks the edge that maximizes det(J^T J) — this naturally
-    // prefers edges with novel normal directions and high leverage.
-    auto computeDetJTJ = [&](const std::vector<int>& sel) -> float {
-        float JTJ[3][3] = {};
-        for (int idx : sel) {
-            SensConstraint sc;
-            if (!buildConstraint(*this, idx, sc)) continue;
-            float nx = sc.normal.x, ny = sc.normal.y;
-            float j0 = -sc.src.y * nx + sc.src.x * ny;
-            float j1 = nx, j2 = ny;
-            JTJ[0][0]+=j0*j0; JTJ[0][1]+=j0*j1; JTJ[0][2]+=j0*j2;
-            JTJ[1][1]+=j1*j1; JTJ[1][2]+=j1*j2;
-            JTJ[2][2]+=j2*j2;
-        }
-        JTJ[1][0]=JTJ[0][1]; JTJ[2][0]=JTJ[0][2]; JTJ[2][1]=JTJ[1][2];
-        for (int i=0;i<3;i++) JTJ[i][i] += kSolverRegularization;
-        return JTJ[0][0]*(JTJ[1][1]*JTJ[2][2]-JTJ[1][2]*JTJ[2][1])
-             - JTJ[0][1]*(JTJ[1][0]*JTJ[2][2]-JTJ[1][2]*JTJ[2][0])
-             + JTJ[0][2]*(JTJ[1][0]*JTJ[2][1]-JTJ[1][1]*JTJ[2][0]);
+    // ================================================================
+    // Phase 2: Edges via precision-weighted D-optimal greedy selection.
+    // det(I_current + g_i * J_i^T J_i) where g_i = gradient magnitude.
+    // High-contrast edges get larger information contribution.
+    // Grid bucketing replaces fixed d_min.
+    // ================================================================
+
+    // Build current weighted J^T J from selected corners
+    float Iw[3][3] = {};
+    for (int idx : selected) {
+        SensConstraint sc;
+        if (!buildConstraint(*this, idx, sc)) continue;
+        float nx2 = sc.normal.x, ny2 = sc.normal.y;
+        float j0 = -sc.src.y * nx2 + sc.src.x * ny2, j1 = nx2, j2 = ny2;
+        Iw[0][0]+=j0*j0; Iw[0][1]+=j0*j1; Iw[0][2]+=j0*j2;
+        Iw[1][1]+=j1*j1; Iw[1][2]+=j1*j2;
+        Iw[2][2]+=j2*j2;
+    }
+    Iw[1][0]=Iw[0][1]; Iw[2][0]=Iw[0][2]; Iw[2][1]=Iw[1][2];
+    for (int i=0;i<3;i++) Iw[i][i] += kSolverRegularization;
+
+    // 3x3 determinant helper
+    auto det3 = [](float A[3][3]) -> float {
+        return A[0][0]*(A[1][1]*A[2][2]-A[1][2]*A[2][1])
+             - A[0][1]*(A[1][0]*A[2][2]-A[1][2]*A[2][0])
+             + A[0][2]*(A[1][0]*A[2][1]-A[1][1]*A[2][0]);
     };
 
     while ((int)selected.size() < max_points) {
         float best_det = -1e30f;
-        int best_cand = -1;
+        int best_ei = -1;
 
-        for (auto& e : edges) {
+        for (int ei = 0; ei < (int)edges.size(); ei++) {
+            auto& e = edges[ei];
             bool used = false;
             for (int si : selected) if (si == e.rp_idx) { used = true; break; }
             if (used) continue;
-            if (isTooClose(e.px, e.py)) continue;
+            if (gridFull(e.px, e.py)) continue;
 
-            auto trial = selected;
-            trial.push_back(e.rp_idx);
-            float det = computeDetJTJ(trial);
-            if (det > best_det) { best_det = det; best_cand = e.rp_idx; }
+            // Precision-weighted trial: I_trial = I_current + g_i * J^T J
+            float g = std::max(1.0f, e.grad_mag);  // clamp to avoid zero weight
+            float trial[3][3];
+            for (int r=0;r<3;r++) for (int c=0;c<3;c++) trial[r][c] = Iw[r][c];
+            trial[0][0]+=g*e.j0*e.j0; trial[0][1]+=g*e.j0*e.j1; trial[0][2]+=g*e.j0*e.j2;
+            trial[1][1]+=g*e.j1*e.j1; trial[1][2]+=g*e.j1*e.j2;
+            trial[2][2]+=g*e.j2*e.j2;
+            trial[1][0]=trial[0][1]; trial[2][0]=trial[0][2]; trial[2][1]=trial[1][2];
+
+            float d = det3(trial);
+            if (d > best_det) { best_det = d; best_ei = ei; }
         }
 
-        if (best_cand < 0) break;
-        selected.push_back(best_cand);
+        if (best_ei < 0) break;
+        auto& e = edges[best_ei];
+        selected.push_back(e.rp_idx);
+        gridAdd(e.px, e.py);
+
+        // Update I_w
+        float g = std::max(1.0f, e.grad_mag);
+        Iw[0][0]+=g*e.j0*e.j0; Iw[0][1]+=g*e.j0*e.j1; Iw[0][2]+=g*e.j0*e.j2;
+        Iw[1][1]+=g*e.j1*e.j1; Iw[1][2]+=g*e.j1*e.j2;
+        Iw[2][2]+=g*e.j2*e.j2;
+        Iw[1][0]=Iw[0][1]; Iw[2][0]=Iw[0][2]; Iw[2][1]=Iw[1][2];
     }
 
     if ((int)selected.size() < 3) {

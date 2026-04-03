@@ -177,6 +177,10 @@ int main() {
                     float rad = -res.angle * (float)CV_PI / 180.0f;
                     float rcx = res.x - (std::cos(rad)*org_ox - std::sin(rad)*org_oy);
                     float rcy = res.y - (std::sin(rad)*org_ox + std::cos(rad)*org_oy);
+                    // Log first noise level per-object for debugging
+                    if (ni == 0 && mi == 2)  // ROI, clean
+                        fprintf(rf, "  obj[%d] gt=(%.2f,%.2f)@%.0f -> (%.2f,%.2f)@%.1f err=%.2fpx\n",
+                                gi, gts[gi].cx, gts[gi].cy, gts[gi].angle, rcx, rcy, res.angle, best_d);
                     float ae = angle_err(res.angle, (float)gts[gi].angle);
                     float dx = rcx - gts[gi].cx, dy = rcy - gts[gi].cy;
                     float pe = std::sqrt(dx*dx + dy*dy);

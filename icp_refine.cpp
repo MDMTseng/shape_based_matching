@@ -103,6 +103,32 @@ static bool solve4x4(const float A[4][4], const float b[4], float x[4]) {
 }
 
 // -----------------------------------------------------------------------
+// Helper: compute clamped ROI centered on (cx, cy) with given half-size.
+// Returns empty rect if the clamped region is too small (<=10 in either dim).
+// -----------------------------------------------------------------------
+static cv::Rect clampROI(float cx, float cy, int half, int img_w, int img_h) {
+    int rx = (int)(cx + 0.5f) - half;
+    int ry = (int)(cy + 0.5f) - half;
+    int rw = 2 * half;
+    int rh = 2 * half;
+    if (rx < 0) rx = 0;
+    if (ry < 0) ry = 0;
+    if (rx + rw > img_w) rw = img_w - rx;
+    if (ry + rh > img_h) rh = img_h - ry;
+    if (rw <= 10 || rh <= 10) return cv::Rect();
+    return cv::Rect(rx, ry, rw, rh);
+}
+
+// -----------------------------------------------------------------------
+// Helper: symmetrize lower triangle of a 3x3 upper-triangular matrix
+// and add Tikhonov regularization to the diagonal.
+// -----------------------------------------------------------------------
+static void symmetrize3x3(float A[3][3], float reg) {
+    A[1][0] = A[0][1]; A[2][0] = A[0][2]; A[2][1] = A[1][2];
+    for (int i = 0; i < 3; ++i) A[i][i] += reg;
+}
+
+// -----------------------------------------------------------------------
 // EdgeScene
 // -----------------------------------------------------------------------
 void EdgeScene::build(const cv::Mat& sobel_dx, const cv::Mat& sobel_dy,
@@ -333,10 +359,7 @@ Pose2D refine(const std::vector<cv::Point2f>& templ_edges,
             for (int i = 0; i < 4; ++i) ATA4[i][i] += 0.01f;
             if (!solve4x4(ATA4, ATb4, update)) break;
         } else {
-            // Symmetrize
-            ATA[1][0] = ATA[0][1]; ATA[2][0] = ATA[0][2]; ATA[2][1] = ATA[1][2];
-            // Regularize to prevent large updates
-            for (int i = 0; i < 3; ++i) ATA[i][i] += 0.01f;
+            symmetrize3x3(ATA, 0.01f);
             if (!solve3x3(ATA, ATb, update)) break;
         }
 
@@ -378,23 +401,12 @@ Pose2D refineLocal(const std::vector<cv::Point2f>& templ_edges,
                    int templ_size,
                    int roi_margin,
                    const ICPConfig& config) {
-    int sw = scene_dx.cols, sh = scene_dx.rows;
     int half = templ_size / 2 + roi_margin;
 
-    // ROI centered on match position
-    int rx = (int)(initial_pose.x + 0.5f) - half;
-    int ry = (int)(initial_pose.y + 0.5f) - half;
-    int rw = 2 * half;
-    int rh = 2 * half;
+    cv::Rect roi = clampROI(initial_pose.x, initial_pose.y, half,
+                            scene_dx.cols, scene_dx.rows);
+    if (roi.empty()) return initial_pose;
 
-    // Clamp to image bounds
-    if (rx < 0) rx = 0;
-    if (ry < 0) ry = 0;
-    if (rx + rw > sw) rw = sw - rx;
-    if (ry + rh > sh) rh = sh - ry;
-    if (rw <= 10 || rh <= 10) return initial_pose;
-
-    cv::Rect roi(rx, ry, rw, rh);
     cv::Mat local_dx = scene_dx(roi);
     cv::Mat local_dy = scene_dy(roi);
 
@@ -406,15 +418,15 @@ Pose2D refineLocal(const std::vector<cv::Point2f>& templ_edges,
 
     // Shift initial pose to local coordinates
     Pose2D local_pose = initial_pose;
-    local_pose.x -= rx;
-    local_pose.y -= ry;
+    local_pose.x -= roi.x;
+    local_pose.y -= roi.y;
 
     // Run ICP in local coordinates
     Pose2D result = refine(templ_edges, local_scene, local_pose, config);
 
     // Shift back to global coordinates
-    result.x += rx;
-    result.y += ry;
+    result.x += roi.x;
+    result.y += roi.y;
 
     return result;
 }
@@ -461,19 +473,12 @@ Pose2D refineWithNormals(const std::vector<EdgePoint>& model_edges,
                          int templ_size,
                          int roi_margin,
                          const ICPConfig& config) {
-    int sw = scene_dx.cols, sh = scene_dx.rows;
     int half = templ_size / 2 + roi_margin;
 
-    int rx = (int)(initial_pose.x + 0.5f) - half;
-    int ry = (int)(initial_pose.y + 0.5f) - half;
-    int rw = 2 * half, rh = 2 * half;
-    if (rx < 0) rx = 0;
-    if (ry < 0) ry = 0;
-    if (rx + rw > sw) rw = sw - rx;
-    if (ry + rh > sh) rh = sh - ry;
-    if (rw <= 10 || rh <= 10) return initial_pose;
+    cv::Rect roi = clampROI(initial_pose.x, initial_pose.y, half,
+                            scene_dx.cols, scene_dx.rows);
+    if (roi.empty()) return initial_pose;
 
-    cv::Rect roi(rx, ry, rw, rh);
     cv::Mat local_dx = scene_dx(roi);
     cv::Mat local_dy = scene_dy(roi);
 
@@ -484,8 +489,8 @@ Pose2D refineWithNormals(const std::vector<EdgePoint>& model_edges,
                       config.max_dist);
 
     Pose2D pose = initial_pose;
-    pose.x -= rx;
-    pose.y -= ry;
+    pose.x -= roi.x;
+    pose.y -= roi.y;
 
     float cos_thresh = std::cos(config.normal_angle_thresh * (float)CV_PI / 180.0f);
     int N = (int)model_edges.size();
@@ -594,8 +599,7 @@ Pose2D refineWithNormals(const std::vector<EdgePoint>& model_edges,
         prev_rmse = pose.rmse;
 
         // Solve
-        ATA[1][0] = ATA[0][1]; ATA[2][0] = ATA[0][2]; ATA[2][1] = ATA[1][2];
-        for (int i = 0; i < 3; ++i) ATA[i][i] += 0.01f;
+        symmetrize3x3(ATA, 0.01f);
         float update[3] = {};
         if (!solve3x3(ATA, ATb, update)) break;
 
@@ -609,8 +613,8 @@ Pose2D refineWithNormals(const std::vector<EdgePoint>& model_edges,
 
     pose.angle = std::fmod(pose.angle, 360.0f);
     if (pose.angle < 0) pose.angle += 360.0f;
-    pose.x += rx;
-    pose.y += ry;
+    pose.x += roi.x;
+    pose.y += roi.y;
     return pose;
 }
 
@@ -740,8 +744,7 @@ static Pose2D refineInverseCore(
         prev_fitness = pose.fitness;
         prev_rmse = pose.rmse;
 
-        ATA[1][0]=ATA[0][1]; ATA[2][0]=ATA[0][2]; ATA[2][1]=ATA[1][2];
-        for (int i = 0; i < 3; i++) ATA[i][i] += 0.01f;
+        symmetrize3x3(ATA, 0.01f);
         float update[3] = {};
         if (!solve3x3(ATA, ATb, update)) break;
 
@@ -813,20 +816,18 @@ Pose2D refineInverse(const EdgeScene& templ_scene,
 
     // Extract scene edges in local ROI
     int margin = TW / 2 + roi_margin;
-    int rx = std::max(0, (int)(initial_pose.x + 0.5f) - margin);
-    int ry = std::max(0, (int)(initial_pose.y + 0.5f) - margin);
-    int rw = std::min(scene_gray.cols - rx, 2 * margin);
-    int rh = std::min(scene_gray.rows - ry, 2 * margin);
-    if (rw <= 10 || rh <= 10) return initial_pose;
+    cv::Rect roiRect = clampROI(initial_pose.x, initial_pose.y, margin,
+                                scene_gray.cols, scene_gray.rows);
+    if (roiRect.empty()) return initial_pose;
 
-    cv::Mat roi = scene_gray(cv::Rect(rx, ry, rw, rh));
+    cv::Mat roi = scene_gray(roiRect);
     cv::Mat s_smooth, s_dx, s_dy;
     cv::GaussianBlur(roi, s_smooth, cv::Size(5, 5), 0);
     cv::Sobel(s_smooth, s_dx, CV_16S, 1, 0, 3);
     cv::Sobel(s_smooth, s_dy, CV_16S, 0, 1, 3);
 
     std::vector<float> se_x, se_y, se_nx, se_ny;
-    int NS = extractSceneEdgesSoA(s_dx, s_dy, (float)rx, (float)ry,
+    int NS = extractSceneEdgesSoA(s_dx, s_dy, (float)roiRect.x, (float)roiRect.y,
                                   se_x, se_y, se_nx, se_ny);
     if (NS == 0) return initial_pose;
 
@@ -850,18 +851,15 @@ Pose2D refineInverse(const EdgeScene& templ_scene,
 
     // ROI from scene Sobel derivatives
     int margin = templ_diag / 2 + roi_margin;
-    int rx = std::max(0, (int)(initial_pose.x + 0.5f) - margin);
-    int ry = std::max(0, (int)(initial_pose.y + 0.5f) - margin);
-    int rw = std::min(scene_dx.cols - rx, 2 * margin);
-    int rh = std::min(scene_dx.rows - ry, 2 * margin);
-    if (rw <= 10 || rh <= 10) return initial_pose;
+    cv::Rect roi = clampROI(initial_pose.x, initial_pose.y, margin,
+                            scene_dx.cols, scene_dx.rows);
+    if (roi.empty()) return initial_pose;
 
-    cv::Rect roi(rx, ry, rw, rh);
     cv::Mat local_dx = scene_dx(roi);
     cv::Mat local_dy = scene_dy(roi);
 
     std::vector<float> se_x, se_y, se_nx, se_ny;
-    int NS = extractSceneEdgesSoA(local_dx, local_dy, (float)rx, (float)ry,
+    int NS = extractSceneEdgesSoA(local_dx, local_dy, (float)roi.x, (float)roi.y,
                                   se_x, se_y, se_nx, se_ny);
     if (NS == 0) return initial_pose;
 

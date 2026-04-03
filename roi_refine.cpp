@@ -220,6 +220,15 @@ static cv::Vec3f solveRigid(const std::vector<Constraint>& constraints,
 }
 
 // -----------------------------------------------------------------------
+// Clamp ROI half-size to stay within image bounds
+// -----------------------------------------------------------------------
+static int safeROIHalf(int tx, int ty, int cols, int rows, int roi_half) {
+    if (tx-roi_half<0||tx+roi_half>=cols||ty-roi_half<0||ty+roi_half>=rows)
+        return std::min({tx, ty, cols-1-tx, rows-1-ty});
+    return roi_half;
+}
+
+// -----------------------------------------------------------------------
 // Main ROI refinement
 // -----------------------------------------------------------------------
 cv::Vec3f refineROI(const cv::Mat& templ_img,
@@ -282,11 +291,8 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
                 auto& sp = sample_points[si];
                 int tx = (int)(sp.pos.x + tcx + 0.5f);
                 int ty = (int)(sp.pos.y + tcy + 0.5f);
-                int h = config.roi_half;
-                if (tx-h<0||tx+h>=templ_img.cols||ty-h<0||ty+h>=templ_img.rows) {
-                    h = std::min({tx,ty,templ_img.cols-1-tx,templ_img.rows-1-ty});
-                    if (h < 5) continue;
-                }
+                int h = safeROIHalf(tx, ty, templ_img.cols, templ_img.rows, config.roi_half);
+                if (h < 5) continue;
                 cv::Mat roi_unrot = templ_img(cv::Rect(tx-h, ty-h, 2*h, 2*h));
                 cv::Mat roi;
                 if (std::abs(angle_deg) > 0.5f) {
@@ -316,9 +322,7 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
             // PCA on UNROTATED template patch (eigenvectors in template space)
             int tx = (int)(sp.pos.x + tcx + 0.5f);
             int ty = (int)(sp.pos.y + tcy + 0.5f);
-            int h = config.roi_half;
-            if (tx-h<0||tx+h>=templ_img.cols||ty-h<0||ty+h>=templ_img.rows)
-                h = std::min({tx,ty,templ_img.cols-1-tx,templ_img.rows-1-ty});
+            int h = safeROIHalf(tx, ty, templ_img.cols, templ_img.rows, config.roi_half);
             float eigvals[2];
             cv::Point2f eigvecs[2];
             if (h >= 5) {

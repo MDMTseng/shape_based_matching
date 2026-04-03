@@ -370,8 +370,8 @@ static float computeMaxSens(const std::vector<SensConstraint>& baseline) {
 }
 
 std::vector<cv::Point2f> FeatureSet::selectOptimizedPoints(int max_points) const {
-    // Return cached result if available and same size
-    if (!cached_opt_points.empty() && (int)cached_opt_points.size() <= max_points)
+    // Return cached result if available and computed with same (or larger) max_points
+    if (!cached_opt_points.empty() && cached_opt_max_points >= max_points)
         return cached_opt_points;
 
     std::vector<cv::Point2f> result;
@@ -506,6 +506,7 @@ std::vector<cv::Point2f> FeatureSet::selectOptimizedPoints(int max_points) const
     for (int idx : selected)
         result.push_back(cv::Point2f(refine_points[idx].px, refine_points[idx].py));
     cached_opt_points = result;
+    cached_opt_max_points = max_points;
     return result;
 }
 

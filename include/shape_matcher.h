@@ -65,6 +65,7 @@ struct FeatureSet {
     /// Cached optimized sample points (computed once, reused for matching).
     /// Populated by selectOptimizedPoints() or precomputeOptimizedPoints().
     mutable std::vector<cv::Point2f> cached_opt_points;
+    mutable int cached_opt_max_points = 0;  ///< max_points arg used to compute cache
 
     /// Cached template EdgeScene for inverse ICP (built once at addModel time).
     mutable icp_refine::EdgeScene cached_templ_scene;

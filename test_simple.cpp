@@ -1505,6 +1505,66 @@ int main() {
                 imwrite("output/angle_error_chart.png", chart);
                 printf("  -> saved output/angle_error_chart.png\n");
 
+                // Position error chart (absolute, not signed)
+                {
+                    Mat pchart(chart_h, chart_w, CV_8UC3, Scalar(255,255,255));
+                    float max_pos = 0;
+                    for (int i = 0; i < na; i++) {
+                        max_pos = std::max(max_pos, icp_pos_errs[i]);
+                        max_pos = std::max(max_pos, roi_pos_errs[i]);
+                    }
+                    max_pos = std::ceil(max_pos * 10) / 10.0f + 0.1f;  // round up to 0.1
+                    if (max_pos < 0.5f) max_pos = 0.5f;
+
+                    // Grid
+                    for (float g = 0; g <= max_pos; g += 0.2f) {
+                        int y = margin_t + plot_h - (int)(g * plot_h / max_pos);
+                        cv::line(pchart, Point(margin_l, y), Point(margin_l+plot_w, y),
+                                 Scalar(230,230,230), 1);
+                        char gl[16]; snprintf(gl,sizeof(gl),"%.1f", g);
+                        cv::putText(pchart, gl, Point(5, y+5),
+                            FONT_HERSHEY_SIMPLEX, 0.3, Scalar(100,100,100), 1);
+                    }
+                    // X axis
+                    for (int x = 0; x <= 360; x += 45) {
+                        int px = margin_l + x * plot_w / 360;
+                        cv::line(pchart, Point(px, margin_t), Point(px, margin_t+plot_h),
+                                 Scalar(230,230,230), 1);
+                        char xl[16]; snprintf(xl,sizeof(xl),"%d", x);
+                        cv::putText(pchart, xl, Point(px-10, chart_h-10),
+                            FONT_HERSHEY_SIMPLEX, 0.35, Scalar(100,100,100), 1);
+                    }
+
+                    auto plotPosLine = [&](const std::vector<float>& errs, Scalar color) {
+                        for (int i = 1; i < na; i++) {
+                            int x1 = margin_l + (int)(dbg_angles[i-1] * plot_w / 360);
+                            int x2 = margin_l + (int)(dbg_angles[i] * plot_w / 360);
+                            int y1 = margin_t + plot_h - (int)(errs[i-1] * plot_h / max_pos);
+                            int y2 = margin_t + plot_h - (int)(errs[i] * plot_h / max_pos);
+                            cv::line(pchart, Point(x1,y1), Point(x2,y2), color, 2, LINE_AA);
+                        }
+                        for (int i = 0; i < na; i++) {
+                            int x = margin_l + (int)(dbg_angles[i] * plot_w / 360);
+                            int y = margin_t + plot_h - (int)(errs[i] * plot_h / max_pos);
+                            cv::circle(pchart, Point(x,y), 3, color, -1, LINE_AA);
+                        }
+                    };
+                    plotPosLine(icp_pos_errs, Scalar(0,0,255));
+                    plotPosLine(roi_pos_errs, Scalar(255,200,0));
+
+                    cv::putText(pchart, "Position Error vs GT Angle (px)", Point(margin_l, 25),
+                        FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0,0,0), 1);
+                    cv::putText(pchart, "ICP", Point(chart_w-100, 20),
+                        FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0,0,255), 2);
+                    cv::putText(pchart, "ROI", Point(chart_w-100, 40),
+                        FONT_HERSHEY_SIMPLEX, 0.5, Scalar(255,200,0), 2);
+                    cv::putText(pchart, "angle (deg)", Point(chart_w/2-30, chart_h-2),
+                        FONT_HERSHEY_SIMPLEX, 0.4, Scalar(100,100,100), 1);
+
+                    imwrite("output/pos_error_chart.png", pchart);
+                    printf("  -> saved output/pos_error_chart.png\n");
+                }
+
                 // Also write data file
                 FILE* ef = fopen("output/angle_errors.txt", "w");
                 if (ef) {

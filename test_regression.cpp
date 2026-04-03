@@ -1300,6 +1300,18 @@ static void test_resolution_speed(const sbm::FeatureSet& feat200, const Mat& tem
         scene = add_noise(scene, 15);
         GaussianBlur(scene, scene, Size(3, 3), 0);
 
+        // Compute GT center positions for this resolution
+        struct GT { float cx, cy; double angle; };
+        std::vector<GT> gts(n_obj);
+        for (int oi = 0; oi < n_obj; oi++) {
+            gts[oi].cx = (float)(obj_defs[oi].rx * (rc.width - 200) + 100);
+            gts[oi].cy = (float)(obj_defs[oi].ry * (rc.height - 200) + 100);
+            gts[oi].angle = obj_defs[oi].angle;
+        }
+
+        float o_off_x = org_x - feat200.templ_width / 2.0f;
+        float o_off_y = org_y - feat200.templ_height / 2.0f;
+
         for (int mi = 0; mi < 3; mi++) {
             sbm::MatchConfig cfg;
             cfg.min_score = 30;
@@ -1324,34 +1336,75 @@ static void test_resolution_speed(const sbm::FeatureSet& feat200, const Mat& tem
             }
             double avg_ms = total_ms / 3.0;
 
-            // Count GT-matched results (within 50px of a GT position)
+            // Per-object GT matching: greedy nearest assignment
             int n_matched = 0;
+            float total_ang_err = 0, total_pos_err = 0;
+            float worst_ang_err = 0, worst_pos_err = 0;
             std::vector<bool> gt_used(n_obj, false);
-            for (auto& res : last_results) {
-                float o_x = org_x - feat200.templ_width / 2.0f;
-                float o_y = org_y - feat200.templ_height / 2.0f;
-                float rad = -res.angle * (float)CV_PI / 180.0f;
-                float rcx = res.x - (std::cos(rad)*o_x - std::sin(rad)*o_y);
-                float rcy = res.y - (std::sin(rad)*o_x + std::cos(rad)*o_y);
-                for (int gi = 0; gi < n_obj; gi++) {
-                    if (gt_used[gi]) continue;
-                    int gox = (int)(obj_defs[gi].rx * (rc.width - 200) + 100);
-                    int goy = (int)(obj_defs[gi].ry * (rc.height - 200) + 100);
-                    float d = pos_err(rcx, rcy, (float)gox, (float)goy);
-                    if (d < 50) { n_matched++; gt_used[gi] = true; break; }
+
+            for (int gi = 0; gi < n_obj; gi++) {
+                // Find closest result to this GT
+                float best_d = 1e9f;
+                int best_ri = -1;
+                for (int ri = 0; ri < (int)last_results.size(); ri++) {
+                    auto& res = last_results[ri];
+                    float rad = -res.angle * (float)CV_PI / 180.0f;
+                    float rcx = res.x - (std::cos(rad)*o_off_x - std::sin(rad)*o_off_y);
+                    float rcy = res.y - (std::sin(rad)*o_off_x + std::cos(rad)*o_off_y);
+                    float d = pos_err(rcx, rcy, gts[gi].cx, gts[gi].cy);
+                    if (d < best_d) { best_d = d; best_ri = ri; }
+                }
+                if (best_ri >= 0 && best_d < 50) {
+                    auto& res = last_results[best_ri];
+                    float rad = -res.angle * (float)CV_PI / 180.0f;
+                    float rcx = res.x - (std::cos(rad)*o_off_x - std::sin(rad)*o_off_y);
+                    float rcy = res.y - (std::sin(rad)*o_off_x + std::cos(rad)*o_off_y);
+                    float ae = angle_err(res.angle, (float)gts[gi].angle);
+                    float pe = pos_err(rcx, rcy, gts[gi].cx, gts[gi].cy);
+                    total_ang_err += ae;
+                    total_pos_err += pe;
+                    worst_ang_err = std::max(worst_ang_err, ae);
+                    worst_pos_err = std::max(worst_pos_err, pe);
+                    n_matched++;
+
+                    LOG("    %s %s obj[%d] gt=(%4.0f,%4.0f)@%3.0f → (%5.1f,%5.1f)@%5.1f err: %+.1fdeg %.1fpx\n",
+                        rc.name, mode_names[mi], gi, gts[gi].cx, gts[gi].cy, gts[gi].angle,
+                        rcx, rcy, res.angle, ae, pe);
+                } else {
+                    LOG("    %s %s obj[%d] gt=(%4.0f,%4.0f)@%3.0f → MISSING\n",
+                        rc.name, mode_names[mi], gi, gts[gi].cx, gts[gi].cy, gts[gi].angle);
                 }
             }
 
+            float mean_ang = n_matched > 0 ? total_ang_err / n_matched : -1;
+            float mean_pos = n_matched > 0 ? total_pos_err / n_matched : -1;
+
+            // Record metrics
             char key[64];
             snprintf(key, sizeof(key), "speed_%s_%s_ms", rc.suffix, mode_names[mi]);
             RECORD(key, (float)avg_ms);
 
-            char key_found[64];
-            snprintf(key_found, sizeof(key_found), "speed_%s_%s_found", rc.suffix, mode_names[mi]);
-            RECORD(key_found, (float)n_matched);
+            snprintf(key, sizeof(key), "speed_%s_%s_found", rc.suffix, mode_names[mi]);
+            RECORD(key, (float)n_matched);
 
-            printf("  %s %-6s: %5.1fms  matched=%d/%d\n", rc.name, mode_names[mi], avg_ms, n_matched, n_obj);
-            LOG("  %s %-6s: %5.1fms  matched=%d/%d\n", rc.name, mode_names[mi], avg_ms, n_matched, n_obj);
+            snprintf(key, sizeof(key), "speed_%s_%s_mean_ang", rc.suffix, mode_names[mi]);
+            RECORD(key, mean_ang);
+
+            snprintf(key, sizeof(key), "speed_%s_%s_mean_pos", rc.suffix, mode_names[mi]);
+            RECORD(key, mean_pos);
+
+            snprintf(key, sizeof(key), "speed_%s_%s_worst_ang", rc.suffix, mode_names[mi]);
+            RECORD(key, worst_ang_err);
+
+            snprintf(key, sizeof(key), "speed_%s_%s_worst_pos", rc.suffix, mode_names[mi]);
+            RECORD(key, worst_pos_err);
+
+            printf("  %s %-6s: %5.1fms  %d/%d matched  ang=%.1f/%.1f  pos=%.1f/%.1fpx\n",
+                   rc.name, mode_names[mi], avg_ms, n_matched, n_obj,
+                   mean_ang, worst_ang_err, mean_pos, worst_pos_err);
+            LOG("  %s %-6s: %5.1fms  %d/%d matched  ang=%.1f/%.1f  pos=%.1f/%.1fpx\n",
+                rc.name, mode_names[mi], avg_ms, n_matched, n_obj,
+                mean_ang, worst_ang_err, mean_pos, worst_pos_err);
         }
     }
 }

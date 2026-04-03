@@ -88,5 +88,17 @@ id,type,metric,op,threshold,description
 10_20mp_coarse,warn,speed_20mp_Coarse_ms,<,500.0,20MP 20-obj coarse speed (ms)
 10_20mp_icp,warn,speed_20mp_ICP_ms,<,600.0,20MP 20-obj ICP speed (ms)
 10_20mp_roi,warn,speed_20mp_ROI_ms,<,600.0,20MP 20-obj ROI speed (ms)
-10_1080p_found,check,speed_1080p_ROI_found,>=,15,1080p 20-obj ROI detection count (expect most found)
-10_20mp_found,check,speed_20mp_ROI_found,>=,15,20MP 20-obj ROI detection count (expect most found)
+# Detection count (per-object GT matching within 50px)
+10_360p_roi_found,check,speed_360p_ROI_found,==,3,360p 3-obj ROI: all found
+10_1080p_roi_found,check,speed_1080p_ROI_found,>=,18,1080p 20-obj ROI: at least 18 found
+10_20mp_roi_found,check,speed_20mp_ROI_found,>=,18,20MP 20-obj ROI: at least 18 found
+10_1080p_icp_found,check,speed_1080p_ICP_found,>=,18,1080p 20-obj ICP: at least 18 found
+10_20mp_icp_found,check,speed_20mp_ICP_found,>=,18,20MP 20-obj ICP: at least 18 found
+# Per-object accuracy for ROI (should be precise even with noise+blur)
+10_1080p_roi_ang,check,speed_1080p_ROI_mean_ang,<,1.0,1080p ROI mean angle error (deg)
+10_1080p_roi_pos,check,speed_1080p_ROI_mean_pos,<,1.0,1080p ROI mean position error (px)
+10_20mp_roi_ang,check,speed_20mp_ROI_mean_ang,<,1.0,20MP ROI mean angle error (deg)
+10_20mp_roi_pos,check,speed_20mp_ROI_mean_pos,<,1.0,20MP ROI mean position error (px)
+# Per-object accuracy for ICP
+10_1080p_icp_ang,check,speed_1080p_ICP_mean_ang,<,1.0,1080p ICP mean angle error (deg)
+10_20mp_icp_ang,check,speed_20mp_ICP_mean_ang,<,1.0,20MP ICP mean angle error (deg)

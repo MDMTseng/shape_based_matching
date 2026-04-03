@@ -289,174 +289,6 @@ FeatureSet extractFeatures(const cv::Mat& templ_gray,
     return fs;
 }
 
-// (evaluateQuality removed — replaced by analyzeSensitivity)
-
-#if 0  // OLD evaluateQuality
-FeatureSet::QualityReport FeatureSet::evaluateQuality_OLD() const {
-    QualityReport r;
-    r.balance = 0;
-    r.strength = 0;
-    r.score = 0;
-    r.best_cross = 0;
-    r.best_cross_sin = 0;
-    r.num_edge = 0;
-    r.num_corner = 0;
-
-    if (refine_points.empty() || templ_image.empty()) {
-        r.diagnosis = "No refine points or template image";
-        return r;
-    }
-
-    // Select ~15 well-spaced points (same as what ROI refine would use)
-    std::vector<cv::Point2f> positions;
-    std::vector<float> cornerness;
-    for (auto& rp : refine_points) {
-        positions.push_back(cv::Point2f(rp.px, rp.py));
-        cornerness.push_back(rp.cornerness);
-    }
-
-    float tcx = templ_width / 2.0f, tcy = templ_height / 2.0f;
-    float min_dist = std::max(templ_width, templ_height) / 16.0f * 1.5f;
-    float min_dist_sq = min_dist * min_dist;
-
-    // Greedy select well-spaced points (corners first)
-    struct Cand { int idx; float corn; };
-    std::vector<Cand> cands(positions.size());
-    for (size_t i = 0; i < positions.size(); i++)
-        cands[i] = {(int)i, cornerness[i]};
-    std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b){ return a.corn > b.corn; });
-
-    std::vector<int> selected;
-    for (auto& c : cands) {
-        if ((int)selected.size() >= 15) break;
-        auto& p = positions[c.idx];
-        bool too_close = false;
-        for (int si : selected) {
-            float dx = p.x - positions[si].x, dy = p.y - positions[si].y;
-            if (dx*dx + dy*dy < min_dist_sq) { too_close = true; break; }
-        }
-        if (too_close) continue;
-        if (std::abs(p.x) > templ_width/2.0f - 5 || std::abs(p.y) > templ_height/2.0f - 5)
-            continue;
-        selected.push_back(c.idx);
-    }
-
-    if (selected.size() < 3) {
-        r.diagnosis = "Too few usable points (" + std::to_string(selected.size()) + ")";
-        return r;
-    }
-
-    int roi_half = 15;
-
-    // Collect gradient vectors + PCA cornerness at each selected point
-    struct GradInfo { cv::Point2f dir; float mag; };
-    std::vector<GradInfo> grads;
-    for (int si : selected) {
-        auto& rp = refine_points[si];
-        int tx=(int)(rp.px+tcx+0.5f), ty=(int)(rp.py+tcy+0.5f);
-        int h=roi_half;
-        if(tx-h<0||tx+h>=templ_image.cols||ty-h<0||ty+h>=templ_image.rows)
-            h=std::min({tx,ty,templ_image.cols-1-tx,templ_image.rows-1-ty});
-        if(h<5) continue;
-        cv::Mat roi2=templ_image(cv::Rect(tx-h,ty-h,2*h,2*h));
-        cv::Mat dx2,dy2,mag2;
-        cv::Sobel(roi2,dx2,CV_32F,1,0,3);
-        cv::Sobel(roi2,dy2,CV_32F,0,1,3);
-        cv::magnitude(dx2,dy2,mag2);
-        double max_mag; cv::Point max_loc;
-        cv::minMaxLoc(mag2, nullptr, &max_mag, nullptr, &max_loc);
-        float gx=dx2.at<float>(max_loc.y,max_loc.x);
-        float gy=dy2.at<float>(max_loc.y,max_loc.x);
-        grads.push_back({cv::Point2f(gx,gy), (float)max_mag});
-
-        // PCA: if corner-like, add perpendicular gradient too
-        // This accounts for corners providing 2D constraint
-        float thr = 0.3f * (float)max_mag;
-        float cxx=0,cyy=0,cxy=0; int n=0;
-        for(int r2=0;r2<roi2.rows;r2++) for(int c2=0;c2<roi2.cols;c2++)
-            if(mag2.at<float>(r2,c2)>thr) {
-                float ddx=c2-h,ddy=r2-h; cxx+=ddx*ddx;cyy+=ddy*ddy;cxy+=ddx*ddy;n++;
-            }
-        if(n>0){cxx/=n;cyy/=n;cxy/=n;}
-        float trace=cxx+cyy;
-        float disc=std::sqrt(std::max(0.f,(cxx-cyy)*(cxx-cyy)/4+cxy*cxy));
-        float lam1=trace/2+disc, lam2=trace/2-disc;
-        float ratio = (lam2>1e-6f) ? lam1/lam2 : 999;
-
-        if (ratio < 1.8f) {
-            // Corner-like: add perpendicular direction with scaled magnitude
-            float corner_strength = (float)max_mag * (1.8f - ratio) / 0.8f;
-            grads.push_back({cv::Point2f(-gy, gx), corner_strength});
-            r.num_corner++;
-        } else {
-            r.num_edge++;
-        }
-    }
-
-    // Find the pair with the BEST cross product
-    // |n1 × n2| = |n1.x*n2.y - n1.y*n2.x| = |n1|*|n2|*sin(angle)
-    // Captures both angular diversity AND edge strength in one number
-    for (size_t i = 0; i < grads.size(); ++i) {
-        for (size_t j = i+1; j < grads.size(); ++j) {
-            float cross = std::abs(grads[i].dir.x * grads[j].dir.y -
-                                   grads[i].dir.y * grads[j].dir.x);
-            if (cross > r.best_cross) {
-                r.best_cross = cross;
-                float mag_prod = grads[i].mag * grads[j].mag;
-                r.best_cross_sin = (mag_prod > 1e-6f) ? cross / mag_prod : 0;
-            }
-        }
-    }
-
-    // Find the WEAKEST cross product across orthogonal direction pairs.
-    // Split gradients into two groups by direction, find worst inter-group cross.
-    // Simpler: compute cross products for ALL pairs, find the median.
-    // If median is high → well-distributed. If low → most pairs are parallel.
-    std::vector<float> all_cross_sins;
-    for (size_t i = 0; i < grads.size(); ++i) {
-        for (size_t j = i+1; j < grads.size(); ++j) {
-            float cross = std::abs(grads[i].dir.x * grads[j].dir.y -
-                                   grads[i].dir.y * grads[j].dir.x);
-            float mag_prod = grads[i].mag * grads[j].mag;
-            float sin_val = (mag_prod > 1e-6f) ? cross / mag_prod : 0;
-            all_cross_sins.push_back(sin_val);
-        }
-    }
-    if (!all_cross_sins.empty()) {
-        std::sort(all_cross_sins.begin(), all_cross_sins.end());
-    }
-
-    // === BALANCE (0-100) ===
-    // sin(angle) of the best pair tells us the max angular diversity.
-    // But we also need to check that the weaker direction has enough support.
-    // Use: best_sin × (fraction of pairs above sin > 0.3) to penalize when
-    // only a few pairs are perpendicular (most are parallel).
-    int pairs_above_30 = 0;
-    for (float s : all_cross_sins)
-        if (s > 0.3f) pairs_above_30++;
-    float frac_diverse = all_cross_sins.empty() ? 0 :
-        (float)pairs_above_30 / all_cross_sins.size();
-    // balance = sin × sqrt(fraction_diverse) — penalize when few pairs are diverse
-    r.balance = (int)(100.0f * r.best_cross_sin * std::sqrt(frac_diverse));
-    r.balance = std::max(0, std::min(100, r.balance));
-
-    // === STRENGTH (0-100) ===
-    // Best cross product magnitude: |n1|×|n2|×sin(angle).
-    r.strength = (int)(100.0f * std::min(1.0f, r.best_cross / 400000.0f));
-
-    // === COMBINED ===
-    r.score = r.balance * r.strength / 100;
-
-    // Diagnosis
-    std::string bal_str = (r.balance >= 70) ? "balanced" :
-                          (r.balance >= 40) ? "angled" : "near-parallel";
-    std::string str_str = (r.strength >= 70) ? "strong" :
-                          (r.strength >= 40) ? "moderate" : "weak";
-    r.diagnosis = bal_str + " / " + str_str;
-
-    return r;
-}
-#endif
 
 // ============================================================
 // Sensitivity analysis
@@ -1067,8 +899,8 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
 
         float user_angle = raw_angle + fs.angle_offset;
         if (is_flip) user_angle = -user_angle + 2 * fs.angle_offset;
-        while (user_angle < 0) user_angle += 360;
-        while (user_angle >= 360) user_angle -= 360;
+        user_angle = std::fmod(user_angle, 360.0f);
+        if (user_angle < 0) user_angle += 360.0f;
 
         // ICP refinement at full resolution (inverse ICP)
         bool do_icp = (cfg.refine == RefineMode::ICP || cfg.refine == RefineMode::ICP_Sparse)
@@ -1097,8 +929,8 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
             user_y = scene_y + rot_oy;
             user_angle = raw_angle + fs.angle_offset;
             if (is_flip) user_angle = -user_angle + 2 * fs.angle_offset;
-            while (user_angle < 0) user_angle += 360;
-            while (user_angle >= 360) user_angle -= 360;
+            user_angle = std::fmod(user_angle, 360.0f);
+            if (user_angle < 0) user_angle += 360.0f;
         }
 
         // ROI-based refinement
@@ -1133,8 +965,8 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
                 user_y = scene_y + rot_oy;
                 user_angle = raw_angle + fs.angle_offset;
                 if (is_flip) user_angle = -user_angle + 2 * fs.angle_offset;
-                while (user_angle < 0) user_angle += 360;
-                while (user_angle >= 360) user_angle -= 360;
+                user_angle = std::fmod(user_angle, 360.0f);
+                if (user_angle < 0) user_angle += 360.0f;
             }
         }
 

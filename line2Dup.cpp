@@ -461,7 +461,9 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
             // Scalar tail
             for (; c < src.cols - 1; ++c) {
                 int gx = dx[c], gy = dy[c];
-                int mag_sq_i = gx*gx + gy*gy;
+                // Use int64 to avoid overflow: max Sobel 3x3 on uint8 is 1020,
+                // so 1020^2+1020^2=2M fits int32, but defensive for other kernels.
+                int mag_sq_i = (int)((int64_t)gx*gx + (int64_t)gy*gy);
                 mag_r[c] = (float)mag_sq_i;
 
                 if (mag_sq_i <= threshold_sq_i) continue;

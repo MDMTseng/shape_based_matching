@@ -363,8 +363,8 @@ Pose2D refine(const std::vector<cv::Point2f>& templ_edges,
     }
 
     // Normalize angle to [0, 360)
-    while (pose.angle < 0) pose.angle += 360.0f;
-    while (pose.angle >= 360.0f) pose.angle -= 360.0f;
+    pose.angle = std::fmod(pose.angle, 360.0f);
+    if (pose.angle < 0) pose.angle += 360.0f;
 
     return pose;
 }
@@ -607,8 +607,8 @@ Pose2D refineWithNormals(const std::vector<EdgePoint>& model_edges,
         pose.y += d_ty;
     }
 
-    while (pose.angle < 0) pose.angle += 360.0f;
-    while (pose.angle >= 360.0f) pose.angle -= 360.0f;
+    pose.angle = std::fmod(pose.angle, 360.0f);
+    if (pose.angle < 0) pose.angle += 360.0f;
     pose.x += rx;
     pose.y += ry;
     return pose;
@@ -753,8 +753,8 @@ static Pose2D refineInverseCore(
         pose.y += d_ty;
     }
 
-    while (pose.angle < 0) pose.angle += 360;
-    while (pose.angle >= 360) pose.angle -= 360;
+    pose.angle = std::fmod(pose.angle, 360.0f);
+    if (pose.angle < 0) pose.angle += 360.0f;
     return pose;
 }
 

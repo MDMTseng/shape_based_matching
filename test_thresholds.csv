@@ -45,3 +45,48 @@ id,type,metric,op,threshold,description
 8a_edge_icp,check,edge_icp_found,==,1,Near-edge object found by ICP
 8a_edge_roi,check,edge_roi_found,==,1,Near-edge object found by ROI
 8b_small_templ,check,small_templ_found,==,1,Small 40x40 template detection
+# ======== 9. Noise & Blur Stability Limits ========
+# 9a: Coarse detection under noise
+9a_coarse_n30,check,coarse_detect_n30,==,1,Coarse detects object at noise=30
+9a_coarse_n50,check,coarse_detect_n50,==,1,Coarse detects object at noise=50
+9a_coarse_n60,check,coarse_detect_n60,==,1,Coarse detects object at noise=60
+# 9b: Coarse detection under blur
+9b_coarse_b11,check,coarse_detect_b11,==,1,Coarse detects object at blur k=11
+9b_coarse_b21,check,coarse_detect_b21,==,1,Coarse detects object at blur k=21
+9b_coarse_b31,check,coarse_detect_b31,==,1,Coarse detects object at blur k=31
+# 9c: ICP accuracy under noise — angle should stay good at low noise
+9c_icp_n10_ang,check,icp_n10_ang,<,0.5,ICP angle at noise=10 (deg)
+9c_icp_n20_ang,check,icp_n20_ang,<,2.0,ICP angle at noise=20 (deg) — starts degrading
+9c_icp_n30_ang,warn,icp_n30_ang,<,5.0,ICP angle at noise=30 (deg) — known weak
+# 9d: ICP accuracy under blur — should be stable
+9d_icp_b5_ang,check,icp_b5_ang,<,0.5,ICP angle at blur k=5 (deg)
+9d_icp_b11_ang,check,icp_b11_ang,<,1.0,ICP angle at blur k=11 (deg)
+9d_icp_b21_ang,check,icp_b21_ang,<,2.0,ICP angle at blur k=21 (deg)
+# 9e: ROI accuracy under noise — should be rock solid up to noise=40
+9e_roi_n20_pos,check,roi_n20_pos,<,0.15,ROI position at noise=20 (px)
+9e_roi_n30_pos,check,roi_n30_pos,<,0.2,ROI position at noise=30 (px)
+9e_roi_n40_pos,check,roi_n40_pos,<,0.3,ROI position at noise=40 (px)
+9e_roi_n50_pos,warn,roi_n50_pos,<,1.0,ROI position at noise=50 (px) — may have outliers
+9e_roi_n40_ang,check,roi_n40_ang,<,0.5,ROI angle at noise=40 (deg)
+# 9f: ROI accuracy under blur
+9f_roi_b5_ang,check,roi_b5_ang,<,0.5,ROI angle at blur k=5 (deg)
+9f_roi_b11_ang,check,roi_b11_ang,<,1.0,ROI angle at blur k=11 (deg)
+9f_roi_b21_ang,check,roi_b21_ang,<,2.0,ROI angle at blur k=21 (deg)
+9f_roi_b11_pos,check,roi_b11_pos,<,0.5,ROI position at blur k=11 (px)
+# 9g: Combined noise+blur
+9g_icp_n20b5_ang,check,icp_n20b5_ang,<,1.0,ICP angle at n=20 b=5 combined (deg)
+9g_roi_n30b11_ang,check,roi_n30b11_ang,<,1.0,ROI angle at n=30 b=11 combined (deg)
+9g_roi_n30b11_pos,check,roi_n30b11_pos,<,0.5,ROI position at n=30 b=11 combined (px)
+9g_roi_n50b11_pos,warn,roi_n50b11_pos,<,2.0,ROI position at n=50 b=11 combined (px) — stress test
+# ======== 10. Multi-resolution Speed (warn only) ========
+10_360p_coarse,warn,speed_360p_Coarse_ms,<,20.0,360p 5-obj coarse speed (ms)
+10_360p_icp,warn,speed_360p_ICP_ms,<,30.0,360p 5-obj ICP speed (ms)
+10_360p_roi,warn,speed_360p_ROI_ms,<,30.0,360p 5-obj ROI speed (ms)
+10_1080p_coarse,warn,speed_1080p_Coarse_ms,<,80.0,1080p 20-obj coarse speed (ms)
+10_1080p_icp,warn,speed_1080p_ICP_ms,<,120.0,1080p 20-obj ICP speed (ms)
+10_1080p_roi,warn,speed_1080p_ROI_ms,<,120.0,1080p 20-obj ROI speed (ms)
+10_20mp_coarse,warn,speed_20mp_Coarse_ms,<,500.0,20MP 20-obj coarse speed (ms)
+10_20mp_icp,warn,speed_20mp_ICP_ms,<,600.0,20MP 20-obj ICP speed (ms)
+10_20mp_roi,warn,speed_20mp_ROI_ms,<,600.0,20MP 20-obj ROI speed (ms)
+10_1080p_found,check,speed_1080p_ROI_found,>=,15,1080p 20-obj ROI detection count (expect most found)
+10_20mp_found,check,speed_20mp_ROI_found,>=,15,20MP 20-obj ROI detection count (expect most found)

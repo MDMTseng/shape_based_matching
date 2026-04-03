@@ -15,6 +15,7 @@
 #include <sstream>
 #include <algorithm>
 #include <numeric>
+#include <tuple>
 #ifdef _WIN32
 #include <io.h>
 #include <fcntl.h>
@@ -1087,6 +1088,258 @@ static void test_edge_cases(const sbm::FeatureSet& feat200, const Mat& templ200)
 }
 
 // ============================================================
+// Section 9: Noise & Blur Stability Limits
+// ============================================================
+static void test_noise_blur_stability(const sbm::FeatureSet& feat200, const Mat& templ200) {
+    printf("\n======== 9. NOISE & BLUR STABILITY ========\n");
+    LOG("\n======== 9. NOISE & BLUR STABILITY ========\n");
+
+    const int scene_sz = 250;
+    const float org_x = 100, org_y = 75;
+    const float test_ang = 25;
+
+    // Helper: run one match with given scene, return (found, ang_err, pos_err)
+    auto run_match = [&](const Mat& scene, sbm::RefineMode mode,
+                         float gt_cx, float gt_cy, float gt_ang) -> std::tuple<bool, float, float> {
+        sbm::MatchConfig cfg;
+        cfg.min_score = 30;
+        cfg.nms_radius = 80;
+        cfg.refine = mode;
+        sbm::ShapeMatcher matcher(cfg);
+        sbm::ModelConfig mcfg;
+        mcfg.angle = {0, 360, 2};
+        {
+            CoutSuppressor sup;
+            matcher.addModel("L", feat200, mcfg);
+        }
+        std::vector<sbm::MatchResult> results;
+        { CoutSuppressor sup; results = matcher.match(scene); }
+
+        if (results.empty()) return std::make_tuple(false, 99.0f, 99.0f);
+        auto& r = results[0];
+
+        // Convert user origin back to center
+        float o_x = org_x - feat200.templ_width / 2.0f;
+        float o_y = org_y - feat200.templ_height / 2.0f;
+        float rad = -r.angle * (float)CV_PI / 180.0f;
+        float cx = r.x - (std::cos(rad)*o_x - std::sin(rad)*o_y);
+        float cy = r.y - (std::sin(rad)*o_x + std::cos(rad)*o_y);
+        float ae = angle_err(r.angle, gt_ang);
+        float pe = pos_err(cx, cy, gt_cx, gt_cy);
+        return std::make_tuple(true, ae, pe);
+    };
+
+    // Build clean scene
+    Mat scene_clean(scene_sz, scene_sz, CV_8U, Scalar(0));
+    float gt_cx = scene_sz / 2.0f, gt_cy = scene_sz / 2.0f;
+    place_object(templ200, scene_clean, (int)gt_cx, (int)gt_cy, test_ang);
+
+    // ---- 9a: Coarse detection under noise ----
+    {
+        float noise_levels[] = {30, 50, 60};
+        for (float ns : noise_levels) {
+            Mat scene_n = add_noise(scene_clean, ns);
+            bool found; float ae, pe; std::tie(found, ae, pe) = run_match(scene_n, sbm::RefineMode::None, gt_cx, gt_cy, test_ang);
+            char key[64]; snprintf(key, sizeof(key), "coarse_detect_n%.0f", ns);
+            RECORD(key, found ? 1.0f : 0.0f);
+            LOG("  9a coarse noise=%.0f: found=%d ang=%.1f pos=%.1f\n", ns, (int)found, ae, pe);
+        }
+    }
+
+    // ---- 9b: Coarse detection under blur ----
+    {
+        int blur_levels[] = {11, 21, 31};
+        for (int bk : blur_levels) {
+            Mat scene_b;
+            GaussianBlur(scene_clean, scene_b, Size(bk, bk), 0);
+            bool found; float ae, pe; std::tie(found, ae, pe) = run_match(scene_b, sbm::RefineMode::None, gt_cx, gt_cy, test_ang);
+            char key[64]; snprintf(key, sizeof(key), "coarse_detect_b%d", bk);
+            RECORD(key, found ? 1.0f : 0.0f);
+            LOG("  9b coarse blur=%d: found=%d ang=%.1f pos=%.1f\n", bk, (int)found, ae, pe);
+        }
+    }
+
+    // ---- 9c: ICP accuracy under noise ----
+    {
+        float noise_levels[] = {10, 20, 30};
+        for (float ns : noise_levels) {
+            Mat scene_n = add_noise(scene_clean, ns);
+            bool found; float ae, pe; std::tie(found, ae, pe) = run_match(scene_n, sbm::RefineMode::ICP, gt_cx, gt_cy, test_ang);
+            char key_a[64], key_p[64];
+            snprintf(key_a, sizeof(key_a), "icp_n%.0f_ang", ns);
+            snprintf(key_p, sizeof(key_p), "icp_n%.0f_pos", ns);
+            RECORD(key_a, found ? ae : 99.0f);
+            RECORD(key_p, found ? pe : 99.0f);
+            LOG("  9c ICP noise=%.0f: found=%d ang=%.2f pos=%.2f\n", ns, (int)found, ae, pe);
+        }
+    }
+
+    // ---- 9d: ICP accuracy under blur ----
+    {
+        int blur_levels[] = {5, 11, 21};
+        for (int bk : blur_levels) {
+            Mat scene_b;
+            GaussianBlur(scene_clean, scene_b, Size(bk, bk), 0);
+            bool found; float ae, pe; std::tie(found, ae, pe) = run_match(scene_b, sbm::RefineMode::ICP, gt_cx, gt_cy, test_ang);
+            char key_a[64], key_p[64];
+            snprintf(key_a, sizeof(key_a), "icp_b%d_ang", bk);
+            snprintf(key_p, sizeof(key_p), "icp_b%d_pos", bk);
+            RECORD(key_a, found ? ae : 99.0f);
+            RECORD(key_p, found ? pe : 99.0f);
+            LOG("  9d ICP blur=%d: found=%d ang=%.2f pos=%.2f\n", bk, (int)found, ae, pe);
+        }
+    }
+
+    // ---- 9e: ROI accuracy under noise ----
+    {
+        float noise_levels[] = {20, 30, 40, 50};
+        for (float ns : noise_levels) {
+            Mat scene_n = add_noise(scene_clean, ns);
+            bool found; float ae, pe; std::tie(found, ae, pe) = run_match(scene_n, sbm::RefineMode::ROI, gt_cx, gt_cy, test_ang);
+            char key_a[64], key_p[64];
+            snprintf(key_a, sizeof(key_a), "roi_n%.0f_ang", ns);
+            snprintf(key_p, sizeof(key_p), "roi_n%.0f_pos", ns);
+            RECORD(key_a, found ? ae : 99.0f);
+            RECORD(key_p, found ? pe : 99.0f);
+            LOG("  9e ROI noise=%.0f: found=%d ang=%.2f pos=%.2f\n", ns, (int)found, ae, pe);
+        }
+    }
+
+    // ---- 9f: ROI accuracy under blur ----
+    {
+        int blur_levels[] = {5, 11, 21};
+        for (int bk : blur_levels) {
+            Mat scene_b;
+            GaussianBlur(scene_clean, scene_b, Size(bk, bk), 0);
+            bool found; float ae, pe; std::tie(found, ae, pe) = run_match(scene_b, sbm::RefineMode::ROI, gt_cx, gt_cy, test_ang);
+            char key_a[64], key_p[64];
+            snprintf(key_a, sizeof(key_a), "roi_b%d_ang", bk);
+            snprintf(key_p, sizeof(key_p), "roi_b%d_pos", bk);
+            RECORD(key_a, found ? ae : 99.0f);
+            RECORD(key_p, found ? pe : 99.0f);
+            LOG("  9f ROI blur=%d: found=%d ang=%.2f pos=%.2f\n", bk, (int)found, ae, pe);
+        }
+    }
+
+    // ---- 9g: Combined noise+blur ----
+    {
+        struct NB { float noise; int blur; };
+        NB combos[] = {{20, 5}, {30, 11}, {50, 11}};
+        for (auto& nb : combos) {
+            Mat scene_nb = add_noise(scene_clean, nb.noise);
+            GaussianBlur(scene_nb, scene_nb, Size(nb.blur, nb.blur), 0);
+
+            // ICP
+            bool fi; float ai, pi; std::tie(fi, ai, pi) = run_match(scene_nb, sbm::RefineMode::ICP, gt_cx, gt_cy, test_ang);
+            char ki_a[64], ki_p[64];
+            snprintf(ki_a, sizeof(ki_a), "icp_n%.0fb%d_ang", nb.noise, nb.blur);
+            snprintf(ki_p, sizeof(ki_p), "icp_n%.0fb%d_pos", nb.noise, nb.blur);
+            RECORD(ki_a, fi ? ai : 99.0f);
+            RECORD(ki_p, fi ? pi : 99.0f);
+
+            // ROI
+            bool fr; float ar, pr; std::tie(fr, ar, pr) = run_match(scene_nb, sbm::RefineMode::ROI, gt_cx, gt_cy, test_ang);
+            char kr_a[64], kr_p[64];
+            snprintf(kr_a, sizeof(kr_a), "roi_n%.0fb%d_ang", nb.noise, nb.blur);
+            snprintf(kr_p, sizeof(kr_p), "roi_n%.0fb%d_pos", nb.noise, nb.blur);
+            RECORD(kr_a, fr ? ar : 99.0f);
+            RECORD(kr_p, fr ? pr : 99.0f);
+
+            LOG("  9g n=%.0f b=%d: ICP=%.2f/%.2f ROI=%.2f/%.2f\n",
+                nb.noise, nb.blur, ai, pi, ar, pr);
+        }
+    }
+}
+
+// ============================================================
+// Section 10: Multi-resolution Speed Benchmark (360p, 1080p, 20MP)
+// ============================================================
+static void test_resolution_speed(const sbm::FeatureSet& feat200, const Mat& templ200) {
+    printf("\n======== 10. RESOLUTION SPEED BENCHMARK ========\n");
+    LOG("\n======== 10. RESOLUTION SPEED BENCHMARK ========\n");
+
+    struct ResConfig {
+        const char* name;
+        int width, height;
+        int n_objects;
+        const char* suffix;
+    };
+    ResConfig configs[] = {
+        {"360p",  640,  360, 5, "360p"},
+        {"1080p", 1920, 1080, 20, "1080p"},
+        {"20MP",  5472, 3648, 20, "20mp"},
+    };
+
+    // 20 object positions (spread across any resolution)
+    struct ObjDef { float rx, ry; double angle; }; // relative position [0,1]
+    ObjDef obj_defs[] = {
+        {0.10f,0.15f,7},  {0.25f,0.20f,23},  {0.40f,0.12f,51},  {0.55f,0.18f,78},
+        {0.70f,0.12f,102},{0.85f,0.20f,133}, {0.95f,0.12f,157}, {0.13f,0.40f,189},
+        {0.28f,0.45f,212},{0.43f,0.38f,238}, {0.58f,0.45f,267}, {0.73f,0.38f,291},
+        {0.88f,0.45f,319},{0.10f,0.65f,342}, {0.25f,0.70f,12},  {0.40f,0.65f,67},
+        {0.55f,0.70f,112},{0.70f,0.65f,167}, {0.85f,0.70f,222}, {0.15f,0.90f,277},
+    };
+
+    sbm::RefineMode modes[] = {sbm::RefineMode::None, sbm::RefineMode::ICP, sbm::RefineMode::ROI};
+    const char* mode_names[] = {"Coarse", "ICP", "ROI"};
+
+    for (auto& rc : configs) {
+        int n_obj = std::min(rc.n_objects, 20);
+
+        // Build scene with noise=15 + blur k=3 (mild degradation)
+        Mat scene(rc.height, rc.width, CV_8U, Scalar(30));
+        for (int oi = 0; oi < n_obj; oi++) {
+            int ox = (int)(obj_defs[oi].rx * rc.width);
+            int oy = (int)(obj_defs[oi].ry * rc.height);
+            // Clamp to safe region
+            ox = std::max(100, std::min(rc.width - 100, ox));
+            oy = std::max(100, std::min(rc.height - 100, oy));
+            place_object(templ200, scene, ox, oy, obj_defs[oi].angle);
+        }
+        scene = add_noise(scene, 15);
+        GaussianBlur(scene, scene, Size(3, 3), 0);
+
+        for (int mi = 0; mi < 3; mi++) {
+            sbm::MatchConfig cfg;
+            cfg.min_score = 35;
+            cfg.nms_radius = 80;
+            cfg.refine = modes[mi];
+            sbm::ShapeMatcher matcher(cfg);
+            sbm::ModelConfig mcfg;
+            mcfg.angle = {0, 360, 2};
+            { CoutSuppressor sup; matcher.addModel("L", feat200, mcfg); }
+
+            // Warm up
+            { CoutSuppressor sup; matcher.match(scene); }
+
+            // Average 3 runs
+            double total_ms = 0;
+            int n_found = 0;
+            for (int r = 0; r < 3; r++) {
+                std::vector<sbm::MatchResult> results;
+                auto t0 = std::chrono::high_resolution_clock::now();
+                { CoutSuppressor sup; results = matcher.match(scene); }
+                total_ms += std::chrono::duration<double, std::milli>(
+                    std::chrono::high_resolution_clock::now() - t0).count();
+                n_found = (int)results.size();
+            }
+            double avg_ms = total_ms / 3.0;
+
+            char key[64];
+            snprintf(key, sizeof(key), "speed_%s_%s_ms", rc.suffix, mode_names[mi]);
+            RECORD(key, (float)avg_ms);
+
+            char key_found[64];
+            snprintf(key_found, sizeof(key_found), "speed_%s_%s_found", rc.suffix, mode_names[mi]);
+            RECORD(key_found, (float)n_found);
+
+            printf("  %s %-6s: %5.1fms  found=%d/%d\n", rc.name, mode_names[mi], avg_ms, n_found, n_obj);
+            LOG("  %s %-6s: %5.1fms  found=%d/%d\n", rc.name, mode_names[mi], avg_ms, n_found, n_obj);
+        }
+    }
+}
+
+// ============================================================
 // Main
 // ============================================================
 int main() {
@@ -1124,6 +1377,8 @@ int main() {
     test_sensitivity(feat200);
     test_speed_benchmarks(feat200, templ200);
     test_edge_cases(feat200, templ200);
+    test_noise_blur_stability(feat200, templ200);
+    test_resolution_speed(feat200, templ200);
 
     // Compute cross-validation metrics before evaluation
     {

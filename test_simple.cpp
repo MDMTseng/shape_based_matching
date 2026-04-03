@@ -5,6 +5,7 @@
 #include "icp_refine.h"
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <chrono>
 #include <cstdio>
 #include <iostream>
@@ -674,6 +675,377 @@ int main() {
                        mode_results[i].matched, mode_results[i].total,
                        mode_results[i].ms, mode_results[i].ang, mode_results[i].pos);
             printf("\n");
+        }
+
+        // --- GT orientation debug: single objects at known angles ---
+        {
+            float dbg_angles[] = {0, 45, 90, 135, 180, 270};
+            float dbg_skews[] = {0, 0.05f, 0.10f, 0.15f};
+            int n_skews = sizeof(dbg_skews)/sizeof(dbg_skews[0]);
+            int na = sizeof(dbg_angles)/sizeof(dbg_angles[0]);
+            int cell = 250;
+            Mat dbg(cell * n_skews, cell * na, CV_8UC3, Scalar(30,30,30));
+
+            for (int si = 0; si < n_skews; si++) {
+            float cur_skew = dbg_skews[si];
+            for (int ai = 0; ai < na; ai++) {
+                float ang = dbg_angles[ai];
+                Mat M = getRotationMatrix2D(Point2f(100, 100), -ang, 1.0);
+                Mat rot; warpAffine(templ_fhd, rot, M, templ_fhd.size(),
+                                    INTER_LINEAR, BORDER_CONSTANT, Scalar(0));
+
+                // Apply perspective skew
+                if (cur_skew > 0) {
+                    float s = cur_skew * 100;
+                    Point2f sp[4] = {{0,0},{199,0},{199,199},{0,199}};
+                    Point2f dp[4] = {{s,s*0.5f},{199-s,-s*0.3f},
+                                     {199+s*0.3f,199+s*0.5f},{-s*0.5f,199-s*0.3f}};
+                    Mat P = getPerspectiveTransform(sp, dp);
+                    Mat warped;
+                    warpPerspective(rot, warped, P, rot.size(),
+                                    INTER_LINEAR, BORDER_CONSTANT, Scalar(0));
+                    rot = warped;
+                }
+
+                Mat templ_dbg(cell, cell, CV_8U, Scalar(0));
+                int ox = cell/2 - 100, oy = cell/2 - 100;
+                for (int r = 0; r < rot.rows; r++)
+                    for (int c = 0; c < rot.cols; c++) {
+                        int sy = oy+r, sx = ox+c;
+                        if (sy>=0 && sy<cell && sx>=0 && sx<cell && rot.at<uchar>(r,c)>0)
+                            templ_dbg.at<uchar>(sy,sx) = rot.at<uchar>(r,c);
+                    }
+                Mat cell_color;
+                cvtColor(templ_dbg, cell_color, COLOR_GRAY2BGR);
+
+                // GT arrow: transform origin and x-axis tip through rotation + skew
+                // Template center in template coords = (100, 100)
+                // X-axis tip at (100 + 60, 100) in template coords
+                float arr = 80;
+                float gt_org_tx = 100, gt_org_ty = 100;  // template center
+                float gt_tip_tx = 100 + arr, gt_tip_ty = 100;  // x-axis tip
+
+                // Apply rotation (same M as warpAffine)
+                // M is 2x3: [cos -sin tx; sin cos ty] with -ang
+                double* md = (double*)M.data;
+                auto applyM = [&](float ix, float iy, float& ox2, float& oy2) {
+                    ox2 = (float)(md[0]*ix + md[1]*iy + md[2]);
+                    oy2 = (float)(md[3]*ix + md[4]*iy + md[5]);
+                };
+                float rot_org_x, rot_org_y, rot_tip_x, rot_tip_y;
+                applyM(gt_org_tx, gt_org_ty, rot_org_x, rot_org_y);
+                applyM(gt_tip_tx, gt_tip_ty, rot_tip_x, rot_tip_y);
+
+                // Apply perspective skew (if any)
+                if (cur_skew > 0) {
+                    float s = cur_skew * 100;
+                    Point2f sp2[4] = {{0,0},{199,0},{199,199},{0,199}};
+                    Point2f dp2[4] = {{s,s*0.5f},{199-s,-s*0.3f},
+                                      {199+s*0.3f,199+s*0.5f},{-s*0.5f,199-s*0.3f}};
+                    Mat P2 = getPerspectiveTransform(sp2, dp2);
+                    double* pd = (double*)P2.data;
+                    auto applyP = [&](float ix, float iy, float& ox3, float& oy3) {
+                        float w = (float)(pd[6]*ix + pd[7]*iy + pd[8]);
+                        ox3 = (float)(pd[0]*ix + pd[1]*iy + pd[2]) / w;
+                        oy3 = (float)(pd[3]*ix + pd[4]*iy + pd[5]) / w;
+                    };
+                    float p_org_x, p_org_y, p_tip_x, p_tip_y;
+                    applyP(rot_org_x, rot_org_y, p_org_x, p_org_y);
+                    applyP(rot_tip_x, rot_tip_y, p_tip_x, p_tip_y);
+                    rot_org_x = p_org_x; rot_org_y = p_org_y;
+                    rot_tip_x = p_tip_x; rot_tip_y = p_tip_y;
+                }
+
+                // Offset to cell coords
+                float cell_ox = cell/2.0f - 100, cell_oy = cell/2.0f - 100;
+                float cx = rot_org_x + cell_ox, cy = rot_org_y + cell_oy;
+                float tx = rot_tip_x + cell_ox, ty = rot_tip_y + cell_oy;
+
+                cv::arrowedLine(cell_color, Point((int)cx,(int)cy),
+                    Point((int)tx,(int)ty),
+                    Scalar(0,255,0), 3, LINE_AA, 0, 0.3);
+                cv::drawMarker(cell_color, Point((int)cx,(int)cy),
+                    Scalar(0,255,0), MARKER_CROSS, 30, 2);
+                char lbl[32]; snprintf(lbl,sizeof(lbl),"%d deg",(int)ang);
+                cv::putText(cell_color, lbl, Point(10,25),
+                    FONT_HERSHEY_SIMPLEX, 0.7, Scalar(0,255,0), 2);
+
+                // Run coarse match on this single object
+                Mat scene_dbg(cell, cell, CV_8U, Scalar(0));
+                templ_dbg.copyTo(scene_dbg);
+
+                sbm::MatchConfig cfg_dbg;
+                cfg_dbg.min_score = 35;
+                cfg_dbg.nms_radius = 80;
+                cfg_dbg.refine = sbm::RefineMode::None;
+                sbm::ShapeMatcher matcher_dbg(cfg_dbg);
+                sbm::ModelConfig mcfg_dbg;
+                mcfg_dbg.angle = {0, 360, 2};
+                std::cout.rdbuf(null_stream.rdbuf());
+                matcher_dbg.addModel("L", feat_fhd, mcfg_dbg);
+                auto dbg_results = matcher_dbg.match(scene_dbg);
+                std::cout.rdbuf(orig_cout);
+                null_stream.str(""); null_stream.clear();
+
+                // Helper lambda: draw match result arrow at template center
+                auto drawResult = [&](const sbm::MatchResult& r, Scalar color, float scale) {
+                    float o_x = 100-100, o_y = 75-100;
+                    float rr2 = -r.angle * (float)CV_PI / 180.0f;
+                    float mcx = r.x - (std::cos(rr2)*o_x - std::sin(rr2)*o_y);
+                    float mcy = r.y - (std::sin(rr2)*o_x + std::cos(rr2)*o_y);
+                    float rd2 = r.angle * (float)CV_PI / 180.0f;
+                    float a2 = arr * scale;
+                    cv::arrowedLine(cell_color, Point((int)mcx,(int)mcy),
+                        Point((int)(mcx+std::cos(rd2)*a2),(int)(mcy+std::sin(rd2)*a2)),
+                        color, 2, LINE_AA, 0, 0.3);
+                    cv::circle(cell_color, Point((int)mcx,(int)mcy), 3, color, -1, LINE_AA);
+                };
+
+                // Run ICP and ROI refinement too
+                sbm::MatchConfig cfg_icp; cfg_icp.min_score=35; cfg_icp.nms_radius=80;
+                cfg_icp.refine = sbm::RefineMode::ICP;
+                sbm::ShapeMatcher matcher_icp(cfg_icp);
+                std::cout.rdbuf(null_stream.rdbuf());
+                matcher_icp.addModel("L", feat_fhd, mcfg_dbg);
+                auto icp_results = matcher_icp.match(scene_dbg);
+                std::cout.rdbuf(orig_cout);
+                null_stream.str(""); null_stream.clear();
+
+                sbm::MatchConfig cfg_roi; cfg_roi.min_score=35; cfg_roi.nms_radius=80;
+                cfg_roi.refine = sbm::RefineMode::ROI;
+                sbm::ShapeMatcher matcher_roi(cfg_roi);
+                std::cout.rdbuf(null_stream.rdbuf());
+                matcher_roi.addModel("L", feat_fhd, mcfg_dbg);
+                auto roi_results = matcher_roi.match(scene_dbg);
+                std::cout.rdbuf(orig_cout);
+                null_stream.str(""); null_stream.clear();
+
+                // Draw: ICP=red, ROI=cyan (coarse hidden)
+                if (!icp_results.empty()) drawResult(icp_results[0], Scalar(0,0,255), 0.8f);
+                if (!roi_results.empty()) drawResult(roi_results[0], Scalar(255,255,0), 0.7f);
+
+                // Labels at bottom
+                if (!icp_results.empty()) {
+                    float ae = icp_results[0].angle - ang;
+                    if (ae>180) ae-=360; if (ae<-180) ae+=360;
+                    snprintf(lbl,sizeof(lbl),"I:%+.1f", ae);
+                    cv::putText(cell_color, lbl, Point(5,cell-15),
+                        FONT_HERSHEY_SIMPLEX, 0.4, Scalar(0,0,255), 1);
+                }
+                if (!roi_results.empty()) {
+                    float ae = roi_results[0].angle - ang;
+                    if (ae>180) ae-=360; if (ae<-180) ae+=360;
+                    snprintf(lbl,sizeof(lbl),"R:%+.1f", ae);
+                    cv::putText(cell_color, lbl, Point(cell/2,cell-15),
+                        FONT_HERSHEY_SIMPLEX, 0.4, Scalar(255,255,0), 1);
+                }
+
+                // Skew label on left side
+                if (ai == 0) {
+                    char slbl[32]; snprintf(slbl,sizeof(slbl),"skew=%.2f", cur_skew);
+                    cv::putText(cell_color, slbl, Point(5,45),
+                        FONT_HERSHEY_SIMPLEX, 0.45, Scalar(200,200,200), 1);
+                }
+
+                cell_color.copyTo(dbg(Rect(ai*cell, si*cell, cell, cell)));
+            }
+            }
+            imwrite("output/gt_debug.png", dbg);
+            printf("  -> saved output/gt_debug.png\n");
+        }
+
+        // --- Skew test: objects with perspective distortion ---
+        printf("\n--- Skew test: objects with perspective warp ---\n");
+        {
+            // Test different skew amounts
+            float skew_amounts[] = {0.02f, 0.05f, 0.08f, 0.10f, 0.15f};
+
+            printf("%-10s", "Skew");
+            for (auto& mode : fhd_modes) printf("  %-28s", mode.name);
+            printf("\n");
+            for (int i = 0; i < 10 + 3*30; i++) printf("-");
+            printf("\n");
+
+            for (float skew : skew_amounts) {
+                // Create scene with skewed objects
+                Mat scene_skew(1080, 1920, CV_8U, Scalar(30));
+                // Add same background noise
+                {
+                    Mat bn(scene_skew.size(), CV_64F);
+                    RNG rr(123);
+                    rr.fill(bn, RNG::NORMAL, 0, 15);
+                    Mat ts; scene_skew.convertTo(ts, CV_64F);
+                    ts += bn; ts.convertTo(scene_skew, CV_8U);
+                }
+
+                for (auto& obj : fhd_objs) {
+                    // First rotate
+                    Mat M = getRotationMatrix2D(Point2f(100, 100), -obj.angle, 1.0);
+                    Mat rot;
+                    warpAffine(templ_fhd, rot, M, templ_fhd.size(),
+                               INTER_LINEAR, BORDER_CONSTANT, Scalar(0));
+
+                    // Then apply perspective skew
+                    float s = skew * 100;  // skew in pixels at template edge
+                    Point2f src_pts[4] = {
+                        {0, 0}, {199, 0}, {199, 199}, {0, 199}
+                    };
+                    Point2f dst_pts[4] = {
+                        {s, s*0.5f}, {199-s, -s*0.3f}, {199+s*0.3f, 199+s*0.5f}, {-s*0.5f, 199-s*0.3f}
+                    };
+                    Mat P = getPerspectiveTransform(src_pts, dst_pts);
+                    Mat warped;
+                    warpPerspective(rot, warped, P, rot.size(),
+                                    INTER_LINEAR, BORDER_CONSTANT, Scalar(0));
+
+                    int ox = obj.x - 100, oy = obj.y - 100;
+                    for (int r = 0; r < warped.rows; r++)
+                        for (int c = 0; c < warped.cols; c++) {
+                            int sy = oy + r, sx = ox + c;
+                            if (sy >= 0 && sy < scene_skew.rows && sx >= 0 &&
+                                sx < scene_skew.cols && warped.at<uchar>(r, c) > 0)
+                                scene_skew.at<uchar>(sy, sx) = warped.at<uchar>(r, c);
+                        }
+                }
+
+                // Run full match() per mode — same as the main benchmark
+                struct SR { int matched; int total; double ms; float ang; float pos; };
+                SR skew_results[4];
+                std::vector<sbm::MatchResult> mode_match_results[4];
+                int smi = 0;
+                for (auto& mode : fhd_modes) {
+                    sbm::MatchConfig cfg;
+                    cfg.min_score = 35;
+                    cfg.nms_radius = 80;
+                    cfg.refine = mode.mode;
+
+                    sbm::ShapeMatcher matcher(cfg);
+                    sbm::ModelConfig mcfg;
+                    mcfg.angle = {0, 360, 2};
+
+                    std::cout.rdbuf(null_stream.rdbuf());
+                    matcher.addModel("L", feat_fhd, mcfg);
+                    auto results = matcher.match(scene_skew);
+                    std::cout.rdbuf(orig_cout);
+                    null_stream.str(""); null_stream.clear();
+
+                    float total_ang_err = 0, total_pos_err = 0;
+                    int matched = 0;
+                    for (auto& r : results) {
+                        float best_d = 1e9f; int best_j = -1;
+                        for (int j = 0; j < n_objs; j++) {
+                            float o2 = 100-100, oo = 75-100;
+                            float rd = -(float)fhd_objs[j].angle*(float)CV_PI/180.0f;
+                            float gx = fhd_objs[j].x + std::cos(rd)*o2 - std::sin(rd)*oo;
+                            float gy = fhd_objs[j].y + std::sin(rd)*o2 + std::cos(rd)*oo;
+                            float d = std::sqrt((r.x-gx)*(r.x-gx)+(r.y-gy)*(r.y-gy));
+                            if (d < best_d) { best_d = d; best_j = j; }
+                        }
+                        if (best_j >= 0 && best_d < 50) {
+                            float ae = r.angle - (float)fhd_objs[best_j].angle;
+                            if (ae > 180) ae -= 360; if (ae < -180) ae += 360;
+                            total_ang_err += std::abs(ae);
+                            total_pos_err += best_d;
+                            matched++;
+                        }
+                    }
+                    float ma = matched > 0 ? total_ang_err / matched : -1;
+                    float mp = matched > 0 ? total_pos_err / matched : -1;
+                    skew_results[smi] = {matched, n_objs, 0, ma, mp};
+                    mode_match_results[smi] = results;
+                    smi++;
+                }
+                // Write results to file to avoid cout interleaving
+                {
+                    FILE* sf = fopen("output/skew_results.txt",
+                                    skew == skew_amounts[0] ? "w" : "a");
+                    if (sf) {
+                        if (skew == skew_amounts[0]) {
+                            fprintf(sf, "%-10s  %-20s  %-20s  %-20s\n",
+                                    "Skew", "None", "ICP(inverse)", "ROI");
+                            fprintf(sf, "----------------------------------------------------------------------\n");
+                        }
+                        fprintf(sf, "%-10.2f", skew);
+                        for (int i = 0; i < smi; i++)
+                            fprintf(sf, "  %2d/%d %4.1fdeg %4.1fpx ",
+                                   skew_results[i].matched, skew_results[i].total,
+                                   skew_results[i].ang, skew_results[i].pos);
+                        fprintf(sf, "\n");
+                        fclose(sf);
+                    }
+                }
+
+                // Draw GT only on image
+                Mat vis;
+                cvtColor(scene_skew, vis, COLOR_GRAY2BGR);
+
+                for (int j = 0; j < n_objs; j++) {
+                    // GT center (template center, not user origin)
+                    float cx = (float)fhd_objs[j].x;
+                    float cy = (float)fhd_objs[j].y;
+                    float ang = (float)fhd_objs[j].angle;
+                    float rd = ang * (float)CV_PI / 180.0f;
+
+                    // Draw cross at center
+                    cv::drawMarker(vis, Point((int)cx, (int)cy),
+                                   Scalar(0,255,0), MARKER_CROSS, 25, 2);
+
+                    // Draw angle arrow from center
+                    // In image coords: X-right, Y-down. Rotation is CW.
+                    // cos(rd) gives X component, sin(rd) gives Y component for CW rotation.
+                    float arr_len = 60;
+                    float ax = std::cos(rd)*arr_len, ay = std::sin(rd)*arr_len;
+                    cv::arrowedLine(vis, Point((int)cx, (int)cy),
+                                   Point((int)(cx+ax), (int)(cy+ay)),
+                                   Scalar(0,255,0), 2, LINE_AA, 0, 0.3);
+
+                    // Label angle
+                    char lbl[32];
+                    snprintf(lbl, sizeof(lbl), "%.0f", ang);
+                    cv::putText(vis, lbl, Point((int)cx+10, (int)cy-10),
+                                FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0,255,0), 1);
+                }
+
+                // Create zoomed crop mosaic: 2 rows x 5 cols of 200x200 crops
+                int crop_sz = 200, pad = 4;
+                int cols = 5, rows = 2;
+                int mosaic_w = cols * (crop_sz + pad) + pad;
+                int mosaic_h = rows * (crop_sz + pad) + pad + 30;  // +30 for title
+                Mat mosaic(mosaic_h, mosaic_w, CV_8UC3, Scalar(40,40,40));
+
+                // Title
+                char title[128];
+                snprintf(title, sizeof(title), "skew=%.2f  GT_init: %.1fdeg %.1fpx  ICP: %.1fdeg %.1fpx  ROI: %.1fdeg %.1fpx",
+                         skew, skew_results[0].ang, skew_results[0].pos,
+                         skew_results[1].ang, skew_results[1].pos,
+                         skew_results[2].ang, skew_results[2].pos);
+                cv::putText(mosaic, title, Point(pad, 20),
+                            FONT_HERSHEY_SIMPLEX, 0.5, Scalar(255,255,255), 1);
+
+                for (int j = 0; j < std::min(n_objs, cols*rows); j++) {
+                    int cx = (int)fhd_objs[j].x, cy = (int)fhd_objs[j].y;
+                    int x0 = std::max(0, cx - crop_sz/2);
+                    int y0 = std::max(0, cy - crop_sz/2);
+                    int x1 = std::min(vis.cols, x0 + crop_sz);
+                    int y1 = std::min(vis.rows, y0 + crop_sz);
+                    if (x1-x0 < 50 || y1-y0 < 50) continue;
+
+                    Mat crop = vis(Rect(x0, y0, x1-x0, y1-y0)).clone();
+                    // Resize to crop_sz if needed
+                    if (crop.cols != crop_sz || crop.rows != crop_sz)
+                        resize(crop, crop, Size(crop_sz, crop_sz));
+
+                    int col = j % cols, row = j / cols;
+                    int mx = pad + col * (crop_sz + pad);
+                    int my = 30 + pad + row * (crop_sz + pad);
+                    crop.copyTo(mosaic(Rect(mx, my, crop_sz, crop_sz)));
+                }
+
+                char fname[128];
+                snprintf(fname, sizeof(fname), "output/skew_%.2f.png", skew);
+                imwrite(fname, mosaic);
+                printf("  -> saved %s\n", fname);
+            }
         }
 
         // --- Isolated test: 1 object, clean background, per-angle error ---

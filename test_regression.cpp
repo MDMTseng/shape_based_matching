@@ -1258,6 +1258,8 @@ static void test_resolution_speed(const sbm::FeatureSet& feat200, const Mat& tem
     printf("\n======== 10. RESOLUTION SPEED BENCHMARK ========\n");
     LOG("\n======== 10. RESOLUTION SPEED BENCHMARK ========\n");
 
+    const float org_x = 100, org_y = 75;
+
     struct ResConfig {
         const char* name;
         int width, height;
@@ -1265,7 +1267,7 @@ static void test_resolution_speed(const sbm::FeatureSet& feat200, const Mat& tem
         const char* suffix;
     };
     ResConfig configs[] = {
-        {"360p",  640,  360, 5, "360p"},
+        {"360p",  640,  360, 3, "360p"},
         {"1080p", 1920, 1080, 20, "1080p"},
         {"20MP",  5472, 3648, 20, "20mp"},
     };
@@ -1285,15 +1287,14 @@ static void test_resolution_speed(const sbm::FeatureSet& feat200, const Mat& tem
 
     for (auto& rc : configs) {
         int n_obj = std::min(rc.n_objects, 20);
+        // Scale NMS radius with resolution (avoid merging at low res)
+        int nms_r = std::max(40, std::min(100, rc.width / 20));
 
         // Build scene with noise=15 + blur k=3 (mild degradation)
         Mat scene(rc.height, rc.width, CV_8U, Scalar(30));
         for (int oi = 0; oi < n_obj; oi++) {
-            int ox = (int)(obj_defs[oi].rx * rc.width);
-            int oy = (int)(obj_defs[oi].ry * rc.height);
-            // Clamp to safe region
-            ox = std::max(100, std::min(rc.width - 100, ox));
-            oy = std::max(100, std::min(rc.height - 100, oy));
+            int ox = (int)(obj_defs[oi].rx * (rc.width - 200) + 100);
+            int oy = (int)(obj_defs[oi].ry * (rc.height - 200) + 100);
             place_object(templ200, scene, ox, oy, obj_defs[oi].angle);
         }
         scene = add_noise(scene, 15);
@@ -1301,8 +1302,8 @@ static void test_resolution_speed(const sbm::FeatureSet& feat200, const Mat& tem
 
         for (int mi = 0; mi < 3; mi++) {
             sbm::MatchConfig cfg;
-            cfg.min_score = 35;
-            cfg.nms_radius = 80;
+            cfg.min_score = 30;
+            cfg.nms_radius = nms_r;
             cfg.refine = modes[mi];
             sbm::ShapeMatcher matcher(cfg);
             sbm::ModelConfig mcfg;
@@ -1314,16 +1315,32 @@ static void test_resolution_speed(const sbm::FeatureSet& feat200, const Mat& tem
 
             // Average 3 runs
             double total_ms = 0;
-            int n_found = 0;
+            std::vector<sbm::MatchResult> last_results;
             for (int r = 0; r < 3; r++) {
-                std::vector<sbm::MatchResult> results;
                 auto t0 = std::chrono::high_resolution_clock::now();
-                { CoutSuppressor sup; results = matcher.match(scene); }
+                { CoutSuppressor sup; last_results = matcher.match(scene); }
                 total_ms += std::chrono::duration<double, std::milli>(
                     std::chrono::high_resolution_clock::now() - t0).count();
-                n_found = (int)results.size();
             }
             double avg_ms = total_ms / 3.0;
+
+            // Count GT-matched results (within 50px of a GT position)
+            int n_matched = 0;
+            std::vector<bool> gt_used(n_obj, false);
+            for (auto& res : last_results) {
+                float o_x = org_x - feat200.templ_width / 2.0f;
+                float o_y = org_y - feat200.templ_height / 2.0f;
+                float rad = -res.angle * (float)CV_PI / 180.0f;
+                float rcx = res.x - (std::cos(rad)*o_x - std::sin(rad)*o_y);
+                float rcy = res.y - (std::sin(rad)*o_x + std::cos(rad)*o_y);
+                for (int gi = 0; gi < n_obj; gi++) {
+                    if (gt_used[gi]) continue;
+                    int gox = (int)(obj_defs[gi].rx * (rc.width - 200) + 100);
+                    int goy = (int)(obj_defs[gi].ry * (rc.height - 200) + 100);
+                    float d = pos_err(rcx, rcy, (float)gox, (float)goy);
+                    if (d < 50) { n_matched++; gt_used[gi] = true; break; }
+                }
+            }
 
             char key[64];
             snprintf(key, sizeof(key), "speed_%s_%s_ms", rc.suffix, mode_names[mi]);
@@ -1331,10 +1348,10 @@ static void test_resolution_speed(const sbm::FeatureSet& feat200, const Mat& tem
 
             char key_found[64];
             snprintf(key_found, sizeof(key_found), "speed_%s_%s_found", rc.suffix, mode_names[mi]);
-            RECORD(key_found, (float)n_found);
+            RECORD(key_found, (float)n_matched);
 
-            printf("  %s %-6s: %5.1fms  found=%d/%d\n", rc.name, mode_names[mi], avg_ms, n_found, n_obj);
-            LOG("  %s %-6s: %5.1fms  found=%d/%d\n", rc.name, mode_names[mi], avg_ms, n_found, n_obj);
+            printf("  %s %-6s: %5.1fms  matched=%d/%d\n", rc.name, mode_names[mi], avg_ms, n_matched, n_obj);
+            LOG("  %s %-6s: %5.1fms  matched=%d/%d\n", rc.name, mode_names[mi], avg_ms, n_matched, n_obj);
         }
     }
 }

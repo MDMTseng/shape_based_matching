@@ -36,6 +36,7 @@ struct ROIConfig {
     float corner_eigen_ratio = 1.5f;  ///< PCA eigenvalue ratio threshold:
                                       ///< < ratio → corner (add both eigenvectors)
                                       ///< > ratio → edge (only normal eigenvector)
+    bool verbose = false;             ///< Print debug info to stderr
 };
 
 /// Select critical sample points from refine points.

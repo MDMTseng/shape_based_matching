@@ -14,6 +14,18 @@
 #include <algorithm>
 #include <cmath>
 
+// --- Named constants (extracted from magic numbers) ---
+static constexpr float kCornerScoreMultiplier   = 10.0f;   // Cornerness weighting in feature selection score
+static constexpr float kOptMinDistFactor        = 0.5f;    // Multiplier on min_dist for optimization swap spacing
+static constexpr int   kMaxOptIterations        = 20;      // Max iterations for sensitivity optimization loop
+static constexpr float kCornerThreshold         = 0.3f;    // Cornerness above this = corner (don't swap out)
+static constexpr float kSensitivityBalanceRatio = 2.0f;    // Stop optimizing when worst/least sensitivity < this
+static constexpr float kMinImprovementFactor    = 0.99f;   // Swap must beat current worst by this factor
+static constexpr float kSolverRegularization    = 0.001f;  // Tikhonov regularization for 3x3 rigid solver
+static constexpr int   kDefaultROIHalf          = 15;      // Default half-size for ROI search/template window
+static constexpr int   kDefaultROIMaxIters      = 3;       // Default max iterations for ROI refinement
+static constexpr int   kDefaultOptPoints        = 8;       // Default number of optimized sample points
+
 namespace sbm {
 
 // ============================================================
@@ -313,7 +325,7 @@ static cv::Vec3f solveSens(const std::vector<SensConstraint>& cs) {
         ATb[0]-=j0*e; ATb[1]-=j1*e; ATb[2]-=j2*e;
     }
     ATA[1][0]=ATA[0][1]; ATA[2][0]=ATA[0][2]; ATA[2][1]=ATA[1][2];
-    for(int i=0;i<3;i++) ATA[i][i]+=0.001f;
+    for(int i=0;i<3;i++) ATA[i][i]+=kSolverRegularization;
     cv::Mat A(3,3,CV_32F,ATA), b(3,1,CV_32F,ATb), x;
     cv::solve(A,b,x);
     return cv::Vec3f(x.at<float>(0)*180/(float)CV_PI, x.at<float>(1), x.at<float>(2));
@@ -389,11 +401,12 @@ std::vector<cv::Point2f> FeatureSet::selectOptimizedPoints(int max_points) const
         float lev = std::sqrt(rp.px*rp.px + rp.py*rp.py);
         // Score: corners high priority, then distance from center
         // cornerness [0,1] boosted to dominate, leverage normalized to [0,1]
-        float score = rp.cornerness * 10.0f + lev / (max_lev + 1e-6f);
+        float score = rp.cornerness * kCornerScoreMultiplier + lev / (max_lev + 1e-6f);
         all_cands.push_back({(int)i, rp.cornerness, score});
     }
 
     // Initial greedy selection: corners + far-from-center first
+    // min spacing = template_size / 16 * 1.5 (ensures features aren't clustered)
     float min_dist = std::max(templ_width, templ_height) / 16.0f * 1.5f;
     float min_dist_sq = min_dist * min_dist;
     std::sort(all_cands.begin(), all_cands.end(),
@@ -436,9 +449,9 @@ std::vector<cv::Point2f> FeatureSet::selectOptimizedPoints(int max_points) const
     };
 
     // Iterative optimization: swap least sensitive with best candidate
-    float opt_min_dist_sq = (min_dist * 0.5f) * (min_dist * 0.5f);
+    float opt_min_dist_sq = (min_dist * kOptMinDistFactor) * (min_dist * kOptMinDistFactor);
 
-    for (int opt_iter = 0; opt_iter < 20; ++opt_iter) {
+    for (int opt_iter = 0; opt_iter < kMaxOptIterations; ++opt_iter) {
         auto baseline = buildSet(selected);
         if ((int)baseline.size() < 3) break;
 
@@ -464,12 +477,12 @@ std::vector<cv::Point2f> FeatureSet::selectOptimizedPoints(int max_points) const
             float d_pos = std::sqrt(pos_dx*pos_dx + pos_dy*pos_dy);
             sens[fi] = d_ang + d_pos;
             // Don't swap out corners — they provide 2D constraint
-            bool is_corner = refine_points[selected[fi]].cornerness > 0.3f;
+            bool is_corner = refine_points[selected[fi]].cornerness > kCornerThreshold;
             if (sens[fi] < least_sens && !is_corner) { least_sens = sens[fi]; least_idx = (int)fi; }
             worst_sens = std::max(worst_sens, sens[fi]);
         }
 
-        if (least_sens > 1e-6f && worst_sens / least_sens < 2.0f) break;
+        if (least_sens > 1e-6f && worst_sens / least_sens < kSensitivityBalanceRatio) break;
 
         int remove_rp_idx = selected[least_idx];
         float best_worst = worst_sens;
@@ -499,7 +512,7 @@ std::vector<cv::Point2f> FeatureSet::selectOptimizedPoints(int max_points) const
             }
         }
 
-        if (best_cand < 0 || best_worst >= worst_sens * 0.99f) break;
+        if (best_cand < 0 || best_worst >= worst_sens * kMinImprovementFactor) break;
         selected[least_idx] = best_cand;
     }
 
@@ -519,7 +532,7 @@ FeatureSet::SensitivityReport FeatureSet::analyzeSensitivity(int skip_index) con
     sr.num_fragile = 0;
 
     // Use optimized point selection
-    auto opt_points = selectOptimizedPoints(15);
+    auto opt_points = selectOptimizedPoints(kDefaultOptPoints);
     if ((int)opt_points.size() < 3) {
         sr.diagnosis = "Too few points";
         return sr;
@@ -764,7 +777,9 @@ int ShapeMatcher::addModel(const std::string& name,
     ModelInfo info;
     info.name = name;
     info.features = features;
-    info.features.selectOptimizedPoints(15);  // precompute + cache
+    // Pre-compute optimized sample points and cache them. These are read-only
+    // during match() (parallel region), so no synchronization is needed.
+    info.features.selectOptimizedPoints(kDefaultOptPoints);
     // Pre-build template EdgeScene for inverse ICP refinement
     if (!info.features.templ_image.empty()) {
         info.features.cached_templ_scene =
@@ -937,7 +952,8 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         // ROI-based refinement
         if (cfg.refine == RefineMode::ROI && !fs.templ_image.empty() && !scene.empty()) {
             // Use sensitivity-optimized point selection
-            auto opt_points = fs.selectOptimizedPoints(15);
+            // cached_opt_points was pre-computed in addModel(); read-only here (thread-safe)
+            auto opt_points = fs.selectOptimizedPoints(kDefaultOptPoints);
             std::vector<roi_refine::SamplePoint> sample_pts;
             for (auto& p : opt_points) {
                 roi_refine::SamplePoint sp;
@@ -947,9 +963,9 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
 
             if (!sample_pts.empty()) {
                 roi_refine::ROIConfig roi_cfg;
-                roi_cfg.roi_half = 15;
-                roi_cfg.search_half = 15;
-                roi_cfg.max_iters = 3;
+                roi_cfg.roi_half = kDefaultROIHalf;
+                roi_cfg.search_half = kDefaultROIHalf;
+                roi_cfg.max_iters = kDefaultROIMaxIters;
 
                 cv::Vec3f init_pose(scene_x, scene_y, raw_angle);
                 auto refined_pose = roi_refine::refineROI(

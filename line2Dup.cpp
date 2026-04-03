@@ -61,10 +61,14 @@ struct StageProfile {
         fused_spread_lut_ms = coarse_match_ms = refine_ms = sort_nms_ms = 0;
     }
 };
+// Note: not thread-safe for concurrent matching calls. Profile data may be
+// inaccurate under OpenMP.
 static StageProfile g_profile;
 
 namespace line2Dup
 {
+// Minimum 3x3 neighborhood votes for a quantized orientation to be accepted.
+static const int NEIGHBOR_THRESHOLD = 5;
 /**
  * \brief Get the label [0,8) of the single bit set in quantized.
  */
@@ -314,7 +318,6 @@ void hysteresisGradient(Mat &magnitude, Mat &quantized_angle,
                 }
 
                 // Only accept the quantization if majority of pixels in the patch agree
-                static const int NEIGHBOR_THRESHOLD = 5;
                 if (max_votes >= NEIGHBOR_THRESHOLD)
                     quantized_angle.at<uchar>(r, c) = uchar(1 << index);
             }
@@ -356,7 +359,8 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
         // Direct 8-bin quantization from dx, dy (no atan2).
         // Undirected gradients: [0,180) mapped to 8 bins of 22.5 deg each.
         // Bin centers: 0, 22.5, 45, 67.5, 90, 112.5, 135, 157.5
-        // Fixed-point tan boundaries * 10000:
+        // Fixed-point tan boundaries for 8-bin orientation quantization.
+        // Values are tan(22.5°), tan(45°), tan(67.5°), tan(∞) scaled by 2^15
         static const int TAN_B[4] = {1989, 6682, 14966, 50273};
 
         // Step 1: Compute magnitude + unfiltered 8-bin quantization.
@@ -501,7 +505,6 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
         // Process 32 pixels at a time with SIMD equality comparisons.
         pt0 = pnow();
         angle = Mat::zeros(src.size(), CV_8U);
-        static const int NEIGHBOR_THRESHOLD = 5;
 
 #ifdef __AVX2__
         // LUT: bin index (0-7) → bitmask (1<<bin)
@@ -1184,7 +1187,7 @@ static void similarity(const std::vector<Mat> &linear_memories, const Template &
     int num_valid = (int)lm_ptrs.size();
 
     // OPTIMIZATION: Chunked uint8 accumulation.
-    // Max score per feature = 4. In a batch of 63 features: 63*4=252 < 255.
+    // Max features per uint8 accumulation batch. 63 × 4 (max score per feature) = 252 < 255.
     // Accumulate in uint8 at FULL SIMD width (32 bytes on AVX2 = 2x throughput).
     // Widen to int16 only between batches.
     const int BATCH = 63;
@@ -1510,7 +1513,8 @@ std::vector<Match> Detector::match(Mat source, float threshold,
                 for (int ori = 0; ori < 8; ++ori)
                     memories[ori].create(T * T, mem_w * mem_h, CV_8U);
 
-                // Popcount discount table: fewer bits set = more discriminative.
+                // Popcount discount: score reduction for ambiguous spread bytes.
+                // Index = popcount of spread byte.
                 // Spreading naturally sets 2-3 bits on clean edges, so we only
                 // penalize when many bits are set (ambiguous/noisy regions).
                 // popcount 0->0, 1-3->4(full), 4->3, 5->2, 6->1, 7-8->0
@@ -2036,6 +2040,7 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
 
 
         // Cap coarse candidates to top-K by score to prevent noise flooding.
+        // Maximum coarse candidates per template before pyramid refinement.
         // On noisy images, thousands of false candidates pass the threshold.
         // Keeping only the best ones prevents the refinement stage from exploding.
         {

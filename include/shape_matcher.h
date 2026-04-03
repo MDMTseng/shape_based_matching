@@ -64,6 +64,8 @@ struct FeatureSet {
 
     /// Cached optimized sample points (computed once, reused for matching).
     /// Populated by selectOptimizedPoints() or precomputeOptimizedPoints().
+    /// Thread safety: pre-computed in addModel() before the parallel match region,
+    /// then read-only during match(). No synchronization needed.
     mutable std::vector<cv::Point2f> cached_opt_points;
     mutable int cached_opt_max_points = 0;  ///< max_points arg used to compute cache
 
@@ -130,7 +132,7 @@ struct FeatureSet {
     /// greedy initial selection, then swap least/best to equalize sensitivity.
     /// @param max_points  Target number of points.
     /// @return Positions relative to template center.
-    std::vector<cv::Point2f> selectOptimizedPoints(int max_points = 15) const;
+    std::vector<cv::Point2f> selectOptimizedPoints(int max_points = 8) const;
 
     /// Run sensitivity analysis on auto-selected sample points.
     /// Simulates the ROI rigid solve with perturbed correspondences.

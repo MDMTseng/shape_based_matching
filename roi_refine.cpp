@@ -8,6 +8,17 @@
 
 namespace roi_refine {
 
+// Named constants (extracted from inline magic numbers)
+static constexpr float kPCAGradientThreshFactor = 0.3f;   // PCA gradient threshold multiplier
+static constexpr float kAngleRematchDeg         = 2.0f;   // angle change threshold for re-matching
+static constexpr float kAngleRewarpDeg          = 5.0f;   // angle change threshold for re-warping cached ROIs
+static constexpr int   kMinROIHalf              = 5;       // minimum ROI half-size
+static constexpr float kOutlierMultiplier       = 2.0f;   // outlier rejection: distance > N × median
+static constexpr float kMaxThetaUpdate          = 0.2f;   // theta clamp (radians)
+static constexpr float kMaxTransUpdate          = 10.0f;  // translation clamp (pixels)
+static constexpr float kSolverRegularization    = 0.001f; // regularization for ATA diagonal
+static constexpr float kEpsilon                 = 1e-6f;  // denominator checks
+
 // -----------------------------------------------------------------------
 // Select critical points: corners first, then well-spaced edges
 // -----------------------------------------------------------------------
@@ -100,7 +111,7 @@ static cv::Point2f matchROI_subpixel(const cv::Mat& templ_roi,
         float b = result.at<float>(my, mx);
         float c = result.at<float>(my, mx + 1);
         float denom = a - 2*b + c;
-        if (std::abs(denom) > 1e-6f)
+        if (std::abs(denom) > kEpsilon)
             sx += std::max(-1.0f, std::min(1.0f, 0.5f * (a - c) / denom));
     }
     if (my > 0 && my < rh - 1) {
@@ -108,7 +119,7 @@ static cv::Point2f matchROI_subpixel(const cv::Mat& templ_roi,
         float b = result.at<float>(my, mx);
         float c = result.at<float>(my + 1, mx);
         float denom = a - 2*b + c;
-        if (std::abs(denom) > 1e-6f)
+        if (std::abs(denom) > kEpsilon)
             sy += std::max(-1.0f, std::min(1.0f, 0.5f * (a - c) / denom));
     }
 
@@ -125,7 +136,7 @@ static void roiPCA(const cv::Mat& roi, float eigvals[2], cv::Point2f eigvecs[2])
 
     cv::Mat mag;
     cv::magnitude(dx, dy, mag);
-    float thresh = 0.3f * *std::max_element(mag.begin<float>(), mag.end<float>());
+    float thresh = kPCAGradientThreshFactor * *std::max_element(mag.begin<float>(), mag.end<float>());
 
     // Collect edge pixel positions
     std::vector<cv::Point2f> pts;
@@ -161,7 +172,7 @@ static void roiPCA(const cv::Mat& roi, float eigvals[2], cv::Point2f eigvecs[2])
     eigvals[1] = trace/2.0f - disc;  // smaller
 
     // Eigenvectors
-    if (std::abs(cxy) > 1e-6f) {
+    if (std::abs(cxy) > kEpsilon) {
         eigvecs[0] = cv::Point2f(eigvals[0] - cyy, cxy);
         eigvecs[1] = cv::Point2f(eigvals[1] - cyy, cxy);
     } else {
@@ -171,7 +182,7 @@ static void roiPCA(const cv::Mat& roi, float eigvals[2], cv::Point2f eigvecs[2])
     // Normalize
     for (int i = 0; i < 2; ++i) {
         float len = std::sqrt(eigvecs[i].x*eigvecs[i].x + eigvecs[i].y*eigvecs[i].y);
-        if (len > 1e-6f) eigvecs[i] *= (1.0f / len);
+        if (len > kEpsilon) eigvecs[i] *= (1.0f / len);
     }
 }
 
@@ -208,7 +219,7 @@ static cv::Vec3f solveRigid(const std::vector<Constraint>& constraints,
 
     // Symmetrize + regularize
     ATA[1][0] = ATA[0][1]; ATA[2][0] = ATA[0][2]; ATA[2][1] = ATA[1][2];
-    for (int i = 0; i < 3; ++i) ATA[i][i] += 0.001f;
+    for (int i = 0; i < 3; ++i) ATA[i][i] += kSolverRegularization;
 
     // Solve 3x3 via Cramer's rule (small matrix)
     cv::Mat A(3, 3, CV_32F, ATA);
@@ -272,14 +283,14 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
     std::vector<Constraint> constraints;
 
     // Re-match if first iteration OR if angle changed > 2° since last match
-    bool do_match = (std::abs(angle_deg - last_match_angle) > 2.0f);
+    bool do_match = (std::abs(angle_deg - last_match_angle) > kAngleRematchDeg);
 
     if (do_match) {
         last_match_angle = angle_deg;
         matched_points.clear();
 
         // Warp ROI patches only if angle changed significantly from cache
-        bool need_warp = (std::abs(angle_deg - cached_angle) > 5.0f);
+        bool need_warp = (std::abs(angle_deg - cached_angle) > kAngleRewarpDeg);
         if (need_warp) {
             cached_angle = angle_deg;
             cached_rois.clear();
@@ -292,7 +303,7 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
                 int tx = (int)(sp.pos.x + tcx + 0.5f);
                 int ty = (int)(sp.pos.y + tcy + 0.5f);
                 int h = safeROIHalf(tx, ty, templ_img.cols, templ_img.rows, config.roi_half);
-                if (h < 5) continue;
+                if (h < kMinROIHalf) continue;
                 cv::Mat roi_unrot = templ_img(cv::Rect(tx-h, ty-h, 2*h, 2*h));
                 cv::Mat roi;
                 if (std::abs(angle_deg) > 0.5f) {
@@ -325,7 +336,7 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
             int h = safeROIHalf(tx, ty, templ_img.cols, templ_img.rows, config.roi_half);
             float eigvals[2];
             cv::Point2f eigvecs[2];
-            if (h >= 5) {
+            if (h >= kMinROIHalf) {
                 cv::Mat roi_unrot = templ_img(cv::Rect(tx-h, ty-h, 2*h, 2*h));
                 roiPCA(roi_unrot, eigvals, eigvecs);
             } else {
@@ -337,7 +348,7 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
             mp.dst = matched;
             mp.normal = eigvecs[1];   // store unrotated — rotate per iteration
             mp.tangent = eigvecs[0];
-            mp.is_corner = (eigvals[0] > 1e-6f && eigvals[1] > 1e-6f &&
+            mp.is_corner = (eigvals[0] > kEpsilon && eigvals[1] > kEpsilon &&
                             eigvals[0] / eigvals[1] < config.corner_eigen_ratio);
             mp.sample_idx = cr.sample_idx;
             matched_points.push_back(mp);
@@ -374,15 +385,17 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
     }
 
     // Debug: print per-point matching accuracy
-    fprintf(stderr, "[ROI] %d constraints from %d samples (angle=%.1f)\n",
-            (int)constraints.size(), (int)sample_points.size(), angle_deg);
-    for (size_t i = 0; i < constraints.size(); ++i) {
-        auto& c = constraints[i];
-        float dx = c.dst.x - c.src.x, dy = c.dst.y - c.src.y;
-        float dist = std::sqrt(dx*dx + dy*dy);
-        fprintf(stderr, "  [%2d] src=(%.1f,%.1f) dst=(%.1f,%.1f) d=%.2f n=(%.2f,%.2f) w=%.1f\n",
-                (int)i, c.src.x, c.src.y, c.dst.x, c.dst.y, dist,
-                c.normal.x, c.normal.y, c.weight);
+    if (config.verbose) {
+        fprintf(stderr, "[ROI] %d constraints from %d samples (angle=%.1f)\n",
+                (int)constraints.size(), (int)sample_points.size(), angle_deg);
+        for (size_t i = 0; i < constraints.size(); ++i) {
+            auto& c = constraints[i];
+            float dx = c.dst.x - c.src.x, dy = c.dst.y - c.src.y;
+            float dist = std::sqrt(dx*dx + dy*dy);
+            fprintf(stderr, "  [%2d] src=(%.1f,%.1f) dst=(%.1f,%.1f) d=%.2f n=(%.2f,%.2f) w=%.1f\n",
+                    (int)i, c.src.x, c.src.y, c.dst.x, c.dst.y, dist,
+                    c.normal.x, c.normal.y, c.weight);
+        }
     }
 
     // Reject outliers: remove constraints with distance > 2× median
@@ -395,14 +408,15 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
         }
         std::sort(dists.begin(), dists.end());
         float median = dists[dists.size() / 2];
-        float thresh = std::max(2.0f, median * 2.0f);
+        float thresh = std::max(kOutlierMultiplier, median * kOutlierMultiplier);
 
         std::vector<Constraint> filtered;
         for (size_t i = 0; i < constraints.size(); ++i) {
             if (dists[i] <= thresh) filtered.push_back(constraints[i]);
         }
-        fprintf(stderr, "  outlier rejection: %d -> %d (thresh=%.1f)\n",
-                (int)constraints.size(), (int)filtered.size(), thresh);
+        if (config.verbose)
+            fprintf(stderr, "  outlier rejection: %d -> %d (thresh=%.1f)\n",
+                    (int)constraints.size(), (int)filtered.size(), thresh);
         constraints = std::move(filtered);
     }
 
@@ -417,16 +431,17 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
     float d_ty = update[2];
 
     // Clamp
-    d_theta = std::max(-0.2f, std::min(0.2f, d_theta));
-    d_tx = std::max(-10.0f, std::min(10.0f, d_tx));
-    d_ty = std::max(-10.0f, std::min(10.0f, d_ty));
+    d_theta = std::max(-kMaxThetaUpdate, std::min(kMaxThetaUpdate, d_theta));
+    d_tx = std::max(-kMaxTransUpdate, std::min(kMaxTransUpdate, d_tx));
+    d_ty = std::max(-kMaxTransUpdate, std::min(kMaxTransUpdate, d_ty));
 
     float refined_angle = std::fmod(angle_deg + d_theta * 180.0f / (float)CV_PI, 360.0f);
     if (refined_angle < 0) refined_angle += 360.0f;
 
     pose = cv::Vec3f(cx + d_tx, cy + d_ty, refined_angle);
-    fprintf(stderr, "  iter %d: angle=%.1f pos=(%.1f,%.1f) d_theta=%.3f d_t=(%.2f,%.2f)\n",
-            iteration, pose[2], pose[0], pose[1], d_theta*180/(float)CV_PI, d_tx, d_ty);
+    if (config.verbose)
+        fprintf(stderr, "  iter %d: angle=%.1f pos=(%.1f,%.1f) d_theta=%.3f d_t=(%.2f,%.2f)\n",
+                iteration, pose[2], pose[0], pose[1], d_theta*180/(float)CV_PI, d_tx, d_ty);
 
     } // end iteration loop
 

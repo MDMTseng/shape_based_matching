@@ -8,20 +8,32 @@
 
 #ifdef __AVX2__
 #include <immintrin.h>
-
-static inline float hsum256_ps(__m256 v) {
-    __m128 lo = _mm256_castps256_ps128(v);
-    __m128 hi = _mm256_extractf128_ps(v, 1);
-    lo = _mm_add_ps(lo, hi);
-    __m128 shuf = _mm_movehdup_ps(lo);
-    lo = _mm_add_ps(lo, shuf);
-    shuf = _mm_movehl_ps(shuf, lo);
-    lo = _mm_add_ss(lo, shuf);
-    return _mm_cvtss_f32(lo);
-}
 #endif
 
 namespace icp_refine {
+
+// ---------------------------------------------------------------------------
+// Named constants (extracted from formerly hard-coded magic numbers)
+// ---------------------------------------------------------------------------
+static constexpr float kSolverEpsilon       = 1e-10f;   // singularity threshold in solve3x3/solve4x4
+static constexpr float kGradientEpsilon     = 1e-6f;    // gradient magnitude threshold
+static constexpr float kRegularization      = 0.01f;    // Tikhonov regularization for ATA diagonal
+static constexpr float kMaxAngleUpdateLo    = -0.1f;    // angle clamp lower bound (radians)
+static constexpr float kMaxAngleUpdateHi    =  0.1f;    // angle clamp upper bound (radians)
+static constexpr float kMaxTranslationUpdateLo = -5.0f; // translation clamp lower bound
+static constexpr float kMaxTranslationUpdateHi =  5.0f; // translation clamp upper bound
+static constexpr float kMaxScaleUpdateLo    = -0.05f;   // scale update clamp lower bound
+static constexpr float kMaxScaleUpdateHi    =  0.05f;   // scale update clamp upper bound
+static constexpr float kMinScale            =  0.5f;    // absolute scale lower bound
+static constexpr float kMaxScale            =  2.0f;    // absolute scale upper bound
+static constexpr float kInitialRMSE         =  1e10f;   // initial prev_rmse sentinel
+static constexpr float kTemplateCannyLow    =  30.0f;   // template edge Canny low threshold
+static constexpr float kTemplateCannyHigh   =  60.0f;   // template edge Canny high threshold
+static constexpr float kSceneCannyLow       =  50.0f;   // scene edge Canny low threshold
+static constexpr float kSceneCannyHigh      = 100.0f;   // scene edge Canny high threshold
+static constexpr int   kMinROIDimension     =  10;      // minimum ROI width/height
+static constexpr float kCornerP2PWeight     =  1.0f;    // point-to-point weight for corners
+static constexpr float kEdgeP2PWeight       =  0.01f;   // point-to-point weight for edges
 
 // Simple 3x3 symmetric positive-definite solver (Cholesky-like)
 // Solves A*x = b where A is 3x3 SPD. Returns x.
@@ -32,20 +44,20 @@ static bool solve3x3(const float A[3][3], const float b[3], float x[3]) {
 
     // Row 0
     D[0] = A[0][0];
-    if (std::abs(D[0]) < 1e-10f) return false;
+    if (std::abs(D[0]) < kSolverEpsilon) return false;
     L[0][0] = 1;
 
     // Row 1
     L[1][0] = A[1][0] / D[0];
     D[1] = A[1][1] - L[1][0] * L[1][0] * D[0];
-    if (std::abs(D[1]) < 1e-10f) return false;
+    if (std::abs(D[1]) < kSolverEpsilon) return false;
     L[1][1] = 1;
 
     // Row 2
     L[2][0] = A[2][0] / D[0];
     L[2][1] = (A[2][1] - L[2][0] * L[1][0] * D[0]) / D[1];
     D[2] = A[2][2] - L[2][0] * L[2][0] * D[0] - L[2][1] * L[2][1] * D[1];
-    if (std::abs(D[2]) < 1e-10f) return false;
+    if (std::abs(D[2]) < kSolverEpsilon) return false;
     L[2][2] = 1;
 
     // Forward substitution: L*y = b
@@ -84,7 +96,7 @@ static bool solve4x4(const float A[4][4], const float b[4], float x[4]) {
             if (std::abs(M[row][col]) > std::abs(M[best][col])) best = row;
         if (best != col)
             for (int j = 0; j < 5; ++j) std::swap(M[col][j], M[best][j]);
-        if (std::abs(M[col][col]) < 1e-10f) return false;
+        if (std::abs(M[col][col]) < kSolverEpsilon) return false;
 
         // Eliminate
         for (int row = col + 1; row < 4; ++row) {
@@ -115,7 +127,7 @@ static cv::Rect clampROI(float cx, float cy, int half, int img_w, int img_h) {
     if (ry < 0) ry = 0;
     if (rx + rw > img_w) rw = img_w - rx;
     if (ry + rh > img_h) rh = img_h - ry;
-    if (rw <= 10 || rh <= 10) return cv::Rect();
+    if (rw <= kMinROIDimension || rh <= kMinROIDimension) return cv::Rect();
     return cv::Rect(rx, ry, rw, rh);
 }
 
@@ -158,7 +170,7 @@ void EdgeScene::build(const cv::Mat& sobel_dx, const cv::Mat& sobel_dy,
             if (er[c] > 0) {
                 float gx = (float)dxr[c], gy = (float)dyr[c];
                 float mag = std::sqrt(gx * gx + gy * gy);
-                if (mag > 1e-6f) {
+                if (mag > kGradientEpsilon) {
                     // Normal is perpendicular to edge tangent = gradient direction
                     nxr[c] = gx / mag;
                     nyr[c] = gy / mag;
@@ -254,7 +266,7 @@ Pose2D refine(const std::vector<cv::Point2f>& templ_edges,
 
     int N = (int)templ_edges.size();
     Pose2D pose = initial_pose;
-    float prev_fitness = 0, prev_rmse = 1e10f;
+    float prev_fitness = 0, prev_rmse = kInitialRMSE;
 
     for (int iter = 0; iter < config.max_iterations; ++iter) {
         // Transform model to current pose
@@ -356,10 +368,10 @@ Pose2D refine(const std::vector<cv::Point2f>& templ_edges,
             ATA4[1][0] = ATA4[0][1]; ATA4[2][0] = ATA4[0][2]; ATA4[2][1] = ATA4[1][2];
             ATA4[3][0] = ATA4[0][3]; ATA4[3][1] = ATA4[1][3]; ATA4[3][2] = ATA4[2][3];
             // Regularize
-            for (int i = 0; i < 4; ++i) ATA4[i][i] += 0.01f;
+            for (int i = 0; i < 4; ++i) ATA4[i][i] += kRegularization;
             if (!solve4x4(ATA4, ATb4, update)) break;
         } else {
-            symmetrize3x3(ATA, 0.01f);
+            symmetrize3x3(ATA, kRegularization);
             if (!solve3x3(ATA, ATb, update)) break;
         }
 
@@ -369,9 +381,9 @@ Pose2D refine(const std::vector<cv::Point2f>& templ_edges,
         float d_ty = update[2];
 
         // Clamp update to avoid divergence
-        d_theta = std::max(-0.1f, std::min(0.1f, d_theta));  // ~5.7 degrees max
-        d_tx = std::max(-5.0f, std::min(5.0f, d_tx));
-        d_ty = std::max(-5.0f, std::min(5.0f, d_ty));
+        d_theta = std::max(kMaxAngleUpdateLo, std::min(kMaxAngleUpdateHi, d_theta));
+        d_tx = std::max(kMaxTranslationUpdateLo, std::min(kMaxTranslationUpdateHi, d_tx));
+        d_ty = std::max(kMaxTranslationUpdateLo, std::min(kMaxTranslationUpdateHi, d_ty));
 
         pose.angle += d_theta * 180.0f / (float)CV_PI;
         pose.x += d_tx;
@@ -379,9 +391,9 @@ Pose2D refine(const std::vector<cv::Point2f>& templ_edges,
 
         if (config.use_scale) {
             float d_scale = update[3];
-            d_scale = std::max(-0.05f, std::min(0.05f, d_scale));
+            d_scale = std::max(kMaxScaleUpdateLo, std::min(kMaxScaleUpdateHi, d_scale));
             pose.scale += d_scale;
-            pose.scale = std::max(0.5f, std::min(2.0f, pose.scale));
+            pose.scale = std::max(kMinScale, std::min(kMaxScale, pose.scale));
         }
     }
 
@@ -440,7 +452,7 @@ std::vector<EdgePoint> extractModelEdges(const cv::Mat& templ_gray) {
     cv::GaussianBlur(templ_gray, smooth, cv::Size(5, 5), 0);
     cv::Sobel(smooth, dx, CV_16S, 1, 0, 3);
     cv::Sobel(smooth, dy, CV_16S, 0, 1, 3);
-    cv::Canny(dx, dy, edges, 30, 60);
+    cv::Canny(dx, dy, edges, kTemplateCannyLow, kTemplateCannyHigh);
 
     std::vector<EdgePoint> pts;
     for (int r = 0; r < TW; ++r) {
@@ -452,7 +464,7 @@ std::vector<EdgePoint> extractModelEdges(const cv::Mat& templ_gray) {
                 ep.pos = cv::Point2f((float)(c - TW / 2), (float)(r - TW / 2));
                 float gx = (float)dxr[c], gy = (float)dyr[c];
                 float mag = std::sqrt(gx * gx + gy * gy);
-                if (mag > 1e-6f) {
+                if (mag > kGradientEpsilon) {
                     ep.normal = cv::Point2f(gx / mag, gy / mag);
                 } else {
                     ep.normal = cv::Point2f(0, 0);
@@ -494,7 +506,7 @@ Pose2D refineWithNormals(const std::vector<EdgePoint>& model_edges,
 
     float cos_thresh = std::cos(config.normal_angle_thresh * (float)CV_PI / 180.0f);
     int N = (int)model_edges.size();
-    float prev_fitness = 0, prev_rmse = 1e10f;
+    float prev_fitness = 0, prev_rmse = kInitialRMSE;
 
     // SoA layout for SIMD
     std::vector<float> soa_px(N), soa_py(N), soa_nx(N), soa_ny(N), soa_corn(N);
@@ -551,7 +563,7 @@ Pose2D refineWithNormals(const std::vector<EdgePoint>& model_edges,
             float rot_mnx = cs * mnx - sn * mny;
             float rot_mny = sn * mnx + cs * mny;
             float nmag = std::sqrt(rot_mnx*rot_mnx + rot_mny*rot_mny);
-            if (nmag > 1e-6f) { rot_mnx /= nmag; rot_mny /= nmag; }
+            if (nmag > kGradientEpsilon) { rot_mnx /= nmag; rot_mny /= nmag; }
 
             float ndot = std::abs(rot_mnx * snx_v + rot_mny * sny_v);
             if (ndot < cos_thresh) continue;
@@ -573,7 +585,7 @@ Pose2D refineWithNormals(const std::vector<EdgePoint>& model_edges,
 
             float w = p2p_w;
             if (use_corn) {
-                w = soa_corn[i] * 1.0f + (1.0f - soa_corn[i]) * 0.01f;
+                w = soa_corn[i] * kCornerP2PWeight + (1.0f - soa_corn[i]) * kEdgeP2PWeight;
             }
             if (w > 0) {
                 ATA[0][0] += w * (my*my + mx*mx);
@@ -599,13 +611,13 @@ Pose2D refineWithNormals(const std::vector<EdgePoint>& model_edges,
         prev_rmse = pose.rmse;
 
         // Solve
-        symmetrize3x3(ATA, 0.01f);
+        symmetrize3x3(ATA, kRegularization);
         float update[3] = {};
         if (!solve3x3(ATA, ATb, update)) break;
 
-        float d_theta = std::max(-0.1f, std::min(0.1f, update[0]));
-        float d_tx = std::max(-5.0f, std::min(5.0f, update[1]));
-        float d_ty = std::max(-5.0f, std::min(5.0f, update[2]));
+        float d_theta = std::max(kMaxAngleUpdateLo, std::min(kMaxAngleUpdateHi, update[0]));
+        float d_tx = std::max(kMaxTranslationUpdateLo, std::min(kMaxTranslationUpdateHi, update[1]));
+        float d_ty = std::max(kMaxTranslationUpdateLo, std::min(kMaxTranslationUpdateHi, update[2]));
         pose.angle += d_theta * 180.0f / (float)CV_PI;
         pose.x += d_tx;
         pose.y += d_ty;
@@ -628,7 +640,7 @@ EdgeScene buildTemplateScene(const cv::Mat& templ_gray, float max_dist) {
     cv::Sobel(t_smooth, t_dy, CV_16S, 0, 1, 3);
 
     EdgeScene scene;
-    scene.build(t_dx, t_dy, 30, 60, max_dist);
+    scene.build(t_dx, t_dy, kTemplateCannyLow, kTemplateCannyHigh, max_dist);
     return scene;
 }
 
@@ -653,7 +665,7 @@ static Pose2D refineInverseCore(
     int tstride = (int)templ_scene.closest_x.step1();
 
     Pose2D pose = initial_pose;
-    float prev_fitness = 0, prev_rmse = 1e10f;
+    float prev_fitness = 0, prev_rmse = kInitialRMSE;
 
     for (int iter = 0; iter < config.max_iterations; ++iter) {
         float rad = pose.angle * (float)CV_PI / 180.0f;
@@ -744,13 +756,13 @@ static Pose2D refineInverseCore(
         prev_fitness = pose.fitness;
         prev_rmse = pose.rmse;
 
-        symmetrize3x3(ATA, 0.01f);
+        symmetrize3x3(ATA, kRegularization);
         float update[3] = {};
         if (!solve3x3(ATA, ATb, update)) break;
 
-        float d_theta = std::max(-0.1f, std::min(0.1f, update[0]));
-        float d_tx = std::max(-5.0f, std::min(5.0f, update[1]));
-        float d_ty = std::max(-5.0f, std::min(5.0f, update[2]));
+        float d_theta = std::max(kMaxAngleUpdateLo, std::min(kMaxAngleUpdateHi, update[0]));
+        float d_tx = std::max(kMaxTranslationUpdateLo, std::min(kMaxTranslationUpdateHi, update[1]));
+        float d_ty = std::max(kMaxTranslationUpdateLo, std::min(kMaxTranslationUpdateHi, update[2]));
         pose.angle += d_theta * 180.0f / (float)CV_PI;
         pose.x += d_tx;
         pose.y += d_ty;
@@ -769,7 +781,7 @@ static int extractSceneEdgesSoA(
     std::vector<float>& out_nx, std::vector<float>& out_ny)
 {
     cv::Mat s_edges;
-    cv::Canny(s_dx, s_dy, s_edges, 50, 100);
+    cv::Canny(s_dx, s_dy, s_edges, kSceneCannyLow, kSceneCannyHigh);
 
     for (int r = 0; r < s_edges.rows; r++) {
         const uchar* er = s_edges.ptr<uchar>(r);
@@ -779,7 +791,7 @@ static int extractSceneEdgesSoA(
             if (er[c] == 0) continue;
             float gx = (float)dxr[c], gy = (float)dyr[c];
             float mag = std::sqrt(gx*gx + gy*gy);
-            if (mag < 1e-6f) continue;
+            if (mag < kGradientEpsilon) continue;
             out_x.push_back((float)c + offset_x);
             out_y.push_back((float)r + offset_y);
             out_nx.push_back(gx / mag);

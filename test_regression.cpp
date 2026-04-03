@@ -1441,19 +1441,23 @@ static void print_help(const char* prog) {
     printf("  10 Multi-resolution speed (360p, 1080p, 20MP)\n");
     printf("  all  Run all sections (default)\n");
     printf("\nExamples:\n");
-    printf("  %s           # print this help\n", prog);
-    printf("  %s all       # run all 98 checks\n", prog);
-    printf("  %s 2 3       # run ICP + ROI refinement only\n", prog);
-    printf("  %s 6 10      # speed benchmarks only\n", prog);
-    printf("  %s 9         # noise/blur stability only\n", prog);
-    printf("\nThresholds loaded from test_thresholds.csv (editable without recompile).\n");
+    printf("  %s                        # print this help\n", prog);
+    printf("  %s all                    # run all 98 checks\n", prog);
+    printf("  %s 2 3                    # ICP + ROI refinement only\n", prog);
+    printf("  %s 6 10                   # speed benchmarks only\n", prog);
+    printf("  %s 9                      # noise/blur stability only\n", prog);
+    printf("  %s all -c my_thresh.csv   # use custom thresholds\n", prog);
+    printf("\nOptions:\n");
+    printf("  -c <file>  Load thresholds from custom CSV (default: test_thresholds.csv)\n");
+    printf("\nThresholds loaded from CSV (editable without recompile).\n");
     printf("Results logged to output/regression_log.txt.\n");
 }
 
 int main(int argc, char** argv) {
-    // Parse which sections to run
+    // Parse arguments
     std::set<int> sections;
     bool run_all = false;
+    std::string csv_path = "test_thresholds.csv";
 
     if (argc < 2) {
         print_help(argv[0]);
@@ -1462,15 +1466,16 @@ int main(int argc, char** argv) {
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
-        if (arg == "all") { run_all = true; break; }
+        if (arg == "all") { run_all = true; continue; }
         if (arg == "-h" || arg == "--help") { print_help(argv[0]); return 0; }
+        if (arg == "-c" && i + 1 < argc) { csv_path = argv[++i]; continue; }
         try { sections.insert(std::stoi(arg)); } catch (...) {
             printf("Unknown argument: %s\n", argv[i]);
             print_help(argv[0]);
             return 1;
         }
     }
-    if (run_all) {
+    if (run_all || sections.empty()) {
         for (int i = 1; i <= 10; i++) sections.insert(i);
     }
 
@@ -1483,7 +1488,11 @@ int main(int argc, char** argv) {
     g_log = fopen("output/regression_log.txt", "w");
     if (!g_log) g_log = stderr;
 
-    load_thresholds("test_thresholds.csv");
+    if (!load_thresholds(csv_path.c_str())) {
+        printf("Warning: could not load thresholds from '%s'\n", csv_path.c_str());
+    } else {
+        printf("Thresholds: %s (%d entries)\n", csv_path.c_str(), (int)g_thresholds.size());
+    }
 
     printf("===== SHAPE MATCHING REGRESSION TEST =====\n");
     printf("Sections: ");

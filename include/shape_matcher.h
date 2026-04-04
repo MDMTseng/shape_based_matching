@@ -197,6 +197,12 @@ struct MatchConfig {
     // ICP config (used when refine == ICP)
     int icp_iterations = 30;
     float icp_max_dist = 10.0f;
+
+    /// Gaussian blur kernel size before gradient computation.
+    /// Larger = more noise-robust but blurs fine edges.
+    /// Default 7 handles noise up to ~30 sigma.
+    /// Use 11-15 for heavy noise (sigma 40+).
+    int blur_kernel_size = 7;
 };
 
 // ============================================================

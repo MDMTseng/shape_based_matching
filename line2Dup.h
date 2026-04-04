@@ -79,6 +79,7 @@ public:
     float weak_threshold;
     size_t num_features;
     float strong_threshold;
+    int blur_kernel_size;  ///< Gaussian blur kernel size before Sobel (default 7, increase for noise)
     static bool selectScatteredFeatures(const std::vector<Candidate> &candidates,
                                                                             std::vector<Feature> &features,
                                                                             size_t num_features, float distance);
@@ -96,12 +97,15 @@ public:
     float weak_threshold;
     size_t num_features;
     float strong_threshold;
+    int blur_kernel_size = 7;  ///< Gaussian blur before Sobel (7=default, increase for noise e.g. 11, 15)
     void read(const cv::FileNode &fn);
     void write(cv::FileStorage &fs) const;
 
     cv::Ptr<ColorGradientPyramid> process(const cv::Mat src, const cv::Mat &mask = cv::Mat()) const
     {
-        return cv::makePtr<ColorGradientPyramid>(src, mask, weak_threshold, num_features, strong_threshold);
+        auto p = cv::makePtr<ColorGradientPyramid>(src, mask, weak_threshold, num_features, strong_threshold);
+        p->blur_kernel_size = blur_kernel_size;
+        return p;
     }
 };
 
@@ -198,6 +202,7 @@ public:
                             float angle_step = 2);
 
     const cv::Ptr<ColorGradient> &getModalities() const { return modality; }
+    cv::Ptr<ColorGradient> &getModalities() { return modality; }
 
     int getT(int pyramid_level) const { return T_at_level[pyramid_level]; }
 

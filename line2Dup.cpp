@@ -326,7 +326,8 @@ void hysteresisGradient(Mat &magnitude, Mat &quantized_angle,
 }
 
 static void quantizedOrientations(const Mat &src, Mat &magnitude,
-                                  Mat &angle, Mat& angle_ori, float threshold)
+                                  Mat &angle, Mat& angle_ori, float threshold,
+                                  int blur_kernel_size = 7)
 {
     using PClock = std::chrono::high_resolution_clock;
     auto pnow = []() { return PClock::now(); };
@@ -335,9 +336,9 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
     };
 
     Mat smoothed;
-    static const int KERNEL_SIZE = 7;
+    int ks = blur_kernel_size | 1;  // ensure odd
     auto pt0 = pnow();
-    GaussianBlur(src, smoothed, Size(KERNEL_SIZE, KERNEL_SIZE), 0, 0, BORDER_REPLICATE);
+    GaussianBlur(src, smoothed, Size(ks, ks), 0, 0, BORDER_REPLICATE);
     if (g_profile.enabled) g_profile.blur_ms += pms(pt0);
 
     if(src.channels() == 1){
@@ -692,14 +693,15 @@ ColorGradientPyramid::ColorGradientPyramid(const Mat &_src, const Mat &_mask,
       pyramid_level(0),
       weak_threshold(_weak_threshold),
       num_features(_num_features),
-      strong_threshold(_strong_threshold)
+      strong_threshold(_strong_threshold),
+      blur_kernel_size(7)
 {
     update();
 }
 
 void ColorGradientPyramid::update()
 {
-    quantizedOrientations(src, magnitude, angle, angle_ori, weak_threshold);
+    quantizedOrientations(src, magnitude, angle, angle_ori, weak_threshold, blur_kernel_size);
 }
 
 void ColorGradientPyramid::pyrDown()

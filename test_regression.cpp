@@ -1412,16 +1412,16 @@ static void test_resolution_speed(const sbm::FeatureSet& feat200, const Mat& tem
             mcfg.angle = {0, 360, 2};
             { CoutSuppressor sup; matcher.addModel("L", feat200, mcfg); }
 
-            // Warm up
-            { CoutSuppressor sup; matcher.match(scene); }
+            // First run for accuracy evaluation (deterministic — single-threaded for coarse)
+            std::vector<sbm::MatchResult> last_results;
+            { CoutSuppressor sup; last_results = matcher.match(scene); }
 
-            // 10 runs, sort, take middle 33% (runs 4-6), average
+            // 10 runs for timing only
             const int N_RUNS = 10;
             std::vector<double> run_times(N_RUNS);
-            std::vector<sbm::MatchResult> last_results;
             for (int r = 0; r < N_RUNS; r++) {
                 auto t0 = std::chrono::high_resolution_clock::now();
-                { CoutSuppressor sup; last_results = matcher.match(scene); }
+                { CoutSuppressor sup; matcher.match(scene); }
                 run_times[r] = std::chrono::duration<double, std::milli>(
                     std::chrono::high_resolution_clock::now() - t0).count();
             }

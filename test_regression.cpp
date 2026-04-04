@@ -1477,7 +1477,7 @@ static void test_resolution_speed(const sbm::FeatureSet& feat200, const Mat& tem
 
             float mean_ang = n_matched > 0 ? total_ang_err / n_matched : -1;
             float mean_pos = n_matched > 0 ? total_pos_err / n_matched : -1;
-            LOG("  %s %s: %d raw detections, %d/%d GT-matched (radius=%.0f)\n",
+            LOG("  %s %s: %d detections (post-NMS), %d/%d GT-matched (radius=%.0f)\n",
                 rc.name, mode_names[mi], (int)last_results.size(), n_matched, n_obj, gt_match_radius);
 
             // Record metrics

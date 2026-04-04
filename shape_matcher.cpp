@@ -945,6 +945,7 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
     results.resize(n_matches);
     std::vector<bool> valid(n_matches, false);
 
+
     #pragma omp parallel for schedule(dynamic) if(n_matches >= 4)
     for (int mi_idx = 0; mi_idx < n_matches; ++mi_idx) {
         auto& m = nms_matches[mi_idx];

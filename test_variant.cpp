@@ -2,6 +2,7 @@
 // Same shape registered under different conditions for better detection
 
 #include "shape_matcher.h"
+#include "test_utils.h"
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -28,12 +29,7 @@ static void draw_L(Mat& img, int cx, int cy, double angle, int color, int thickn
         }
 }
 
-struct CoutSup {
-    std::streambuf* ob;
-    std::ostringstream sink;
-    CoutSup() : ob(std::cout.rdbuf()) { std::cout.rdbuf(sink.rdbuf()); }
-    ~CoutSup() { std::cout.rdbuf(ob); }
-};
+// OutputGuard from test_utils.h replaces the old CoutSup
 
 int main() {
     system("if not exist output mkdir output");
@@ -114,7 +110,7 @@ int main() {
         sbm::ModelConfig mcfg;
         mcfg.angle = {0, 360, 2};
 
-        CoutSup s;
+        OutputGuard guard;
         matcher.addModel("L", feat_normal, mcfg);
         printf(""); // force cout flush before timing
         auto t0 = std::chrono::high_resolution_clock::now();
@@ -140,7 +136,7 @@ int main() {
         sbm::ModelConfig mcfg;
         mcfg.angle = {0, 360, 2};
 
-        CoutSup s;
+        OutputGuard guard;
         // Register all 3 variants under the SAME model name
         matcher.addModel("L", feat_normal, mcfg);
         matcher.addModel("L", feat_dim, mcfg);

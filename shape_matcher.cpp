@@ -2,6 +2,7 @@
 /// @brief High-level shape-based matching API implementation.
 
 #include "shape_matcher.h"
+#include "sbm_log.h"
 #include "line2Dup.h"
 #include "icp_refine.h"
 #include "roi_refine.h"
@@ -150,7 +151,7 @@ FeatureSet FeatureSet::load(const std::string& path) {
         }
     }
     if (!f.good()) {
-        fprintf(stderr, "Warning: FeatureSet::load('%s') read error\n", path.c_str());
+        sbm::sbm_log(sbm::LogLevel::Error, "io", "FeatureSet::load('%s') read error", path.c_str());
         return FeatureSet{};
     }
     return fs;

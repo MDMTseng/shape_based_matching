@@ -2,6 +2,7 @@
 /// @brief ROI-based pose refinement implementation.
 
 #include "roi_refine.h"
+#include "sbm_log.h"
 #include <opencv2/imgproc.hpp>
 #include <algorithm>
 #include <cmath>
@@ -386,13 +387,13 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
 
     // Debug: print per-point matching accuracy
     if (config.verbose) {
-        fprintf(stderr, "[ROI] %d constraints from %d samples (angle=%.1f)\n",
+        sbm::sbm_log(sbm::LogLevel::Debug, "roi", "[ROI] %d constraints from %d samples (angle=%.1f)",
                 (int)constraints.size(), (int)sample_points.size(), angle_deg);
         for (size_t i = 0; i < constraints.size(); ++i) {
             auto& c = constraints[i];
             float dx = c.dst.x - c.src.x, dy = c.dst.y - c.src.y;
             float dist = std::sqrt(dx*dx + dy*dy);
-            fprintf(stderr, "  [%2d] src=(%.1f,%.1f) dst=(%.1f,%.1f) d=%.2f n=(%.2f,%.2f) w=%.1f\n",
+            sbm::sbm_log(sbm::LogLevel::Debug, "roi", "  [%2d] src=(%.1f,%.1f) dst=(%.1f,%.1f) d=%.2f n=(%.2f,%.2f) w=%.1f",
                     (int)i, c.src.x, c.src.y, c.dst.x, c.dst.y, dist,
                     c.normal.x, c.normal.y, c.weight);
         }
@@ -415,7 +416,7 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
             if (dists[i] <= thresh) filtered.push_back(constraints[i]);
         }
         if (config.verbose)
-            fprintf(stderr, "  outlier rejection: %d -> %d (thresh=%.1f)\n",
+            sbm::sbm_log(sbm::LogLevel::Debug, "roi", "  outlier rejection: %d -> %d (thresh=%.1f)",
                     (int)constraints.size(), (int)filtered.size(), thresh);
         constraints = std::move(filtered);
     }
@@ -440,7 +441,7 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
 
     pose = cv::Vec3f(cx + d_tx, cy + d_ty, refined_angle);
     if (config.verbose)
-        fprintf(stderr, "  iter %d: angle=%.1f pos=(%.1f,%.1f) d_theta=%.3f d_t=(%.2f,%.2f)\n",
+        sbm::sbm_log(sbm::LogLevel::Debug, "roi", "  iter %d: angle=%.1f pos=(%.1f,%.1f) d_theta=%.3f d_t=(%.2f,%.2f)",
                 iteration, pose[2], pose[0], pose[1], d_theta*180/(float)CV_PI, d_tx, d_ty);
 
     } // end iteration loop

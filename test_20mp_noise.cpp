@@ -2,6 +2,7 @@
 // Compares Coarse, ICP, and ROI accuracy and speed
 
 #include "shape_matcher.h"
+#include "test_utils.h"
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <chrono>
@@ -32,11 +33,7 @@ static float angle_err(float a, float b) {
     return std::abs(e);
 }
 
-struct CoutSup {
-    std::streambuf* ob; std::ostringstream sink;
-    CoutSup() : ob(std::cout.rdbuf()) { std::cout.rdbuf(sink.rdbuf()); }
-    ~CoutSup() { std::cout.rdbuf(ob); }
-};
+// OutputGuard from test_utils.h replaces the old CoutSup
 
 int main() {
     // Template
@@ -139,10 +136,10 @@ int main() {
             sbm::ShapeMatcher matcher(cfg);
             sbm::ModelConfig mcfg;
             mcfg.angle = {0, 360, 2};
-            { CoutSup s; matcher.addModel("L", feat, mcfg); }
+            { OutputGuard guard; matcher.addModel("L", feat, mcfg); }
 
             // Warm up
-            { CoutSup s; matcher.match(scene); }
+            { OutputGuard guard; matcher.match(scene); }
 
             // 5 runs, sort, middle 33% mean
             const int NR = 5;
@@ -150,7 +147,7 @@ int main() {
             std::vector<sbm::MatchResult> last_results;
             for (int r = 0; r < NR; r++) {
                 auto t0 = std::chrono::high_resolution_clock::now();
-                { CoutSup s; last_results = matcher.match(scene); }
+                { OutputGuard guard; last_results = matcher.match(scene); }
                 times[r] = std::chrono::duration<double, std::milli>(
                     std::chrono::high_resolution_clock::now() - t0).count();
             }

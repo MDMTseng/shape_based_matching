@@ -3,6 +3,7 @@
 #include "shape_matcher.h"
 #include "roi_refine.h"
 #include "icp_refine.h"
+#include "test_utils.h"
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -579,10 +580,12 @@ int main() {
             sbm::ModelConfig mcfg;
             mcfg.angle = {0, 360, 2};
 
-            std::ostringstream ns; auto ob = std::cout.rdbuf(ns.rdbuf());
-            matcher.addModel("L", feat_fhd, mcfg);
-            auto results = matcher.match(scene_fhd);
-            std::cout.rdbuf(ob);
+            std::vector<sbm::MatchResult> results;
+            {
+                OutputGuard guard;
+                matcher.addModel("L", feat_fhd, mcfg);
+                results = matcher.match(scene_fhd);
+            }
 
             printf("Per-object ICP detail (clean, 10 objects):\n");
             for (auto& r : results) {
@@ -607,9 +610,7 @@ int main() {
             printf("\n");
         }
 
-        // Suppress meiqua cout during benchmark
-        std::streambuf* orig_cout = std::cout.rdbuf();
-        std::ostringstream null_stream;
+        // Suppress library output during benchmark
 
         for (auto& cond : conditions) {
             // Apply noise/blur to clean scene
@@ -641,22 +642,21 @@ int main() {
                 mcfg.angle = {0, 360, 2};
                 matcher.addModel("L", feat_fhd, mcfg);
 
-                // Warm up (mute cout)
-                std::cout.rdbuf(null_stream.rdbuf());
-                matcher.match(scene_test);
-                std::cout.rdbuf(orig_cout);
+                // Warm up
+                { OutputGuard guard; matcher.match(scene_test); }
 
-                // Average 3 runs (mute cout)
+                // Average 3 runs
                 double total_ms = 0;
                 std::vector<sbm::MatchResult> results;
-                std::cout.rdbuf(null_stream.rdbuf());
-                for (int i = 0; i < 3; i++) {
-                    auto t0 = std::chrono::high_resolution_clock::now();
-                    results = matcher.match(scene_test);
-                    total_ms += std::chrono::duration<double, std::milli>(
-                        std::chrono::high_resolution_clock::now() - t0).count();
+                {
+                    OutputGuard guard;
+                    for (int i = 0; i < 3; i++) {
+                        auto t0 = std::chrono::high_resolution_clock::now();
+                        results = matcher.match(scene_test);
+                        total_ms += std::chrono::duration<double, std::milli>(
+                            std::chrono::high_resolution_clock::now() - t0).count();
+                    }
                 }
-                std::cout.rdbuf(orig_cout);
                 double avg_ms = total_ms / 3.0;
 
                 // Compute mean angle/position error across found objects
@@ -768,24 +768,20 @@ int main() {
                 sbm::ModelConfig mcfg;
                 mcfg.angle = {0, 360, 2};
 
-                std::cout.rdbuf(null_stream.rdbuf());
-                matcher.addModel("L", feat_fhd, mcfg);
-                matcher.match(scene20); // warm up
-                std::cout.rdbuf(orig_cout);
-                null_stream.str(""); null_stream.clear();
+                { OutputGuard guard; matcher.addModel("L", feat_fhd, mcfg); matcher.match(scene20); } // warm up
 
                 // Average 5 runs
                 double total_ms = 0;
                 std::vector<sbm::MatchResult> results;
-                std::cout.rdbuf(null_stream.rdbuf());
-                for (int i = 0; i < 5; i++) {
-                    auto t0 = std::chrono::high_resolution_clock::now();
-                    results = matcher.match(scene20);
-                    total_ms += std::chrono::duration<double, std::milli>(
-                        std::chrono::high_resolution_clock::now() - t0).count();
+                {
+                    OutputGuard guard;
+                    for (int i = 0; i < 5; i++) {
+                        auto t0 = std::chrono::high_resolution_clock::now();
+                        results = matcher.match(scene20);
+                        total_ms += std::chrono::duration<double, std::milli>(
+                            std::chrono::high_resolution_clock::now() - t0).count();
+                    }
                 }
-                std::cout.rdbuf(orig_cout);
-                null_stream.str(""); null_stream.clear();
                 double avg_ms = total_ms / 5.0;
 
                 // Per-object errors
@@ -908,11 +904,8 @@ int main() {
                                 cfg3.refine = modes3[mi3];
                                 sbm::ShapeMatcher m3(cfg3);
                                 sbm::ModelConfig mc3; mc3.angle={0,360,2};
-                                std::cout.rdbuf(null_stream.rdbuf());
-                                m3.addModel("L", feat_fhd, mc3);
-                                auto res3 = m3.match(scene_a);
-                                std::cout.rdbuf(orig_cout);
-                                null_stream.str(""); null_stream.clear();
+                                std::vector<sbm::MatchResult> res3;
+                                { OutputGuard guard; m3.addModel("L", feat_fhd, mc3); res3 = m3.match(scene_a); }
 
                                 if (!res3.empty()) {
                                     float rr3=-res3[0].angle*(float)CV_PI/180.0f;
@@ -956,15 +949,16 @@ int main() {
                                 cfg4.refine = modes4[mi4];
                                 sbm::ShapeMatcher m4(cfg4);
                                 sbm::ModelConfig mc4; mc4.angle={0,360,2};
-                                std::cout.rdbuf(null_stream.rdbuf());
-                                m4.addModel("L", feat_fhd, mc4);
-                                m4.match(sa); // warm up
-                                auto t0 = std::chrono::high_resolution_clock::now();
-                                m4.match(sa);
-                                float ms = (float)std::chrono::duration<double,std::milli>(
-                                    std::chrono::high_resolution_clock::now()-t0).count();
-                                std::cout.rdbuf(orig_cout);
-                                null_stream.str(""); null_stream.clear();
+                                float ms;
+                                {
+                                    OutputGuard guard;
+                                    m4.addModel("L", feat_fhd, mc4);
+                                    m4.match(sa); // warm up
+                                    auto t0 = std::chrono::high_resolution_clock::now();
+                                    m4.match(sa);
+                                    ms = (float)std::chrono::duration<double,std::milli>(
+                                        std::chrono::high_resolution_clock::now()-t0).count();
+                                }
                                 if(mi4==0) c_ms=ms; if(mi4==1) i_ms=ms; if(mi4==2) r_ms=ms;
                             }
                         }
@@ -1093,21 +1087,15 @@ int main() {
                     cfg_i.refine = sbm::RefineMode::ICP;
                     sbm::ShapeMatcher mi2(cfg_i);
                     sbm::ModelConfig mc2; mc2.angle = {0, 360, 2};
-                    std::cout.rdbuf(null_stream.rdbuf());
-                    mi2.addModel("L", feat_fhd, mc2);
-                    auto ri = mi2.match(scene_sp);
-                    std::cout.rdbuf(orig_cout);
-                    null_stream.str(""); null_stream.clear();
+                    std::vector<sbm::MatchResult> ri;
+                    { OutputGuard guard; mi2.addModel("L", feat_fhd, mc2); ri = mi2.match(scene_sp); }
 
                     // Run ROI
                     sbm::MatchConfig cfg_r; cfg_r.min_score=35; cfg_r.nms_radius=80;
                     cfg_r.refine = sbm::RefineMode::ROI;
                     sbm::ShapeMatcher mr2(cfg_r);
-                    std::cout.rdbuf(null_stream.rdbuf());
-                    mr2.addModel("L", feat_fhd, mc2);
-                    auto rr = mr2.match(scene_sp);
-                    std::cout.rdbuf(orig_cout);
-                    null_stream.str(""); null_stream.clear();
+                    std::vector<sbm::MatchResult> rr;
+                    { OutputGuard guard; mr2.addModel("L", feat_fhd, mc2); rr = mr2.match(scene_sp); }
 
                     // Compute errors (convert user origin back to center)
                     float o_x2=0, o_y2=-25;
@@ -1342,11 +1330,8 @@ int main() {
                 sbm::ShapeMatcher matcher_dbg(cfg_dbg);
                 sbm::ModelConfig mcfg_dbg;
                 mcfg_dbg.angle = {0, 360, 2};
-                std::cout.rdbuf(null_stream.rdbuf());
-                matcher_dbg.addModel("L", feat_fhd, mcfg_dbg);
-                auto dbg_results = matcher_dbg.match(scene_dbg);
-                std::cout.rdbuf(orig_cout);
-                null_stream.str(""); null_stream.clear();
+                std::vector<sbm::MatchResult> dbg_results;
+                { OutputGuard guard; matcher_dbg.addModel("L", feat_fhd, mcfg_dbg); dbg_results = matcher_dbg.match(scene_dbg); }
 
                 // Helper lambda: draw match result arrow at template center
                 auto drawResult = [&](const sbm::MatchResult& r, Scalar color, float scale) {
@@ -1366,20 +1351,14 @@ int main() {
                 sbm::MatchConfig cfg_icp; cfg_icp.min_score=35; cfg_icp.nms_radius=80;
                 cfg_icp.refine = sbm::RefineMode::ICP;
                 sbm::ShapeMatcher matcher_icp(cfg_icp);
-                std::cout.rdbuf(null_stream.rdbuf());
-                matcher_icp.addModel("L", feat_fhd, mcfg_dbg);
-                auto icp_results = matcher_icp.match(scene_dbg);
-                std::cout.rdbuf(orig_cout);
-                null_stream.str(""); null_stream.clear();
+                std::vector<sbm::MatchResult> icp_results;
+                { OutputGuard guard; matcher_icp.addModel("L", feat_fhd, mcfg_dbg); icp_results = matcher_icp.match(scene_dbg); }
 
                 sbm::MatchConfig cfg_roi; cfg_roi.min_score=35; cfg_roi.nms_radius=80;
                 cfg_roi.refine = sbm::RefineMode::ROI;
                 sbm::ShapeMatcher matcher_roi(cfg_roi);
-                std::cout.rdbuf(null_stream.rdbuf());
-                matcher_roi.addModel("L", feat_fhd, mcfg_dbg);
-                auto roi_results = matcher_roi.match(scene_dbg);
-                std::cout.rdbuf(orig_cout);
-                null_stream.str(""); null_stream.clear();
+                std::vector<sbm::MatchResult> roi_results;
+                { OutputGuard guard; matcher_roi.addModel("L", feat_fhd, mcfg_dbg); roi_results = matcher_roi.match(scene_dbg); }
 
                 // Collect errors
                 float icp_ae = 0, roi_ae = 0, icp_pe = 0, roi_pe = 0;
@@ -1659,11 +1638,8 @@ int main() {
                     sbm::ModelConfig mcfg;
                     mcfg.angle = {0, 360, 2};
 
-                    std::cout.rdbuf(null_stream.rdbuf());
-                    matcher.addModel("L", feat_fhd, mcfg);
-                    auto results = matcher.match(scene_skew);
-                    std::cout.rdbuf(orig_cout);
-                    null_stream.str(""); null_stream.clear();
+                    std::vector<sbm::MatchResult> results;
+                    { OutputGuard guard; matcher.addModel("L", feat_fhd, mcfg); results = matcher.match(scene_skew); }
 
                     float total_ang_err = 0, total_pos_err = 0;
                     int matched = 0;
@@ -1827,10 +1803,8 @@ int main() {
             sbm::ShapeMatcher matcher_coarse(cfg_none);
             sbm::ModelConfig mcfg;
             mcfg.angle = {0, 360, 2};
-            std::cout.rdbuf(null_stream.rdbuf());
-            matcher_coarse.addModel("L", feat, mcfg);
-            auto coarse_results = matcher_coarse.match(scene1obj);
-            std::cout.rdbuf(orig_cout);
+            std::vector<sbm::MatchResult> coarse_results;
+            { OutputGuard guard; matcher_coarse.addModel("L", feat, mcfg); coarse_results = matcher_coarse.match(scene1obj); }
 
             // ICP dense (forward)
             {
@@ -1838,10 +1812,8 @@ int main() {
                 cfg.min_score = 40; cfg.nms_radius = 80;
                 cfg.refine = sbm::RefineMode::ICP;
                 sbm::ShapeMatcher matcher(cfg);
-                std::cout.rdbuf(null_stream.rdbuf());
-                matcher.addModel("L", feat, mcfg);
-                auto results = matcher.match(scene1obj);
-                std::cout.rdbuf(orig_cout);
+                std::vector<sbm::MatchResult> results;
+                { OutputGuard guard; matcher.addModel("L", feat, mcfg); results = matcher.match(scene1obj); }
                 if (!results.empty()) {
                     auto& r = results[0];
                     float ae = r.angle - gt_ang;
@@ -1883,10 +1855,8 @@ int main() {
                 cfg.min_score = 40; cfg.nms_radius = 80;
                 cfg.refine = sbm::RefineMode::ROI;
                 sbm::ShapeMatcher matcher(cfg);
-                std::cout.rdbuf(null_stream.rdbuf());
-                matcher.addModel("L", feat, mcfg);
-                auto results = matcher.match(scene1obj);
-                std::cout.rdbuf(orig_cout);
+                std::vector<sbm::MatchResult> results;
+                { OutputGuard guard; matcher.addModel("L", feat, mcfg); results = matcher.match(scene1obj); }
                 if (!results.empty()) {
                     auto& r = results[0];
                     float ae = r.angle - gt_ang;

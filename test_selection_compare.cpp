@@ -6,6 +6,7 @@
 #include "shape_matcher.h"
 #include "roi_refine.h"
 #include "icp_refine.h"
+#include "test_utils.h"
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -21,15 +22,7 @@
 
 using namespace cv;
 
-// ============================================================
-// Suppress cout from ShapeMatcher internals
-// ============================================================
-struct CoutSup {
-    std::streambuf* ob;
-    std::ostringstream sink;
-    CoutSup() : ob(std::cout.rdbuf()) { std::cout.rdbuf(sink.rdbuf()); }
-    ~CoutSup() { std::cout.rdbuf(ob); }
-};
+// OutputGuard from test_utils.h replaces the old CoutSup
 
 // ============================================================
 // Constants matching shape_matcher.cpp
@@ -584,12 +577,12 @@ static MethodResult runTest(
             mcfg.angle = {0, 360, 2};
 
             {
-                CoutSup s;
+                OutputGuard guard;
                 matcher.addModel("test", feat_icp, mcfg);
             }
 
             std::vector<sbm::MatchResult> results;
-            { CoutSup s; results = matcher.match(test_scene); }
+            { OutputGuard guard; results = matcher.match(test_scene); }
 
             if (!results.empty()) {
                 auto& best = results[0];
@@ -618,12 +611,12 @@ static MethodResult runTest(
             mcfg.angle = {0, 360, 2};
 
             {
-                CoutSup s;
+                OutputGuard guard;
                 matcher.addModel("test", feat_roi, mcfg);
             }
 
             std::vector<sbm::MatchResult> results;
-            { CoutSup s; results = matcher.match(test_scene); }
+            { OutputGuard guard; results = matcher.match(test_scene); }
 
             if (!results.empty()) {
                 auto& best = results[0];

@@ -1,4 +1,5 @@
 #include "line2Dup.h"
+#include "sbm_log.h"
 #include <iostream>
 
 #ifdef __AVX2__
@@ -21,7 +22,7 @@ public:
             (clock_::now() - beg_).count(); }
     void out(std::string message = ""){
         double t = elapsed();
-        std::cout << message << "\nelasped time:" << t << "s\n" << std::endl;
+        sbm::sbm_log(sbm::LogLevel::Info, "%s\nelasped time:%.7fs\n", message.c_str(), t);
         reset();
     }
 private:
@@ -44,17 +45,17 @@ struct StageProfile {
 
     void print() const {
         if (!enabled) return;
-        printf("  %-28s %7.1fms\n", "GaussianBlur 7x7", blur_ms);
-        printf("  %-28s %7.1fms\n", "Sobel dx+dy (int16)", sobel_ms);
-        printf("  %-28s %7.1fms\n", "Quantize (comparison)", quantize_ms);
-        printf("  %-28s %7.1fms\n", "3x3 voting", voting_ms);
-        printf("  %-28s %7.1fms\n", "Fused spread+LUT+linearize", fused_spread_lut_ms);
-        printf("  %-28s %7.1fms\n", "Coarse similarity", coarse_match_ms);
-        printf("  %-28s %7.1fms\n", "Pyramid refinement", refine_ms);
-        printf("  %-28s %7.1fms\n", "Sort + NMS", sort_nms_ms);
+        sbm::sbm_log(sbm::LogLevel::Debug, "profile", "  %-28s %7.1fms", "GaussianBlur 7x7", blur_ms);
+        sbm::sbm_log(sbm::LogLevel::Debug, "profile", "  %-28s %7.1fms", "Sobel dx+dy (int16)", sobel_ms);
+        sbm::sbm_log(sbm::LogLevel::Debug, "profile", "  %-28s %7.1fms", "Quantize (comparison)", quantize_ms);
+        sbm::sbm_log(sbm::LogLevel::Debug, "profile", "  %-28s %7.1fms", "3x3 voting", voting_ms);
+        sbm::sbm_log(sbm::LogLevel::Debug, "profile", "  %-28s %7.1fms", "Fused spread+LUT+linearize", fused_spread_lut_ms);
+        sbm::sbm_log(sbm::LogLevel::Debug, "profile", "  %-28s %7.1fms", "Coarse similarity", coarse_match_ms);
+        sbm::sbm_log(sbm::LogLevel::Debug, "profile", "  %-28s %7.1fms", "Pyramid refinement", refine_ms);
+        sbm::sbm_log(sbm::LogLevel::Debug, "profile", "  %-28s %7.1fms", "Sort + NMS", sort_nms_ms);
         double total = blur_ms + sobel_ms + quantize_ms + voting_ms +
                        fused_spread_lut_ms + coarse_match_ms + refine_ms + sort_nms_ms;
-        printf("  %-28s %7.1fms\n", "TOTAL", total);
+        sbm::sbm_log(sbm::LogLevel::Debug, "profile", "  %-28s %7.1fms", "TOTAL", total);
     }
     void reset() {
         blur_ms = sobel_ms = quantize_ms = voting_ms = 0;
@@ -813,10 +814,10 @@ bool ColorGradientPyramid::extractTemplate(Template &templ) const
     // We require a certain number of features
     if (candidates.size() < num_features){
         if(candidates.size() <= 4) {
-            std::cout << "too few features, abort" << std::endl;
+            sbm::sbm_log(sbm::LogLevel::Warning, "feature", "too few features, abort");
             return false;
         }
-        std::cout << "have no enough features, exaustive mode" << std::endl;
+        sbm::sbm_log(sbm::LogLevel::Warning, "feature", "have no enough features, exhaustive mode");
     }
 
     // NOTE: Stable sort to agree with old code, which used std::list::sort()

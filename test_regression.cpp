@@ -5,6 +5,7 @@
 #include "shape_matcher.h"
 #include "roi_refine.h"
 #include "icp_refine.h"
+#include "test_utils.h"
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -17,13 +18,6 @@
 #include <numeric>
 #include <tuple>
 #include <set>
-#ifdef _WIN32
-#include <io.h>
-#include <fcntl.h>
-#else
-#include <unistd.h>
-#include <fcntl.h>
-#endif
 
 using namespace cv;
 
@@ -303,46 +297,7 @@ static Mat add_noise(const Mat& img, double sigma, int seed = 42) {
 }
 
 // Suppress cout and stderr during a scope
-struct CoutSuppressor {
-    std::streambuf* orig_cout;
-    std::ostringstream sink;
-    FILE* orig_stderr_copy;
-    int orig_stderr_fd;
-    int devnull_fd;
-
-    CoutSuppressor() : orig_cout(std::cout.rdbuf()), orig_stderr_copy(nullptr),
-                        orig_stderr_fd(-1), devnull_fd(-1) {
-        std::cout.rdbuf(sink.rdbuf());
-        // Also suppress stderr (ROI debug uses fprintf(stderr,...))
-        fflush(stderr);
-#ifdef _WIN32
-        orig_stderr_fd = _dup(_fileno(stderr));
-        devnull_fd = -1;
-        FILE* nul = nullptr;
-        freopen_s(&nul, "NUL", "w", stderr);
-#else
-        orig_stderr_fd = dup(fileno(stderr));
-        devnull_fd = open("/dev/null", O_WRONLY);
-        if (devnull_fd >= 0) dup2(devnull_fd, fileno(stderr));
-#endif
-    }
-    ~CoutSuppressor() {
-        std::cout.rdbuf(orig_cout);
-        fflush(stderr);
-#ifdef _WIN32
-        if (orig_stderr_fd >= 0) {
-            _dup2(orig_stderr_fd, _fileno(stderr));
-            _close(orig_stderr_fd);
-        }
-#else
-        if (orig_stderr_fd >= 0) {
-            dup2(orig_stderr_fd, fileno(stderr));
-            close(orig_stderr_fd);
-        }
-        if (devnull_fd >= 0) close(devnull_fd);
-#endif
-    }
-};
+// OutputGuard from test_utils.h replaces the old CoutSuppressor
 
 // ============================================================
 // Section 1: Coarse Matching
@@ -377,7 +332,7 @@ static void test_coarse_matching(const sbm::FeatureSet& feat200, const Mat& temp
             mcfg.angle = {0, 360, 2};
 
             {
-                CoutSuppressor s;
+                OutputGuard guard;
                 matcher.addModel("L", feat200, mcfg);
                 auto results = matcher.match(scene);
                 if (!results.empty()) {
@@ -434,7 +389,7 @@ static void test_coarse_matching(const sbm::FeatureSet& feat200, const Mat& temp
 
         int matched = 0;
         {
-            CoutSuppressor s;
+            OutputGuard guard;
             matcher.addModel("L", feat200, mcfg);
             auto results = matcher.match(scene_fhd);
 
@@ -475,7 +430,7 @@ static void test_coarse_matching(const sbm::FeatureSet& feat200, const Mat& temp
 
         double ms;
         {
-            CoutSuppressor s;
+            OutputGuard guard;
             matcher.addModel("L", feat200, mcfg);
             matcher.match(scene_fhd);  // warmup
 
@@ -528,7 +483,7 @@ static void test_icp_refinement(const sbm::FeatureSet& feat200, const Mat& templ
             mcfg.angle = {0, 360, 2};
 
             {
-                CoutSuppressor s;
+                OutputGuard guard;
                 matcher.addModel("L", feat200, mcfg);
                 auto results = matcher.match(scene);
 
@@ -598,7 +553,7 @@ static void test_icp_refinement(const sbm::FeatureSet& feat200, const Mat& templ
             mcfg.angle = {0, 360, 2};
 
             {
-                CoutSuppressor s;
+                OutputGuard guard;
                 matcher.addModel("L", feat200, mcfg);
                 auto results = matcher.match(scene);
                 if (!results.empty()) {
@@ -628,7 +583,7 @@ static void test_icp_refinement(const sbm::FeatureSet& feat200, const Mat& templ
 
         double ms;
         {
-            CoutSuppressor s;
+            OutputGuard guard;
             matcher.addModel("L", feat200, mcfg);
             matcher.match(scene);  // warmup
 
@@ -683,7 +638,7 @@ static void test_roi_refinement(const sbm::FeatureSet& feat200, const Mat& templ
             cv::Vec3f init_pose(cx, cy, gt_ang);
             cv::Vec3f refined;
             {
-                CoutSuppressor s;
+                OutputGuard guard;
                 refined = roi_refine::refineROI(
                     feat200.templ_image, scene, sample_pts, init_pose, rcfg);
             }
@@ -747,7 +702,7 @@ static void test_roi_refinement(const sbm::FeatureSet& feat200, const Mat& templ
                 cv::Vec3f init_pose(cx, cy, gt_ang);
                 cv::Vec3f refined;
                 {
-                    CoutSuppressor s;
+                    OutputGuard guard;
                     refined = roi_refine::refineROI(
                         feat200.templ_image, scene, sample_pts, init_pose, rcfg);
                 }
@@ -782,7 +737,7 @@ static void test_roi_refinement(const sbm::FeatureSet& feat200, const Mat& templ
             cv::Vec3f init_pose(cx, cy, gt_ang);
             cv::Vec3f refined;
             {
-                CoutSuppressor s;
+                OutputGuard guard;
                 refined = roi_refine::refineROI(
                     feat200.templ_image, scene, sample_pts, init_pose, rcfg);
             }
@@ -813,7 +768,7 @@ static void test_roi_refinement(const sbm::FeatureSet& feat200, const Mat& templ
             cv::Vec3f init_pose(cx, cy, gt_ang);
             cv::Vec3f refined;
             {
-                CoutSuppressor s;
+                OutputGuard guard;
                 refined = roi_refine::refineROI(
                     feat200.templ_image, scene, sample_pts, init_pose, rcfg);
             }
@@ -841,7 +796,7 @@ static void test_roi_refinement(const sbm::FeatureSet& feat200, const Mat& templ
         cv::Vec3f init_pose(cx, cy, 45);
         double ms;
         {
-            CoutSuppressor s;
+            OutputGuard guard;
             roi_refine::refineROI(feat200.templ_image, scene, sample_pts, init_pose, rcfg); // warmup
 
             auto t0 = std::chrono::high_resolution_clock::now();
@@ -1019,7 +974,7 @@ static void test_speed_benchmarks(const sbm::FeatureSet& feat200, const Mat& tem
 
         double avg_ms;
         {
-            CoutSuppressor s;
+            OutputGuard guard;
             matcher.addModel("L", feat200, mcfg);
             matcher.match(scene_fhd);  // warmup
 
@@ -1083,7 +1038,7 @@ static void test_edge_cases(const sbm::FeatureSet& feat200, const Mat& templ200)
 
             float found = 0.0f;
             {
-                CoutSuppressor s;
+                OutputGuard guard;
                 matcher.addModel("L", feat200, mcfg);
                 auto results = matcher.match(scene);
                 if (!results.empty()) {
@@ -1108,7 +1063,7 @@ static void test_edge_cases(const sbm::FeatureSet& feat200, const Mat& templ200)
 
             float found = 0.0f;
             {
-                CoutSuppressor s;
+                OutputGuard guard;
                 matcher.addModel("L", feat200, mcfg);
                 auto results = matcher.match(scene);
                 if (!results.empty()) {
@@ -1141,7 +1096,7 @@ static void test_edge_cases(const sbm::FeatureSet& feat200, const Mat& templ200)
 
         float found = 0.0f;
         {
-            CoutSuppressor s;
+            OutputGuard guard;
             // Use single pyramid level with small T for small template
             auto small_feat = sbm::extractFeatures(small_templ, cv::Mat(), 64, {2});
             LOG("  8b Small template features: %d\n", small_feat.numFeatures());
@@ -1196,11 +1151,11 @@ static void test_noise_blur_stability(const sbm::FeatureSet& feat200, const Mat&
         sbm::ModelConfig mcfg;
         mcfg.angle = {0, 360, 2};
         {
-            CoutSuppressor sup;
+            OutputGuard guard;
             matcher.addModel("L", feat200, mcfg);
         }
         std::vector<sbm::MatchResult> results;
-        { CoutSuppressor sup; results = matcher.match(scene); }
+        { OutputGuard guard; results = matcher.match(scene); }
 
         if (results.empty()) return std::make_tuple(false, 99.0f, 99.0f);
         auto& r = results[0];
@@ -1410,18 +1365,18 @@ static void test_resolution_speed(const sbm::FeatureSet& feat200, const Mat& tem
             sbm::ShapeMatcher matcher(cfg);
             sbm::ModelConfig mcfg;
             mcfg.angle = {0, 360, 2};
-            { CoutSuppressor sup; matcher.addModel("L", feat200, mcfg); }
+            { OutputGuard guard; matcher.addModel("L", feat200, mcfg); }
 
             // First run for accuracy evaluation (deterministic — single-threaded for coarse)
             std::vector<sbm::MatchResult> last_results;
-            { CoutSuppressor sup; last_results = matcher.match(scene); }
+            { OutputGuard guard; last_results = matcher.match(scene); }
 
             // 10 runs for timing only
             const int N_RUNS = 10;
             std::vector<double> run_times(N_RUNS);
             for (int r = 0; r < N_RUNS; r++) {
                 auto t0 = std::chrono::high_resolution_clock::now();
-                { CoutSuppressor sup; matcher.match(scene); }
+                { OutputGuard guard; matcher.match(scene); }
                 run_times[r] = std::chrono::duration<double, std::milli>(
                     std::chrono::high_resolution_clock::now() - t0).count();
             }
@@ -1547,7 +1502,7 @@ static void test_determinism(const sbm::FeatureSet& feat200, const Mat& templ200
         sbm::ModelConfig mcfg;
         mcfg.angle = {0, 360, 2};
         {
-            CoutSuppressor s;
+            OutputGuard guard;
             matcher.addModel("L", feat200, mcfg);
             all_results[run] = matcher.match(scene);
         }
@@ -1614,7 +1569,7 @@ static void test_serialization(const sbm::FeatureSet& feat200, const Mat& templ2
         sbm::ShapeMatcher matcher(cfg);
         sbm::ModelConfig mcfg;
         mcfg.angle = {0, 360, 2};
-        CoutSuppressor s;
+        OutputGuard guard;
         matcher.addModel("L", feat200, mcfg);
         auto results = matcher.match(scene);
         if (!results.empty()) { res_orig = results[0]; found_orig = true; }
@@ -1627,7 +1582,7 @@ static void test_serialization(const sbm::FeatureSet& feat200, const Mat& templ2
         sbm::ShapeMatcher matcher(cfg);
         sbm::ModelConfig mcfg;
         mcfg.angle = {0, 360, 2};
-        CoutSuppressor s;
+        OutputGuard guard;
         loaded.setOrigin(org_x, org_y);
         loaded.selectOptimizedPoints(15);
         matcher.addModel("L", loaded, mcfg);
@@ -1670,7 +1625,7 @@ static void test_false_positives(const sbm::FeatureSet& feat200, const Mat& temp
         mcfg.angle = {0, 360, 2};
         int count = 0;
         {
-            CoutSuppressor s;
+            OutputGuard guard;
             matcher.addModel("L", feat200, mcfg);
             auto results = matcher.match(scene);
             count = (int)results.size();
@@ -1691,7 +1646,7 @@ static void test_false_positives(const sbm::FeatureSet& feat200, const Mat& temp
         mcfg.angle = {0, 360, 2};
         int count = 0;
         {
-            CoutSuppressor s;
+            OutputGuard guard;
             matcher.addModel("L", feat200, mcfg);
             auto results = matcher.match(scene);
             count = (int)results.size();
@@ -1712,7 +1667,7 @@ static void test_false_positives(const sbm::FeatureSet& feat200, const Mat& temp
         mcfg.angle = {0, 360, 2};
         int count = 0;
         {
-            CoutSuppressor s;
+            OutputGuard guard;
             matcher.addModel("L", feat200, mcfg);
             auto results = matcher.match(scene);
             count = (int)results.size();
@@ -1741,7 +1696,7 @@ static void test_api_contract(const sbm::FeatureSet& feat200, const Mat& templ20
 
         sbm::FeatureSet feat;
         {
-            CoutSuppressor s;
+            OutputGuard guard;
             feat = sbm::extractFeatures(templ);
         }
         feat.setOrigin(custom_org_x, custom_org_y);
@@ -1763,7 +1718,7 @@ static void test_api_contract(const sbm::FeatureSet& feat200, const Mat& templ20
 
         float pe = 99.0f;
         {
-            CoutSuppressor s;
+            OutputGuard guard;
             matcher.addModel("L", feat, mcfg);
             auto results = matcher.match(scene);
             if (!results.empty()) {
@@ -1789,7 +1744,7 @@ static void test_api_contract(const sbm::FeatureSet& feat200, const Mat& templ20
 
         sbm::FeatureSet feat;
         {
-            CoutSuppressor s;
+            OutputGuard guard;
             feat = sbm::extractFeatures(templ);
         }
         feat.setOrigin(100, 75);
@@ -1808,7 +1763,7 @@ static void test_api_contract(const sbm::FeatureSet& feat200, const Mat& templ20
 
         float ae = 99.0f;
         {
-            CoutSuppressor s;
+            OutputGuard guard;
             matcher.addModel("L", feat, mcfg);
             auto results = matcher.match(scene);
             if (!results.empty()) {
@@ -1837,7 +1792,7 @@ static void test_crash_safety() {
     {
         float survived = 0.0f;
         try {
-            CoutSuppressor s;
+            OutputGuard guard;
             Mat empty_scene;
             sbm::MatchConfig cfg;
             sbm::ShapeMatcher matcher(cfg);
@@ -1855,7 +1810,7 @@ static void test_crash_safety() {
     {
         float survived = 0.0f;
         try {
-            CoutSuppressor s;
+            OutputGuard guard;
             Mat empty_img;
             auto feat = sbm::extractFeatures(empty_img);
             survived = 1.0f;
@@ -1870,7 +1825,7 @@ static void test_crash_safety() {
     {
         float survived = 0.0f;
         try {
-            CoutSuppressor s;
+            OutputGuard guard;
             auto feat = sbm::FeatureSet::load("nonexistent_file_xyz.feat");
             survived = 1.0f;
         } catch (...) {
@@ -1891,7 +1846,7 @@ static void test_crash_safety() {
                 fwrite(garbage, 1, sizeof(garbage), f);
                 fclose(f);
             }
-            CoutSuppressor s;
+            OutputGuard guard;
             auto feat = sbm::FeatureSet::load("output/test_garbage.feat");
             survived = 1.0f;
         } catch (...) {
@@ -1905,7 +1860,7 @@ static void test_crash_safety() {
     {
         float survived = 0.0f;
         try {
-            CoutSuppressor s;
+            OutputGuard guard;
             sbm::FeatureSet empty_feat;
             empty_feat.templ_width = 0;
             empty_feat.templ_height = 0;
@@ -1922,7 +1877,7 @@ static void test_crash_safety() {
     {
         float survived = 0.0f;
         try {
-            CoutSuppressor s;
+            OutputGuard guard;
             sbm::FeatureSet empty_feat;
             empty_feat.templ_width = 0;
             empty_feat.templ_height = 0;
@@ -1952,7 +1907,7 @@ static void test_multi_template(const sbm::FeatureSet& feat200, const Mat& templ
 
     sbm::FeatureSet feat_tri;
     {
-        CoutSuppressor s;
+        OutputGuard guard;
         feat_tri = sbm::extractFeatures(templ_tri);
     }
     feat_tri.setOrigin(100, 100);
@@ -1973,7 +1928,7 @@ static void test_multi_template(const sbm::FeatureSet& feat200, const Mat& templ
 
     float l_found = 0.0f, tri_found = 0.0f;
     {
-        CoutSuppressor s;
+        OutputGuard guard;
         matcher.addModel("L_shape", feat200, mcfg);
         matcher.addModel("Triangle", feat_tri, mcfg);
         auto results = matcher.match(scene);
@@ -2010,7 +1965,7 @@ static void test_score_consistency(const sbm::FeatureSet& feat200, const Mat& te
         mcfg.angle = {0, 360, 2};
         float score = 0;
         {
-            CoutSuppressor s;
+            OutputGuard guard;
             matcher.addModel("L", feat200, mcfg);
             auto results = matcher.match(scene);
             if (!results.empty()) score = results[0].score;
@@ -2067,7 +2022,7 @@ static void test_different_shapes(const Mat& templ200) {
                           sbm::RefineMode mode) -> std::pair<float, float> {
         sbm::FeatureSet feat;
         {
-            CoutSuppressor s;
+            OutputGuard guard;
             feat = sbm::extractFeatures(templ);
         }
         feat.setOrigin(templ.cols / 2.0f, templ.rows / 2.0f);
@@ -2090,7 +2045,7 @@ static void test_different_shapes(const Mat& templ200) {
 
         float found = 0.0f, ae = 99.0f;
         {
-            CoutSuppressor s;
+            OutputGuard guard;
             matcher.addModel(name, feat, mcfg);
             auto results = matcher.match(scene);
             if (!results.empty()) {

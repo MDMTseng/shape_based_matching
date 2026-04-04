@@ -943,7 +943,10 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
 
     int n_matches = (int)nms_matches.size();
     results.resize(n_matches);
-    std::vector<bool> valid(n_matches, false);
+        // NOTE: Do NOT use vector<bool> here — it bit-packs and causes data races
+    // with OpenMP parallel writes to adjacent indices sharing the same byte.
+    std::vector<int> valid(n_matches, 0);
+
 
 
     #pragma omp parallel for schedule(dynamic) if(n_matches >= 4)
@@ -1070,7 +1073,7 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         r.flipped = is_flip;
         r.score = m.similarity;
         results[mi_idx] = r;
-        valid[mi_idx] = true;
+        valid[mi_idx] = 1;
     }
 
     // Remove invalid entries

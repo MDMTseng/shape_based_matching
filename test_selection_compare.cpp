@@ -401,45 +401,74 @@ struct ShapeInfo {
 static std::vector<ShapeInfo> createShapes() {
     std::vector<ShapeInfo> shapes;
 
-    // 1. L-shape 200x200
+    // 1. Large L-shape 300x300 (more features, more room to differentiate)
     {
-        Mat t(200, 200, CV_8U, Scalar(0));
-        draw_L(t, 100, 100, 0, 200);
-        shapes.push_back({"L-shape", t, Point2f(100, 100)});
+        Mat t(300, 300, CV_8U, Scalar(0));
+        draw_L(t, 150, 150, 0, 200);
+        shapes.push_back({"L-300", t, Point2f(150, 150)});
     }
 
-    // 2. Rectangle 200x100
+    // 2. T-shape 300x300 (asymmetric, 3 corners, 2 edge directions)
     {
-        Mat t(200, 200, CV_8U, Scalar(0));
-        rectangle(t, Point(30, 50), Point(170, 150), Scalar(200), -1);
-        shapes.push_back({"Rectangle", t, Point2f(100, 100)});
+        Mat t(300, 300, CV_8U, Scalar(0));
+        // Vertical stem
+        rectangle(t, Point(130, 80), Point(170, 250), Scalar(200), -1);
+        // Horizontal top bar
+        rectangle(t, Point(50, 80), Point(250, 120), Scalar(200), -1);
+        shapes.push_back({"T-shape", t, Point2f(150, 150)});
     }
 
-    // 3. Thin pole 200x30
+    // 3. Wrench shape 400x200 (highly asymmetric — texture at head, plain shaft)
     {
-        Mat t(200, 200, CV_8U, Scalar(0));
-        rectangle(t, Point(10, 85), Point(190, 115), Scalar(200), -1);
-        shapes.push_back({"Thin pole", t, Point2f(100, 100)});
+        Mat t(200, 400, CV_8U, Scalar(0));
+        // Shaft
+        rectangle(t, Point(60, 85), Point(300, 115), Scalar(200), -1);
+        // Head (hexagonal opening approximated by circles)
+        circle(t, Point(350, 100), 50, Scalar(200), -1);
+        circle(t, Point(350, 100), 25, Scalar(0), -1);  // hole
+        // Handle end
+        circle(t, Point(40, 100), 20, Scalar(200), -1);
+        shapes.push_back({"Wrench", t, Point2f(200, 100)});
     }
 
-    // 4. Triangle
+    // 4. Arrow 300x300 (asymmetric, pointed, 1 strong corner + edges)
     {
-        Mat t(200, 200, CV_8U, Scalar(0));
-        Point pts[3] = {Point(100, 20), Point(20, 180), Point(180, 180)};
+        Mat t(300, 300, CV_8U, Scalar(0));
+        // Arrow body
+        Point body[4] = {Point(50,130), Point(200,130), Point(200,100), Point(50,100)};
+        fillConvexPoly(t, body, 4, Scalar(200));
+        // Arrow head
+        Point head[3] = {Point(200,80), Point(280,115), Point(200,150)};
+        fillConvexPoly(t, head, 3, Scalar(200));
+        shapes.push_back({"Arrow", t, Point2f(150, 115)});
+    }
+
+    // 5. Cross/Plus 300x300 (4-fold symmetry but distinct features at each arm end)
+    {
+        Mat t(300, 300, CV_8U, Scalar(0));
+        rectangle(t, Point(120, 40), Point(180, 260), Scalar(200), -1);  // vertical
+        rectangle(t, Point(40, 120), Point(260, 180), Scalar(200), -1);  // horizontal
+        shapes.push_back({"Cross", t, Point2f(150, 150)});
+    }
+
+    // 6. F-shape 300x300 (like L but with extra arm — fully asymmetric)
+    {
+        Mat t(300, 300, CV_8U, Scalar(0));
+        // Vertical bar
+        rectangle(t, Point(60, 40), Point(100, 260), Scalar(200), -1);
+        // Top horizontal bar
+        rectangle(t, Point(100, 40), Point(240, 80), Scalar(200), -1);
+        // Middle horizontal bar (shorter)
+        rectangle(t, Point(100, 130), Point(200, 165), Scalar(200), -1);
+        shapes.push_back({"F-shape", t, Point2f(150, 150)});
+    }
+
+    // 7. Narrow triangle 300x300 (10-170 degrees, nearly degenerate)
+    {
+        Mat t(300, 300, CV_8U, Scalar(0));
+        Point pts[3] = {Point(30, 250), Point(270, 250), Point(150, 50)};
         fillConvexPoly(t, pts, 3, Scalar(200));
-        shapes.push_back({"Triangle", t, Point2f(100, 100)});
-    }
-
-    // 5. Rounded rectangle 200x200 with radius 30
-    {
-        Mat t(200, 200, CV_8U, Scalar(0));
-        rectangle(t, Point(60, 30), Point(140, 170), Scalar(200), -1);
-        rectangle(t, Point(30, 60), Point(170, 140), Scalar(200), -1);
-        circle(t, Point(60, 60), 30, Scalar(200), -1);
-        circle(t, Point(140, 60), 30, Scalar(200), -1);
-        circle(t, Point(60, 140), 30, Scalar(200), -1);
-        circle(t, Point(140, 140), 30, Scalar(200), -1);
-        shapes.push_back({"Rounded rect", t, Point2f(100, 100)});
+        shapes.push_back({"NarrowTri", t, Point2f(150, 150)});
     }
 
     return shapes;
@@ -519,8 +548,10 @@ static MethodResult runTest(
         float gt_angle = ai * 10.0f;
 
         // Create scene with one object at center
-        Mat scene(500, 500, CV_8U, Scalar(30));
-        float gt_x = 250.0f, gt_y = 250.0f;
+        int scene_sz = std::max(shape.templ.cols, shape.templ.rows) * 3;
+        scene_sz = std::max(scene_sz, 500);
+        Mat scene(scene_sz, scene_sz, CV_8U, Scalar(30));
+        float gt_x = scene_sz / 2.0f, gt_y = scene_sz / 2.0f;
 
         // Place rotated template
         Mat M = getRotationMatrix2D(Point2f((float)shape.templ.cols/2, (float)shape.templ.rows/2),

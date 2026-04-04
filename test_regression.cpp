@@ -1404,7 +1404,7 @@ static void test_resolution_speed(const sbm::FeatureSet& feat200, const Mat& tem
             // Coarse has ~10px error + origin rotation offset → wider GT margin
             float gt_match_radius = (modes[mi] == sbm::RefineMode::None) ? 100.0f : 50.0f;
             sbm::MatchConfig cfg;
-            cfg.min_score = 30;
+            cfg.min_score = 50;
             cfg.nms_radius = nms_r;
             cfg.refine = modes[mi];
             sbm::ShapeMatcher matcher(cfg);

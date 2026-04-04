@@ -185,3 +185,137 @@ These produce rich output for debugging, not CI pass/fail. Each writes visualiza
 14. Statistical A/B testing (4b)
 
 **Total estimated effort: ~46h across all phases.**
+
+---
+
+## 6. Lab Team Workflow: Regression-Safe Algorithm Development
+
+This section defines the workflow to ensure algorithm changes never silently degrade quality.
+
+### 6a. Before-After Protocol
+
+Every algorithm change MUST follow this workflow:
+
+```
+1. git checkout -b feature/my-change
+2. Run baseline:     test_regression all > output/baseline.txt
+3. Make code changes
+4. Run comparison:   test_regression all > output/after.txt
+5. Diff:             diff output/baseline.txt output/after.txt
+6. If any FAIL or new WARN → investigate before merging
+7. If metrics improved → update thresholds (tighten, not loosen)
+8. If threshold must be loosened → add original value as comment
+9. Commit with metrics in commit message
+```
+
+### 6b. Golden Metrics Table
+
+These are the current golden metrics that MUST NOT regress. If a change causes any of these to worsen beyond the tolerance column, it must be investigated.
+
+| Metric | Current Value | Threshold | Tolerance | What breaks if it regresses |
+|--------|--------------|-----------|-----------|---------------------------|
+| ROI angle mean (72 angles) | 0.07° | < 0.2° | +0.05° | Template matching precision |
+| ROI position mean | 0.05px | < 0.1px | +0.02px | Sub-pixel localization |
+| ROI noise=30 pos | 0.06px | < 0.15px | +0.05px | Noise robustness |
+| ROI noise=40 pos | 2.6px | < 5.0px | +1.0px | Heavy noise handling |
+| ICP angle mean | 0.05° | < 0.15° | +0.03° | Edge-based alignment |
+| ICP no divergence (6 angles) | 0.87px | < 2.0px | +0.5px | Inverse ICP stability |
+| Coarse detection (6 angles) | 6/6 | == 6 | 0 | Basic detection works |
+| Feature selection time | 40ms | < 100ms | +20ms | Offline setup speed |
+| FHD 10-obj ROI speed | 24ms | < 32ms | +5ms | Real-time matching |
+| 20MP 20-obj speed | 178ms | < 230ms | +30ms | High-res performance |
+| Determinism | 0.000px | < 0.001px | 0 | Results are reproducible |
+| Serialization round-trip | 0.000° | < 0.01° | 0 | Save/load integrity |
+| False positive (empty scene) | 0 | == 0 | 0 | No phantom detections |
+
+### 6c. Common Algorithm Changes and What to Watch
+
+| Change Type | Tests to Run | Critical Metrics | Typical Risk |
+|-------------|-------------|-----------------|--------------|
+| Feature selection algorithm | Sections 3, 4, 18 | ROI angle/pos, sensitivity, corner count | Wrong features → accuracy loss |
+| ROI matching (matchTemplate) | Sections 3, 9 | ROI pos, noise robustness | Sub-pixel precision |
+| ICP refinement | Sections 2, 9 | ICP angle/pos, divergence angles | Edge sliding, divergence |
+| Coarse matching (LineMOD) | Sections 1, 9, 10 | Detection rate, coarse angle, speed | False negatives, speed |
+| NMS / post-processing | Sections 1, 10, 13 | Detection count, false positives | Lost/duplicate detections |
+| OpenMP parallelization | Section 11 | Determinism, speed | Race conditions (vector<bool>!) |
+| Sensitivity / optimization | Sections 4, 5 | Sensitivity values, selection quality | Feature balance |
+| Preprocessing (blur, etc.) | Sections 1, 9 | Noise robustness, clean accuracy | Over-smoothing edges |
+| Serialization format | Section 12 | Round-trip accuracy | Data corruption |
+
+### 6d. Quick Validation Commands
+
+```bash
+# Fast sanity check (< 30 sec) — run before every commit
+test_regression 1 2 3 4 11 12 13
+
+# Full regression (< 3 min) — run before merge
+test_regression all
+
+# Accuracy-focused (angle + position deep dive)
+test_regression 2 3 9
+
+# Speed-focused
+test_regression 6 10
+
+# Noise robustness only
+test_regression 9
+
+# After changing feature selection
+test_regression 3 4 5 18
+
+# After changing ICP
+test_regression 2 9
+
+# Compare with baseline
+test_regression all > output/after.txt
+diff output/baseline.txt output/after.txt
+```
+
+### 6e. Threshold Management Rules
+
+1. **Never loosen a threshold without documenting why**
+   ```csv
+   # NOTE: relaxed from 0.15 to 0.2 because D-optimal selection changed feature set
+   3a_roi_ang_mean,check,roi_ang_mean,<,0.2,ROI angle mean (original: 0.15)
+   ```
+
+2. **Tighten thresholds when algorithm improves**
+   - If ROI mean_pos drops from 0.05px to 0.03px → tighten threshold from 0.1 to 0.07
+
+3. **Track threshold drift history**
+   - Each threshold entry shows `(original: X.X)` in the description
+   - If a threshold has been relaxed 3+ times, the algorithm area needs investigation
+
+4. **Speed thresholds use ~1.3x actual**
+   - Too tight → flaky (OS scheduling variance)
+   - Too loose → won't catch 2x slowdowns
+   - `warn` type for speed (don't fail CI, just alert)
+
+### 6f. Known Limitations to Watch
+
+| Limitation | Current Behavior | If You See This |
+|------------|-----------------|-----------------|
+| Coarse fails at noise ≥ 40 | 2/20 objects diverge | Use `blur_kernel_size=11` |
+| ICP position ~0.65px | EDT integer resolution | Can't improve without sub-pixel EDT |
+| ROI angle depends on feature selection | 0.07° with current selection | New selection may change this |
+| OpenMP non-determinism | Fixed by vector<int> instead of vector<bool> | If results vary between runs → check for new vector<bool> |
+| L-shape at 67°/277° under noise=40 | Coarse picks wrong template | LineMOD 8-bin quantization limit |
+| Symmetric templates (rectangle, circle) | ~90° angle ambiguity | Not a bug, inherent to the shape |
+
+### 6g. Emergency: What To Do When Tests Fail
+
+```
+1. DON'T immediately loosen the threshold
+2. Check which specific metric failed
+3. Run the detailed test for that area (e.g., section 3 for ROI)
+4. Compare with baseline output (output/baseline.txt)
+5. If the metric genuinely can't be met anymore:
+   a. Understand WHY (document in commit message)
+   b. Check if other metrics improved to compensate
+   c. Loosen threshold with (original: X.X) comment
+   d. Get team lead approval for any threshold loosening
+6. If it's a real regression:
+   a. git stash or git diff to isolate the change
+   b. Bisect to find which specific line caused it
+   c. Fix before merging
+```

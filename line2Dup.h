@@ -43,7 +43,8 @@ class ColorGradientPyramid
 public:
     ColorGradientPyramid(const cv::Mat &src, const cv::Mat &mask,
                                              float weak_threshold, size_t num_features,
-                                             float strong_threshold);
+                                             float strong_threshold,
+                                             bool match_only = false);
 
     void quantize(cv::Mat &dst) const;
 
@@ -52,6 +53,7 @@ public:
     void pyrDown();
 
 public:
+    bool match_only;  ///< Skip magnitude/angle_ori computation (matching only needs angle)
     void update();
     /// Candidate feature with a score
     struct Candidate
@@ -101,9 +103,10 @@ public:
     void read(const cv::FileNode &fn);
     void write(cv::FileStorage &fs) const;
 
-    cv::Ptr<ColorGradientPyramid> process(const cv::Mat src, const cv::Mat &mask = cv::Mat()) const
+    cv::Ptr<ColorGradientPyramid> process(const cv::Mat src, const cv::Mat &mask = cv::Mat(),
+                                          bool match_only = false) const
     {
-        auto p = cv::makePtr<ColorGradientPyramid>(src, mask, weak_threshold, num_features, strong_threshold);
+        auto p = cv::makePtr<ColorGradientPyramid>(src, mask, weak_threshold, num_features, strong_threshold, match_only);
         p->blur_kernel_size = blur_kernel_size;
         return p;
     }

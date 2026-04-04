@@ -21,7 +21,7 @@ build/Release/test_regression.exe -h       # show help
 
 | File | Purpose | Runtime | Usage |
 |------|---------|---------|-------|
-| **test_regression.cpp** | 151 automated checks across 18 sections | ~2 min | `test_regression all` |
+| **test_regression.cpp** | 151 automated checks across 18 sections | ~9 sec | `test_regression all` |
 | **test_thresholds.csv** | CSV-driven pass/fail thresholds (editable without recompile) | — | loaded by test_regression |
 | **test_utils.h** | Shared OutputGuard (suppresses all library output) | — | included by all tests |
 
@@ -59,6 +59,21 @@ build/Release/test_regression.exe -h       # show help
 | **test_api.cpp** | High-level ShapeMatcher API usage with multi-model matching | ~10 sec |
 | **test_visual.cpp** | Visual output with orientation arrows, NMS visualization | ~10 sec |
 
+### Parameter Sweeps
+
+| File | Purpose | Output | Runtime |
+|------|---------|--------|---------|
+| **test_sweep_rotation.cpp** | 360-degree rotation sweep at 1-deg steps | `sweep_rotation.csv` | ~2 min |
+| **test_sweep_noise.cpp** | Noise sigma 0-50 sweep with 10 objects | `sweep_noise.csv` | ~3 min |
+| **test_sweep_scale.cpp** | Blur / template size / object count / resolution sweeps | 4 CSV files | ~5 min |
+
+### Diagnostics
+
+| File | Purpose | Output | Runtime |
+|------|---------|--------|---------|
+| **test_diagnostics.cpp** | Feature selection quality + coarse score analysis | `diag_features.csv`, `diag_coarse_scores.csv` | ~30 sec |
+| **test_convergence.cpp** | ICP/ROI convergence curves per iteration | `diag_convergence_*.csv` | ~20 sec |
+
 ### Accuracy Tests
 
 | File | Purpose | Runtime |
@@ -78,6 +93,12 @@ build/Release/test_regression.exe -h       # show help
 | **bench_avx2.cpp** | Speed benchmark: VGA/FHD/30MP | ~30 sec |
 | **bench_profile.cpp** | Per-stage timing under clean/noisy conditions | ~20 sec |
 | **bench_preprocess.cpp** | OpenCV preprocessing stage profiling | ~10 sec |
+
+### Scripts
+
+| File | Purpose |
+|------|---------|
+| **scripts/ab_compare.py** | A/B comparison between git refs with optional statistical significance |
 
 ## Output Files
 
@@ -99,19 +120,24 @@ Tests write detailed results to `output/` (gitignored):
 
 ## Thresholds (test_thresholds.csv)
 
+**DO NOT modify test_thresholds.csv without explicit team lead approval.**
+These thresholds are the quality contract. If a test fails, fix the algorithm — not the threshold.
+
 Performance boundaries are defined in CSV format — editable without recompiling:
 
 ```csv
 id,type,metric,op,threshold,description
-3a_roi_ang_mean,check,roi_ang_mean,<,0.2,ROI angle mean (deg)
-3a_roi_pos_mean,check,roi_pos_mean,<,0.1,ROI position mean (px)
-6_speed_roi,warn,fhd10_roi_ms,<,32.0,FHD 10-obj ROI speed (ms)
+3a_roi_ang_mean,check,roi_ang_mean,<,0.15,ROI angle mean (deg) — typical 0.134 (original: 0.2)
+3a_roi_pos_mean,check,roi_pos_mean,<,0.07,ROI position mean (px) — typical 0.060 (original: 0.1)
+6_speed_roi,warn,fhd10_roi_ms,<,27.0,FHD 10-obj ROI speed (ms) — typical 25ms
 ```
 
 - `type=check`: PASS/FAIL — test fails if threshold exceeded
 - `type=warn`: advisory — warns but doesn't fail
 - Comments start with `#`
-- Original values tracked in comments when thresholds are relaxed
+- Every threshold tracks `(original: X.X)` when tightened or relaxed
+- Accuracy thresholds have ~10-20% margin above typical values
+- Speed thresholds use `warn` type with ~5-15% headroom (OS scheduling noise)
 
 Custom thresholds: `test_regression all -c my_thresholds.csv`
 
@@ -119,30 +145,142 @@ Custom thresholds: `test_regression all -c my_thresholds.csv`
 
 ### Accuracy (200x200 L-shape, 72-angle sweep, clean)
 
-| Method | Angle mean | Angle worst | Position mean | Position worst |
-|--------|-----------|------------|--------------|---------------|
-| Coarse | 8° | 16° | 3px | 6px |
-| ICP (inverse) | 0.05° | 0.20° | 0.66px | 1.3px |
-| **ROI** | **0.07°** | **0.27°** | **0.05px** | **0.14px** |
+| Method | Angle mean | Angle worst | Position mean | Threshold |
+|--------|-----------|------------|--------------|-----------|
+| Coarse | 8° | 13° | 3px | <14.5° / <12.5px |
+| ICP (inverse) | 0.046° | 0.20° | 0.66px | <0.055° / <0.72px |
+| **ROI** | **0.134°** | **0.48°** | **0.060px** | **<0.15° / <0.07px** |
 
-### Noise Robustness (20MP, 20 objects)
+### Noise Robustness (single object, ROI)
 
-| Noise | ROI found | ROI angle | ROI position |
-|-------|-----------|----------|-------------|
-| 0 | 20/20 | 0.11° | 0.07px |
-| 30 | 20/20 | 0.13° | 0.06px |
-| 40* | 20/20 | 8.0° | 2.6px |
-| 40 (blur_kernel=11) | 20/20 | 0.21° | 0.31px |
+| Noise | Position | Angle | Threshold |
+|-------|----------|-------|-----------|
+| 0 | 0.060px | 0.134° | — |
+| 20 | 0.035px | — | <0.045px |
+| 30 | 0.042px | — | <0.055px |
+| 40 | 0.048px | 0.193° | <0.06px / <0.23° |
+| 40 (blur_kernel=11) | 0.110px | 0.108° | <0.14px / <0.14° |
 
-*noise=40 failures are from coarse matching, not ROI. Use `blur_kernel_size=11` to fix.
+### Speed (must not regress — `warn` type thresholds)
 
-### Speed (20MP, 20 objects)
+| Mode | FHD 10-obj | Threshold | 20MP 20-obj | Threshold |
+|------|-----------|-----------|-------------|-----------|
+| Coarse | 21ms | <25ms | 165ms | <180ms |
+| ICP | 22ms | <25ms | 167ms | <180ms |
+| ROI | 23ms | <27ms | 168ms | <185ms |
 
-| Mode | Time |
-|------|------|
-| Coarse only | 170ms |
-| + ICP refine | 180ms |
-| + ROI refine | 180ms |
+## Lab Team Workflow: Experimenting with the Algorithm
+
+### Before You Start
+
+```bash
+# 1. Create a branch
+git checkout -b experiment/my-change
+
+# 2. Save baseline (do this ONCE on clean code)
+build/Release/test_regression.exe all > output/baseline.txt
+```
+
+### Quick Sanity Check (~3 sec, run before every commit)
+
+```bash
+build/Release/test_regression.exe --fast
+```
+
+Runs sections 1-5, 11-13 only. Covers detection, accuracy, determinism, and false positives.
+
+### Full Regression (~9 sec, run before merge)
+
+```bash
+build/Release/test_regression.exe all
+```
+
+All 151 checks across 18 sections. Exit code 0 = pass, 1 = fail. Hard-fails if >300 seconds.
+
+### After Making a Change
+
+```bash
+# 1. Run full regression
+build/Release/test_regression.exe all > output/after.txt
+
+# 2. Compare with baseline
+diff output/baseline.txt output/after.txt
+
+# 3. Check margin report — look for metrics that got worse
+#    (sorted tightest-margin first, printed at end of run)
+```
+
+### What to Run Based on What You Changed
+
+| You changed... | Run these | Why |
+|----------------|-----------|-----|
+| Feature selection | `test_regression 3 4 5 18` | ROI accuracy depends on feature quality |
+| ROI matching / matchTemplate | `test_regression 3 9` | Sub-pixel precision, noise robustness |
+| ICP refinement | `test_regression 2 9` | Angle accuracy, divergence, noise |
+| Coarse matching (LineMOD) | `test_regression 1 9 10` | Detection rate, speed |
+| NMS / post-processing | `test_regression 1 10 13` | Detection count, false positives |
+| OpenMP parallelization | `test_regression 11` | Determinism (watch for `vector<bool>` races) |
+| Preprocessing (blur, etc.) | `test_regression 1 9` | Noise robustness vs clean accuracy |
+| Serialization format | `test_regression 12` | Round-trip integrity |
+
+### Deep Investigation Tools
+
+```bash
+# Rotation accuracy at every degree
+build/Release/test_sweep_rotation.exe       # -> output/sweep_rotation.csv
+
+# Noise degradation curve
+build/Release/test_sweep_noise.exe          # -> output/sweep_noise.csv
+
+# How blur / template size / resolution affect results
+build/Release/test_sweep_scale.exe          # -> output/sweep_blur.csv, sweep_template_size.csv, etc.
+
+# Feature selection quality (per-feature sensitivity, corner ratio)
+build/Release/test_diagnostics.exe          # -> output/diag_features.csv
+
+# ICP/ROI convergence per iteration (plateau? oscillation?)
+build/Release/test_convergence.exe          # -> output/diag_convergence_*.csv
+
+# A/B compare your branch vs main
+python tests/scripts/ab_compare.py main HEAD
+python tests/scripts/ab_compare.py main HEAD --repeat 5   # with statistical significance
+```
+
+### When a Test Fails
+
+```
+1. DO NOT loosen the threshold
+2. Read which metric failed and by how much
+3. Run the specific section for that area:
+   - ROI accuracy failed?    -> test_regression 3
+   - Speed regressed?        -> test_regression 6 10
+   - Noise robustness?       -> test_regression 9
+4. Compare with baseline:    diff output/baseline.txt output/after.txt
+5. If you truly need to loosen a threshold:
+   a. Document WHY in the commit message
+   b. Add (original: X.X) comment in the CSV
+   c. Get team lead approval BEFORE committing
+```
+
+### When Your Change Improves a Metric
+
+If ROI angle mean drops from 0.134 to 0.08, **tighten the threshold** to lock in the gain:
+
+```csv
+# Before: typical 0.134, threshold 0.15
+3a_roi_ang_mean,check,roi_ang_mean,<,0.15,ROI angle mean (deg) — typical 0.134 (original: 0.2)
+
+# After: typical 0.08, tighten threshold
+3a_roi_ang_mean,check,roi_ang_mean,<,0.10,ROI angle mean (deg) — typical 0.08 (original: 0.2)
+```
+
+This prevents future changes from silently losing the improvement.
+
+### Historical Tracking
+
+Every `test_regression all` run appends to `output/metrics_history.csv` with timestamp and git hash. The test automatically warns if:
+- Any metric margin drops below 10% (getting close to threshold)
+- Any metric has declined for 3 consecutive runs (trending toward failure)
 
 ## Adding New Tests
 

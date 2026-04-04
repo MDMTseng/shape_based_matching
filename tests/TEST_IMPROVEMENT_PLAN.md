@@ -210,20 +210,22 @@ Every algorithm change MUST follow this workflow:
 
 ### 6b. Golden Metrics Table
 
+> **Source of truth is `test_thresholds.csv`.** This table is a summary — always verify against the CSV.
+
 These are the current golden metrics that MUST NOT regress. If a change causes any of these to worsen beyond the tolerance column, it must be investigated.
 
 | Metric | Current Value | Threshold | Tolerance | What breaks if it regresses |
 |--------|--------------|-----------|-----------|---------------------------|
-| ROI angle mean (72 angles) | 0.07° | < 0.2° | +0.05° | Template matching precision |
-| ROI position mean | 0.05px | < 0.1px | +0.02px | Sub-pixel localization |
-| ROI noise=30 pos | 0.06px | < 0.15px | +0.05px | Noise robustness |
-| ROI noise=40 pos | 2.6px | < 5.0px | +1.0px | Heavy noise handling |
-| ICP angle mean | 0.05° | < 0.15° | +0.03° | Edge-based alignment |
-| ICP no divergence (6 angles) | 0.87px | < 2.0px | +0.5px | Inverse ICP stability |
+| ROI angle mean (72 angles) | 0.134° | < 0.15° | +0.01° | Template matching precision |
+| ROI position mean | 0.060px | < 0.07px | +0.005px | Sub-pixel localization |
+| ROI noise=30 pos | 0.042px | < 0.055px | +0.005px | Noise robustness |
+| ROI noise=40 pos | 0.048px | < 0.06px | +0.005px | Heavy noise handling |
+| ICP angle mean | 0.046° | < 0.055° | +0.005° | Edge-based alignment |
+| ICP no divergence (6 angles) | 0.87px | < 1.05px | +0.1px | Inverse ICP stability |
 | Coarse detection (6 angles) | 6/6 | == 6 | 0 | Basic detection works |
-| Feature selection time | 40ms | < 100ms | +20ms | Offline setup speed |
-| FHD 10-obj ROI speed | 24ms | < 32ms | +5ms | Real-time matching |
-| 20MP 20-obj speed | 178ms | < 230ms | +30ms | High-res performance |
+| FHD 10-obj coarse speed | 21ms | < 25ms | warn | Real-time matching |
+| FHD 10-obj ROI speed | 23ms | < 27ms | warn | Real-time matching |
+| 20MP 20-obj ROI speed | 168ms | < 185ms | warn | High-res performance |
 | Determinism | 0.000px | < 0.001px | 0 | Results are reproducible |
 | Serialization round-trip | 0.000° | < 0.01° | 0 | Save/load integrity |
 | False positive (empty scene) | 0 | == 0 | 0 | No phantom detections |

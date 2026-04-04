@@ -18,6 +18,7 @@
 #include <numeric>
 #include <tuple>
 #include <set>
+#include <ctime>
 
 using namespace cv;
 
@@ -85,18 +86,25 @@ static bool load_thresholds(const char* csv_path) {
     int line_num = 0;
     int errors = 0;
 
-    // Validate header
-    if (!std::getline(f, line)) {
-        printf("ERROR: CSV file '%s' is empty\n", csv_path);
-        return false;
+    // Skip leading comments, then validate header
+    bool found_header = false;
+    while (std::getline(f, line)) {
+        line_num++;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+        // First non-comment line must be the header
+        if (line.find("id,type,metric,op,threshold") != std::string::npos) {
+            found_header = true;
+            break;
+        } else {
+            printf("ERROR: CSV header mismatch at line %d\n", line_num);
+            printf("  Expected: id,type,metric,op,threshold,description\n");
+            printf("  Got:      %s\n", line.c_str());
+            return false;
+        }
     }
-    line_num++;
-    // Strip trailing \r if present (Windows line endings)
-    if (!line.empty() && line.back() == '\r') line.pop_back();
-    if (line.find("id,type,metric,op,threshold") == std::string::npos) {
-        printf("ERROR: CSV header mismatch at line %d\n", line_num);
-        printf("  Expected: id,type,metric,op,threshold,description\n");
-        printf("  Got:      %s\n", line.c_str());
+    if (!found_header) {
+        printf("ERROR: CSV file '%s' has no header\n", csv_path);
         return false;
     }
 
@@ -2227,6 +2235,139 @@ static void print_help(const char* prog) {
     printf("Results logged to output/regression_log.txt.\n");
 }
 
+// 1b: Get short git hash via popen
+static std::string get_git_hash() {
+    std::string hash = "unknown";
+#ifndef _WIN32
+    FILE* p = popen("git rev-parse --short HEAD 2>/dev/null", "r");
+#else
+    FILE* p = _popen("git rev-parse --short HEAD 2>NUL", "r");
+#endif
+    if (p) {
+        char buf[64] = {};
+        if (fgets(buf, sizeof(buf), p)) {
+            hash = buf;
+            // trim trailing newline
+            while (!hash.empty() && (hash.back() == '\n' || hash.back() == '\r'))
+                hash.pop_back();
+        }
+#ifndef _WIN32
+        pclose(p);
+#else
+        _pclose(p);
+#endif
+    }
+    return hash;
+}
+
+// 1b: Append one row per margin entry to output/metrics_history.csv
+static void append_metrics_history(const std::vector<MarginEntry>& margins) {
+    const char* path = "output/metrics_history.csv";
+    // Check if file exists to decide whether to write header
+    bool write_header = false;
+    {
+        FILE* f = fopen(path, "r");
+        if (!f) {
+            write_header = true;
+        } else {
+            fclose(f);
+        }
+    }
+
+    FILE* f = fopen(path, "a");
+    if (!f) {
+        printf("WARNING: could not open %s for appending\n", path);
+        return;
+    }
+
+    if (write_header) {
+        fprintf(f, "timestamp,git_hash,id,actual,threshold,margin_pct\n");
+    }
+
+    // Get current timestamp
+    time_t now = time(nullptr);
+    struct tm* t = localtime(&now);
+    char ts[32];
+    snprintf(ts, sizeof(ts), "%04d-%02d-%02d %02d:%02d:%02d",
+             t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
+             t->tm_hour, t->tm_min, t->tm_sec);
+
+    std::string git_hash = get_git_hash();
+
+    for (auto& m : margins) {
+        if (m.status == "SKIP") continue;
+        fprintf(f, "%s,%s,%s,%.6f,%.6f,%.2f\n",
+                ts, git_hash.c_str(), m.id.c_str(),
+                m.actual, m.threshold, m.margin_pct);
+    }
+    fclose(f);
+    printf("\nMetrics history appended to %s\n", path);
+}
+
+// 1c: Check trends from metrics_history.csv and print warnings
+static void check_trends(const std::vector<MarginEntry>& margins) {
+    const char* path = "output/metrics_history.csv";
+    FILE* f = fopen(path, "r");
+    if (!f) return;
+
+    // Read all rows into a map: id -> vector of margin_pct values (in order)
+    std::map<std::string, std::vector<float>> history;
+    char line[1024];
+    // Skip header
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return; }
+
+    while (fgets(line, sizeof(line), f)) {
+        // Parse: timestamp,git_hash,id,actual,threshold,margin_pct
+        // Fields may contain no commas (ids don't have commas)
+        char ts[64], hash[64], id[256];
+        float actual, threshold, margin;
+        if (sscanf(line, "%63[^,],%63[^,],%255[^,],%f,%f,%f",
+                   ts, hash, id, &actual, &threshold, &margin) == 6) {
+            history[std::string(id)].push_back(margin);
+        }
+    }
+    fclose(f);
+
+    // Check trends for each current metric
+    bool any_warning = false;
+    for (auto& m : margins) {
+        if (m.status == "SKIP") continue;
+        auto it = history.find(m.id);
+        if (it == history.end()) continue;
+
+        auto& vals = it->second;
+        // Keep only last 10
+        size_t start = vals.size() > 10 ? vals.size() - 10 : 0;
+
+        // Check 1: latest margin < 10%
+        float latest = vals.back();
+        if (latest < 10.0f) {
+            if (!any_warning) {
+                printf("\n===== TREND WARNINGS =====\n");
+                any_warning = true;
+            }
+            printf("  TREND WARNING: %s margin is %.1f%% (< 10%%), close to threshold\n",
+                   m.id.c_str(), latest);
+        }
+
+        // Check 2: margin decreased for 3 consecutive entries
+        if (vals.size() >= 3) {
+            size_t n = vals.size();
+            if (vals[n-3] > vals[n-2] && vals[n-2] > vals[n-1]) {
+                if (!any_warning) {
+                    printf("\n===== TREND WARNINGS =====\n");
+                    any_warning = true;
+                }
+                printf("  TREND WARNING: %s margin declining for 3 consecutive runs (%.1f%% -> %.1f%% -> %.1f%%)\n",
+                       m.id.c_str(), vals[n-3], vals[n-2], vals[n-1]);
+            }
+        }
+    }
+    if (!any_warning) {
+        printf("\nNo trend warnings.\n");
+    }
+}
+
 int main(int argc, char** argv) {
     // 5b: Record wall clock start time
     auto wall_start = std::chrono::steady_clock::now();
@@ -2303,11 +2444,32 @@ int main(int argc, char** argv) {
 
     // --- Run selected sections ---
     if (sections.count(1))  test_coarse_matching(feat200, templ200);
+    // Section 7 requires sections 2+3 for cross-validation ratios
+    if (sections.count(7)) { sections.insert(2); sections.insert(3); }
     if (sections.count(2))  test_icp_refinement(feat200, templ200);
     if (sections.count(3))  test_roi_refinement(feat200, templ200);
     if (sections.count(4))  test_feature_selection(feat200);
     if (sections.count(5))  test_sensitivity(feat200);
     if (sections.count(6))  test_speed_benchmarks(feat200, templ200);
+    if (sections.count(7)) {
+        // Cross-validation: compute ratios from sections 2+3 metrics
+        printf("\n===== Section 7: Cross-validation =====\n");
+        LOG("\n===== Section 7: Cross-validation =====\n");
+        auto it_roi_pos = g_metrics.find("roi_pos_mean");
+        auto it_icp_pos = g_metrics.find("icp_pos_mean");
+        auto it_roi_ang = g_metrics.find("roi_ang_mean");
+        auto it_icp_ang = g_metrics.find("icp_ang_mean");
+        if (it_roi_pos != g_metrics.end() && it_icp_pos != g_metrics.end() && it_icp_pos->second > 0) {
+            float ratio = it_roi_pos->second / it_icp_pos->second;
+            RECORD("roi_icp_pos_ratio", ratio);
+            printf("  ROI/ICP position ratio: %.4f (expect < 0.12)\n", ratio);
+        }
+        if (it_icp_ang != g_metrics.end() && it_roi_ang != g_metrics.end() && it_roi_ang->second > 0) {
+            float ratio = it_icp_ang->second / it_roi_ang->second;
+            RECORD("icp_roi_ang_ratio", ratio);
+            printf("  ICP/ROI angle ratio: %.4f (expect < 0.45)\n", ratio);
+        }
+    }
     if (sections.count(8))  test_edge_cases(feat200, templ200);
     if (sections.count(9))  test_noise_blur_stability(feat200, templ200);
     if (sections.count(10)) test_resolution_speed(feat200, templ200);
@@ -2320,8 +2482,8 @@ int main(int argc, char** argv) {
     if (sections.count(17)) test_score_consistency(feat200, templ200);
     if (sections.count(18)) test_different_shapes(templ200);
 
-    // Compute cross-validation metrics before evaluation
-    {
+    // Also compute cross-validation when running 'all' but not explicitly section 7
+    if (!sections.count(7)) {
         auto it_roi_pos = g_metrics.find("roi_pos_mean");
         auto it_icp_pos = g_metrics.find("icp_pos_mean");
         auto it_roi_ang = g_metrics.find("roi_ang_mean");
@@ -2333,6 +2495,11 @@ int main(int argc, char** argv) {
     }
 
     auto margins = evaluate_thresholds();
+
+    // 1b: Append metrics history
+    append_metrics_history(margins);
+    // 1c: Check trends
+    check_trends(margins);
 
     // 5b: Time budget enforcement
     auto wall_end = std::chrono::steady_clock::now();
@@ -2349,8 +2516,9 @@ int main(int argc, char** argv) {
     LOG("Elapsed: %.1f seconds\n", elapsed_sec);
 
     if (elapsed_sec > 300.0) {
-        printf("\nTIMEOUT WARNING: elapsed %.1f seconds exceeds 300 second budget\n", elapsed_sec);
-        LOG("TIMEOUT WARNING: elapsed %.1f seconds exceeds 300 second budget\n", elapsed_sec);
+        printf("\nTIMEOUT FAIL: elapsed %.1f seconds exceeds 300 second budget\n", elapsed_sec);
+        LOG("TIMEOUT FAIL: elapsed %.1f seconds exceeds 300 second budget\n", elapsed_sec);
+        g_fail++;
     }
 
     if (g_fail == 0)

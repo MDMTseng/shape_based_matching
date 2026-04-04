@@ -1,4 +1,5 @@
 build/
 .idea/
 .vscode/
-CMakeLists.txt.useroutput/
+CMakeLists.txt.user
+output/

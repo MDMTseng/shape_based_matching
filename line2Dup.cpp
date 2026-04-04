@@ -328,7 +328,8 @@ void hysteresisGradient(Mat &magnitude, Mat &quantized_angle,
 
 static void quantizedOrientations(const Mat &src, Mat &magnitude,
                                   Mat &angle, Mat& angle_ori, float threshold,
-                                  int blur_kernel_size = 7)
+                                  int blur_kernel_size = 7,
+                                  bool match_only = false)
 {
     using PClock = std::chrono::high_resolution_clock;
     auto pnow = []() { return PClock::now(); };
@@ -345,18 +346,25 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
     if(src.channels() == 1){
         Mat sobel_dx_16s, sobel_dy_16s;
         pt0 = pnow();
-        Sobel(smoothed, sobel_dx_16s, CV_16S, 1, 0, 3, 1.0, 0.0, BORDER_REPLICATE);
-        Sobel(smoothed, sobel_dy_16s, CV_16S, 0, 1, 3, 1.0, 0.0, BORDER_REPLICATE);
+        // Run dx and dy Sobel in parallel OpenMP sections
+        #pragma omp parallel sections
+        {
+            #pragma omp section
+            Sobel(smoothed, sobel_dx_16s, CV_16S, 1, 0, 3, 1.0, 0.0, BORDER_REPLICATE);
+            #pragma omp section
+            Sobel(smoothed, sobel_dy_16s, CV_16S, 0, 1, 3, 1.0, 0.0, BORDER_REPLICATE);
+        }
         if (g_profile.enabled) g_profile.sobel_ms += pms(pt0);
 
-        // Squared magnitude (float) for threshold compatibility
-        magnitude.create(src.size(), CV_32F);
-        magnitude.setTo(0);
+        if (!match_only) {
+            // Squared magnitude (float) for threshold compatibility — only needed for template extraction
+            magnitude.create(src.size(), CV_32F);
+            magnitude.setTo(0);
 
-        // angle_ori: compute per-feature atan2 during training, not per-pixel.
-        // Store dx/dy as float for the few features that need theta.
-        angle_ori.create(src.size(), CV_32F);
-        angle_ori.setTo(0);
+            // angle_ori: compute per-feature atan2 during training, not per-pixel.
+            angle_ori.create(src.size(), CV_32F);
+            angle_ori.setTo(0);
+        }
 
         // Direct 8-bin quantization from dx, dy (no atan2).
         // Undirected gradients: [0,180) mapped to 8 bins of 22.5 deg each.
@@ -373,10 +381,11 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
         float threshold_sq = threshold * threshold;
         int threshold_sq_i = (int)threshold_sq;
 
+        #pragma omp parallel for schedule(static)
         for (int r = 1; r < src.rows - 1; ++r) {
             const short *dx = sobel_dx_16s.ptr<short>(r);
             const short *dy = sobel_dy_16s.ptr<short>(r);
-            float *mag_r = magnitude.ptr<float>(r);
+            float *mag_r = match_only ? nullptr : magnitude.ptr<float>(r);
             uchar *qr = quantized_unfiltered.ptr<uchar>(r);
             uchar *mask_r = mag_mask.ptr<uchar>(r);
 
@@ -407,8 +416,8 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
                 __m256i mag_sq = _mm256_add_epi32(
                     _mm256_mullo_epi32(gx, gx), _mm256_mullo_epi32(gy, gy));
 
-                // Store as float
-                _mm256_storeu_ps(mag_r + c, _mm256_cvtepi32_ps(mag_sq));
+                // Store as float (only for template extraction, not matching)
+                if (mag_r) _mm256_storeu_ps(mag_r + c, _mm256_cvtepi32_ps(mag_sq));
 
                 // Threshold mask
                 __m256i above = _mm256_cmpgt_epi32(mag_sq, thresh_v);
@@ -470,7 +479,7 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
                 // Use int64 to avoid overflow: max Sobel 3x3 on uint8 is 1020,
                 // so 1020^2+1020^2=2M fits int32, but defensive for other kernels.
                 int mag_sq_i = (int)((int64_t)gx*gx + (int64_t)gy*gy);
-                mag_r[c] = (float)mag_sq_i;
+                if (mag_r) mag_r[c] = (float)mag_sq_i;
 
                 if (mag_sq_i <= threshold_sq_i) continue;
                 mask_r[c] = 0xFF;
@@ -519,6 +528,7 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
         const __m256i thresh_vote = _mm256_set1_epi8((char)(NEIGHBOR_THRESHOLD - 1));
         // cmpgt > (THRESHOLD-1) means >= THRESHOLD
 
+        #pragma omp parallel for schedule(static)
         for (int r = 1; r < src.rows - 1; ++r) {
             const uchar *q_prev = quantized_unfiltered.ptr<uchar>(r-1);
             const uchar *q_curr = quantized_unfiltered.ptr<uchar>(r);
@@ -584,6 +594,7 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
         }
 #else
         // Scalar-only voting fallback
+        #pragma omp parallel for schedule(static)
         for (int r = 1; r < src.rows - 1; ++r) {
             const uchar *q_prev = quantized_unfiltered.ptr<uchar>(r-1);
             const uchar *q_curr = quantized_unfiltered.ptr<uchar>(r);
@@ -688,21 +699,23 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
 
 ColorGradientPyramid::ColorGradientPyramid(const Mat &_src, const Mat &_mask,
                                            float _weak_threshold, size_t _num_features,
-                                           float _strong_threshold)
+                                           float _strong_threshold,
+                                           bool _match_only)
     : src(_src),
       mask(_mask),
       pyramid_level(0),
       weak_threshold(_weak_threshold),
       num_features(_num_features),
       strong_threshold(_strong_threshold),
-      blur_kernel_size(7)
+      blur_kernel_size(7),
+      match_only(_match_only)
 {
     update();
 }
 
 void ColorGradientPyramid::update()
 {
-    quantizedOrientations(src, magnitude, angle, angle_ori, weak_threshold, blur_kernel_size);
+    quantizedOrientations(src, magnitude, angle, angle_ori, weak_threshold, blur_kernel_size, match_only);
 }
 
 void ColorGradientPyramid::pyrDown()
@@ -1195,12 +1208,17 @@ static void similarity(const std::vector<Mat> &linear_memories, const Template &
     // Widen to int16 only between batches.
     const int BATCH = 63;
 
+    // Pre-allocate acc8 outside the batch loop — avoid repeated alloc/free per batch
+#ifdef __AVX2__
+    std::vector<uint8_t> acc8(template_positions);
+#endif
+
     for (int batch_start = 0; batch_start < num_valid; batch_start += BATCH) {
         int batch_end = std::min(batch_start + BATCH, num_valid);
 
 #ifdef __AVX2__
         // AVX2 path: accumulate batch in uint8 temp buffer, then widen
-        std::vector<uint8_t> acc8(template_positions, 0);
+        std::memset(acc8.data(), 0, template_positions);
 
         for (int fi = batch_start; fi < batch_end; ++fi) {
             const uchar *lm_ptr = lm_ptrs[fi];
@@ -1470,7 +1488,7 @@ std::vector<Match> Detector::match(Mat source, float threshold,
     // Initialize each ColorGradient with our sources
     std::vector<Ptr<ColorGradientPyramid>> quantizers;
     CV_Assert(mask.empty() || mask.size() == source.size());
-    quantizers.push_back(modality->process(source, mask));
+    quantizers.push_back(modality->process(source, mask, /*match_only=*/true));
 
     // pyramid level -> ColorGradient -> quantization
     LinearMemoryPyramid lm_pyramid(pyramid_levels,
@@ -2101,25 +2119,56 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
                     }
                 }
 
-                // Find best local adjustment
-                float best_score = 0;
+                // Find best local adjustment — find max ushort first, convert once
                 int best_r = -1, best_c = -1;
-                for (int r = 0; r < similarities2.rows; ++r)
                 {
-                    ushort *row = similarities2.ptr<ushort>(r);
-                    for (int c = 0; c < similarities2.cols; ++c)
-                    {
-                        int score_int = row[c];
-                        float score = (score_int * 100.f) / (4 * numFeatures);
-
-                        if (score > best_score)
-                        {
-                            best_score = score;
+#ifdef __AVX2__
+                    // AVX2: scan 16x16 ushort grid (each row = one 256-bit register)
+                    __m256i global_max = _mm256_setzero_si256();
+                    __m256i col_indices = _mm256_setr_epi16(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15);
+                    __m256i best_col_vec = _mm256_setzero_si256();
+                    int best_row_scalar = 0;
+                    // Track per-column max to find row later
+                    for (int r = 0; r < 16; ++r) {
+                        __m256i row_v = _mm256_loadu_si256((const __m256i*)similarities2.ptr<ushort>(r));
+                        __m256i gt = _mm256_cmpgt_epi16(row_v, global_max); // signed compare ok for ushort < 32768
+                        global_max = _mm256_max_epu16(global_max, row_v);
+                        best_col_vec = _mm256_blendv_epi8(best_col_vec, col_indices, gt);
+                        // Check if this row had the new global max
+                        // We need to reduce global_max to find the single winner
+                    }
+                    // Horizontal reduction to find max value and its position
+                    alignas(32) uint16_t max_arr[16], col_arr[16];
+                    _mm256_store_si256((__m256i*)max_arr, global_max);
+                    _mm256_store_si256((__m256i*)col_arr, best_col_vec);
+                    uint16_t best_val = 0;
+                    int best_lane = 0;
+                    for (int i = 0; i < 16; ++i) {
+                        if (max_arr[i] > best_val) { best_val = max_arr[i]; best_lane = i; }
+                    }
+                    // Now find which row produced the max in this lane
+                    best_c = best_lane;
+                    best_r = 0;
+                    for (int r = 0; r < 16; ++r) {
+                        if (similarities2.ptr<ushort>(r)[best_lane] == best_val) {
                             best_r = r;
-                            best_c = c;
+                            break;
                         }
                     }
+#else
+                    ushort best_val = 0;
+                    for (int r = 0; r < similarities2.rows; ++r) {
+                        ushort *row = similarities2.ptr<ushort>(r);
+                        for (int c = 0; c < similarities2.cols; ++c) {
+                            if (row[c] > best_val) {
+                                best_val = row[c]; best_r = r; best_c = c;
+                            }
+                        }
+                    }
+#endif
                 }
+                float best_score = (best_r >= 0) ?
+                    (similarities2.ptr<ushort>(best_r)[best_c] * 100.f) / (4 * numFeatures) : 0;
                 // Update current match
                 match2.similarity = best_score;
                 match2.x = (x / T - 8 + best_c) * T + offset;

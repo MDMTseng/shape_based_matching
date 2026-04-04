@@ -102,3 +102,12 @@ target_link_libraries(test_sweep_rotation ${OpenCV_LIBS})
 
 add_executable(test_sweep_noise line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_sweep_noise.cpp)
 target_link_libraries(test_sweep_noise ${OpenCV_LIBS})
+
+add_executable(test_sweep_scale line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_sweep_scale.cpp)
+target_link_libraries(test_sweep_scale ${OpenCV_LIBS})
+
+add_executable(test_diagnostics line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_diagnostics.cpp)
+target_link_libraries(test_diagnostics ${OpenCV_LIBS})
+
+add_executable(test_convergence line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_convergence.cpp)
+target_link_libraries(test_convergence ${OpenCV_LIBS})

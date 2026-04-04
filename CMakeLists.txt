@@ -40,57 +40,59 @@ add_executable(${PROJECT_NAME}_test line2Dup.cpp test.cpp)
 target_link_libraries(${PROJECT_NAME}_test ${OpenCV_LIBS})
 
 # AVX2 benchmark
-add_executable(bench_avx2 line2Dup.cpp bench_avx2.cpp)
+add_executable(bench_avx2 line2Dup.cpp tests/bench_avx2.cpp)
 target_link_libraries(bench_avx2 ${OpenCV_LIBS})
 
 # Robustness test
-add_executable(test_robustness line2Dup.cpp test_robustness.cpp)
+add_executable(test_robustness line2Dup.cpp tests/test_robustness.cpp)
 target_link_libraries(test_robustness ${OpenCV_LIBS})
 
 # Preprocessing stage profiler
-add_executable(bench_preprocess bench_preprocess.cpp)
+add_executable(bench_preprocess tests/bench_preprocess.cpp)
 target_link_libraries(bench_preprocess ${OpenCV_LIBS})
 
 # Per-stage profiler (clean vs noisy)
-add_executable(bench_profile line2Dup.cpp bench_profile.cpp)
+add_executable(bench_profile line2Dup.cpp tests/bench_profile.cpp)
 target_link_libraries(bench_profile ${OpenCV_LIBS})
 
 # Visual matching test with image output
-add_executable(test_visual line2Dup.cpp icp_refine.cpp test_visual.cpp)
+add_executable(test_visual line2Dup.cpp icp_refine.cpp tests/test_visual.cpp)
 target_link_libraries(test_visual ${OpenCV_LIBS})
 
 # ICP accuracy sweep
-add_executable(test_icp_accuracy line2Dup.cpp icp_refine.cpp test_icp_accuracy.cpp)
+add_executable(test_icp_accuracy line2Dup.cpp icp_refine.cpp tests/test_icp_accuracy.cpp)
 target_link_libraries(test_icp_accuracy ${OpenCV_LIBS})
 
 # Bias table
-add_executable(test_bias_table line2Dup.cpp test_bias_table.cpp)
+add_executable(test_bias_table line2Dup.cpp tests/test_bias_table.cpp)
 target_link_libraries(test_bias_table ${OpenCV_LIBS})
-add_executable(test_rotate_bias line2Dup.cpp test_rotate_bias.cpp)
+add_executable(test_rotate_bias line2Dup.cpp tests/test_rotate_bias.cpp)
 target_link_libraries(test_rotate_bias ${OpenCV_LIBS})
-add_executable(test_bias_final line2Dup.cpp test_bias_final.cpp)
+add_executable(test_bias_final line2Dup.cpp tests/test_bias_final.cpp)
 target_link_libraries(test_bias_final ${OpenCV_LIBS})
-add_executable(test_multires line2Dup.cpp icp_refine.cpp test_multires.cpp)
+add_executable(test_multires line2Dup.cpp icp_refine.cpp tests/test_multires.cpp)
 target_link_libraries(test_multires ${OpenCV_LIBS})
-add_executable(test_icp_bias line2Dup.cpp icp_refine.cpp test_icp_bias.cpp)
+add_executable(test_icp_bias line2Dup.cpp icp_refine.cpp tests/test_icp_bias.cpp)
 target_link_libraries(test_icp_bias ${OpenCV_LIBS})
 
 # New high-level API
+include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
-add_executable(test_api line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp test_api.cpp)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/tests)
+add_executable(test_api line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_api.cpp)
 target_link_libraries(test_api ${OpenCV_LIBS})
 
-add_executable(test_simple line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp test_simple.cpp)
+add_executable(test_simple line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_simple.cpp)
 target_link_libraries(test_simple ${OpenCV_LIBS})
 
-add_executable(test_regression line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp test_regression.cpp)
+add_executable(test_regression line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_regression.cpp)
 target_link_libraries(test_regression ${OpenCV_LIBS})
 
-add_executable(test_variant line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp test_variant.cpp)
+add_executable(test_variant line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_variant.cpp)
 target_link_libraries(test_variant ${OpenCV_LIBS})
 
-add_executable(test_20mp_noise line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp test_20mp_noise.cpp)
+add_executable(test_20mp_noise line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_20mp_noise.cpp)
 target_link_libraries(test_20mp_noise ${OpenCV_LIBS})
 
-add_executable(test_selection_compare line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp test_selection_compare.cpp)
+add_executable(test_selection_compare line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_selection_compare.cpp)
 target_link_libraries(test_selection_compare ${OpenCV_LIBS})

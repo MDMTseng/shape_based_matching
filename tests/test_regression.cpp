@@ -2151,7 +2151,7 @@ int main(int argc, char** argv) {
     // Parse arguments
     std::set<int> sections;
     bool run_all = false;
-    std::string csv_path = "test_thresholds.csv";
+    std::string csv_path = "tests/test_thresholds.csv";
 
     if (argc < 2) {
         print_help(argv[0]);

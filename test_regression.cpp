@@ -1401,6 +1401,8 @@ static void test_resolution_speed(const sbm::FeatureSet& feat200, const Mat& tem
         float o_off_y = org_y - feat200.templ_height / 2.0f;
 
         for (int mi = 0; mi < 3; mi++) {
+            // Coarse has ~10px error + origin rotation offset → wider GT margin
+            float gt_match_radius = (modes[mi] == sbm::RefineMode::None) ? 100.0f : 50.0f;
             sbm::MatchConfig cfg;
             cfg.min_score = 30;
             cfg.nms_radius = nms_r;
@@ -1450,7 +1452,7 @@ static void test_resolution_speed(const sbm::FeatureSet& feat200, const Mat& tem
                     float d = pos_err(rcx, rcy, gts[gi].cx, gts[gi].cy);
                     if (d < best_d) { best_d = d; best_ri = ri; }
                 }
-                if (best_ri >= 0 && best_d < 50) {
+                if (best_ri >= 0 && best_d < gt_match_radius) {
                     result_used[best_ri] = true;
                     auto& res = last_results[best_ri];
                     float rad = -res.angle * (float)CV_PI / 180.0f;
@@ -1475,6 +1477,8 @@ static void test_resolution_speed(const sbm::FeatureSet& feat200, const Mat& tem
 
             float mean_ang = n_matched > 0 ? total_ang_err / n_matched : -1;
             float mean_pos = n_matched > 0 ? total_pos_err / n_matched : -1;
+            LOG("  %s %s: %d raw detections, %d/%d GT-matched (radius=%.0f)\n",
+                rc.name, mode_names[mi], (int)last_results.size(), n_matched, n_obj, gt_match_radius);
 
             // Record metrics
             char key[64];

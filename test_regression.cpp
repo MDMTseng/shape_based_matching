@@ -1431,17 +1431,18 @@ static void test_resolution_speed(const sbm::FeatureSet& feat200, const Mat& tem
             for (int r = lo; r <= hi; r++) avg_ms += run_times[r];
             avg_ms /= (hi - lo + 1);
 
-            // Per-object GT matching: greedy nearest assignment
+            // Per-object GT matching: greedy nearest assignment (mark used results)
             int n_matched = 0;
             float total_ang_err = 0, total_pos_err = 0;
             float worst_ang_err = 0, worst_pos_err = 0;
-            std::vector<bool> gt_used(n_obj, false);
+            std::vector<bool> result_used(last_results.size(), false);
 
             for (int gi = 0; gi < n_obj; gi++) {
-                // Find closest result to this GT
+                // Find closest UNUSED result to this GT
                 float best_d = 1e9f;
                 int best_ri = -1;
                 for (int ri = 0; ri < (int)last_results.size(); ri++) {
+                    if (result_used[ri]) continue;
                     auto& res = last_results[ri];
                     float rad = -res.angle * (float)CV_PI / 180.0f;
                     float rcx = res.x - (std::cos(rad)*o_off_x - std::sin(rad)*o_off_y);
@@ -1450,6 +1451,7 @@ static void test_resolution_speed(const sbm::FeatureSet& feat200, const Mat& tem
                     if (d < best_d) { best_d = d; best_ri = ri; }
                 }
                 if (best_ri >= 0 && best_d < 50) {
+                    result_used[best_ri] = true;
                     auto& res = last_results[best_ri];
                     float rad = -res.angle * (float)CV_PI / 180.0f;
                     float rcx = res.x - (std::cos(rad)*o_off_x - std::sin(rad)*o_off_y);

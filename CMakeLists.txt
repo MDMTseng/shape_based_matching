@@ -96,3 +96,9 @@ target_link_libraries(test_20mp_noise ${OpenCV_LIBS})
 
 add_executable(test_selection_compare line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_selection_compare.cpp)
 target_link_libraries(test_selection_compare ${OpenCV_LIBS})
+
+add_executable(test_sweep_rotation line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_sweep_rotation.cpp)
+target_link_libraries(test_sweep_rotation ${OpenCV_LIBS})
+
+add_executable(test_sweep_noise line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_sweep_noise.cpp)
+target_link_libraries(test_sweep_noise ${OpenCV_LIBS})

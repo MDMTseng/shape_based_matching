@@ -175,16 +175,30 @@ static void RECORD(const char* metric, float value) {
     LOG("  METRIC: %s = %.4f\n", metric, value);
 }
 
+// Margin analysis entry for sorted reporting
+struct MarginEntry {
+    std::string id;
+    std::string metric;
+    float actual;
+    float threshold;
+    std::string op;
+    float margin_pct;
+    std::string status; // "PASS", "FAIL", "WARN", "OK", "SKIP"
+};
+
 // Evaluate all thresholds against measured values
-static void evaluate_thresholds() {
+static std::vector<MarginEntry> evaluate_thresholds() {
     printf("\n===== THRESHOLD EVALUATION =====\n");
     LOG("\n===== THRESHOLD EVALUATION =====\n");
+
+    std::vector<MarginEntry> margins;
 
     for (auto& t : g_thresholds) {
         auto it = g_metrics.find(t.metric);
         if (it == g_metrics.end()) {
             printf("  SKIP: %s — metric '%s' not measured\n", t.id.c_str(), t.metric.c_str());
             LOG("SKIP: %s — metric '%s' not measured\n", t.id.c_str(), t.metric.c_str());
+            margins.push_back({t.id, t.metric, 0, t.threshold, t.op, 0, "SKIP"});
             continue;
         }
         float val = it->second;
@@ -195,19 +209,79 @@ static void evaluate_thresholds() {
         else if (t.op == ">=") pass = val >= t.threshold;
         else if (t.op == "==") pass = std::abs(val - t.threshold) < 0.001f;
 
+        // Compute margin%: positive means passing with headroom, negative means failing
+        // For < / <= ops: margin = (threshold - actual) / threshold * 100
+        // For > / >= ops: margin = (actual - threshold) / threshold * 100
+        // For == ops: margin = (1 - |actual - threshold| / max(|threshold|, 0.001)) * 100
+        float margin_pct = 0;
+        if (t.op == "==" ) {
+            float denom = std::max(std::abs(t.threshold), 0.001f);
+            margin_pct = (1.0f - std::abs(val - t.threshold) / denom) * 100.0f;
+        } else if (t.op == "<" || t.op == "<=") {
+            float denom = std::max(std::abs(t.threshold), 0.001f);
+            margin_pct = (t.threshold - val) / denom * 100.0f;
+        } else { // > or >=
+            float denom = std::max(std::abs(t.threshold), 0.001f);
+            margin_pct = (val - t.threshold) / denom * 100.0f;
+        }
+
+        std::string status;
         char msg[512];
         snprintf(msg, sizeof(msg), "%s: %s = %.4f %s %.4f — %s",
                  t.id.c_str(), t.metric.c_str(), val, t.op.c_str(), t.threshold,
                  t.description.c_str());
 
         if (t.type == "warn") {
-            if (!pass) { g_warn++; printf("  WARN: %s\n", msg); LOG("WARN: %s\n", msg); }
-            else       { printf("  OK:   %s\n", msg); LOG("OK:   %s\n", msg); }
+            if (!pass) { g_warn++; printf("  WARN: %s\n", msg); LOG("WARN: %s\n", msg); status = "WARN"; }
+            else       { printf("  OK:   %s\n", msg); LOG("OK:   %s\n", msg); status = "OK"; }
         } else {
-            if (pass)  { g_pass++; printf("  PASS: %s\n", msg); LOG("PASS: %s\n", msg); }
-            else       { g_fail++; printf("  FAIL: %s\n", msg); LOG("FAIL: %s\n", msg); }
+            if (pass)  { g_pass++; printf("  PASS: %s\n", msg); LOG("PASS: %s\n", msg); status = "PASS"; }
+            else       { g_fail++; printf("  FAIL: %s\n", msg); LOG("FAIL: %s\n", msg); status = "FAIL"; }
         }
+
+        margins.push_back({t.id, t.metric, val, t.threshold, t.op, margin_pct, status});
     }
+
+    // Print margin summary table sorted by tightest margin (most at-risk first)
+    std::vector<MarginEntry> sorted_margins;
+    for (auto& m : margins) {
+        if (m.status != "SKIP") sorted_margins.push_back(m);
+    }
+    std::sort(sorted_margins.begin(), sorted_margins.end(),
+              [](const MarginEntry& a, const MarginEntry& b) { return a.margin_pct < b.margin_pct; });
+
+    printf("\n===== MARGIN ANALYSIS (tightest first) =====\n");
+    printf("  %-30s %-20s %10s %10s %4s %10s %6s\n",
+           "ID", "METRIC", "ACTUAL", "THRESHOLD", "OP", "MARGIN%", "STATUS");
+    printf("  %-30s %-20s %10s %10s %4s %10s %6s\n",
+           "------------------------------", "--------------------",
+           "----------", "----------", "----", "----------", "------");
+    LOG("\n===== MARGIN ANALYSIS (tightest first) =====\n");
+    for (auto& m : sorted_margins) {
+        printf("  %-30s %-20s %10.4f %10.4f %4s %9.1f%% %6s\n",
+               m.id.c_str(), m.metric.c_str(), m.actual, m.threshold,
+               m.op.c_str(), m.margin_pct, m.status.c_str());
+        LOG("MARGIN: %s %s actual=%.4f thresh=%.4f op=%s margin=%.1f%% %s\n",
+            m.id.c_str(), m.metric.c_str(), m.actual, m.threshold,
+            m.op.c_str(), m.margin_pct, m.status.c_str());
+    }
+
+    // Write metrics_report.csv
+    FILE* csv = fopen("output/metrics_report.csv", "w");
+    if (csv) {
+        fprintf(csv, "id,metric,actual,threshold,op,margin_pct,status\n");
+        for (auto& m : margins) {
+            fprintf(csv, "%s,%s,%.6f,%.6f,%s,%.2f,%s\n",
+                    m.id.c_str(), m.metric.c_str(), m.actual, m.threshold,
+                    m.op.c_str(), m.margin_pct, m.status.c_str());
+        }
+        fclose(csv);
+        printf("\nMetrics report written to output/metrics_report.csv\n");
+    } else {
+        printf("\nWARNING: could not write output/metrics_report.csv\n");
+    }
+
+    return margins;
 }
 
 // ============================================================
@@ -2113,7 +2187,7 @@ static void test_different_shapes(const Mat& templ200) {
 // Main
 // ============================================================
 static void print_help(const char* prog) {
-    printf("Usage: %s [sections...]\n\n", prog);
+    printf("Usage: %s [sections...] [options]\n\n", prog);
     printf("Sections:\n");
     printf("  1  Coarse matching (detection, accuracy, multi-object, speed)\n");
     printf("  2  ICP inverse refinement (angle/pos accuracy, divergence, noise)\n");
@@ -2133,24 +2207,36 @@ static void print_help(const char* prog) {
     printf("  16 Multi-template (L-shape + triangle)\n");
     printf("  17 Score consistency (clean vs noise vs blur)\n");
     printf("  18 Different template shapes (rect, pole, triangle)\n");
-    printf("  all  Run all sections (default)\n");
+    printf("\nOptions:\n");
+    printf("  all          Run all sections\n");
+    printf("  --fast       Quick pre-commit check (sections 1-5,11-13, <30s)\n");
+    printf("  --baseline   Save output to output/baseline.txt for before-after comparison\n");
+    printf("  --json       Write JSON results to output/regression_results.json\n");
+    printf("  -c <file>    Custom threshold CSV (default: test_thresholds.csv)\n");
+    printf("  -h, --help   Show this help\n");
     printf("\nExamples:\n");
     printf("  %s                        # print this help\n", prog);
     printf("  %s all                    # run all 98 checks\n", prog);
+    printf("  %s --fast                 # quick pre-commit check (<30s)\n", prog);
     printf("  %s 2 3                    # ICP + ROI refinement only\n", prog);
     printf("  %s 6 10                   # speed benchmarks only\n", prog);
     printf("  %s 9                      # noise/blur stability only\n", prog);
     printf("  %s all -c my_thresh.csv   # use custom thresholds\n", prog);
-    printf("\nOptions:\n");
-    printf("  -c <file>  Load thresholds from custom CSV (default: test_thresholds.csv)\n");
+    printf("  %s all --baseline         # save baseline for comparison\n", prog);
     printf("\nThresholds loaded from CSV (editable without recompile).\n");
     printf("Results logged to output/regression_log.txt.\n");
 }
 
 int main(int argc, char** argv) {
+    // 5b: Record wall clock start time
+    auto wall_start = std::chrono::steady_clock::now();
+
     // Parse arguments
     std::set<int> sections;
     bool run_all = false;
+    bool fast_mode = false;
+    bool json_output = false;
+    bool baseline_output = false;
     std::string csv_path = "tests/test_thresholds.csv";
 
     if (argc < 2) {
@@ -2163,13 +2249,21 @@ int main(int argc, char** argv) {
         if (arg == "all") { run_all = true; continue; }
         if (arg == "-h" || arg == "--help") { print_help(argv[0]); return 0; }
         if (arg == "-c" && i + 1 < argc) { csv_path = argv[++i]; continue; }
+        if (arg == "--json") { json_output = true; continue; }
+        if (arg == "--fast") { fast_mode = true; continue; }
+        if (arg == "--baseline") { baseline_output = true; continue; }
         try { sections.insert(std::stoi(arg)); } catch (...) {
             printf("Unknown argument: %s\n", argv[i]);
             print_help(argv[0]);
             return 1;
         }
     }
-    if (run_all || sections.empty()) {
+
+    // 5c: --fast mode runs only quick sections (1-5,11-13), targeting <30s
+    if (fast_mode) {
+        int fast_sections[] = {1, 2, 3, 4, 5, 11, 12, 13};
+        for (int s : fast_sections) sections.insert(s);
+    } else if (run_all || sections.empty()) {
         for (int i = 1; i <= 18; i++) sections.insert(i);
     }
 
@@ -2189,10 +2283,12 @@ int main(int argc, char** argv) {
     }
 
     printf("===== SHAPE MATCHING REGRESSION TEST =====\n");
+    if (fast_mode) printf("Mode: FAST (pre-commit check, target <30s)\n");
     printf("Sections: ");
     for (int s : sections) printf("%d ", s);
     printf("\n");
     LOG("===== SHAPE MATCHING REGRESSION TEST =====\n");
+    if (fast_mode) LOG("Mode: FAST\n");
 
     // --- Create 200x200 L-shape template ---
     Mat templ200(200, 200, CV_8U, Scalar(0));
@@ -2236,20 +2332,83 @@ int main(int argc, char** argv) {
             RECORD("icp_roi_ang_ratio", it_icp_ang->second / it_roi_ang->second);
     }
 
-    evaluate_thresholds();
+    auto margins = evaluate_thresholds();
+
+    // 5b: Time budget enforcement
+    auto wall_end = std::chrono::steady_clock::now();
+    double elapsed_sec = std::chrono::duration<double>(wall_end - wall_start).count();
 
     // --- Summary ---
     printf("\n===== SUMMARY =====\n");
     printf("PASS: %d\n", g_pass);
     printf("FAIL: %d\n", g_fail);
     printf("WARN: %d\n", g_warn);
+    printf("Elapsed: %.1f seconds\n", elapsed_sec);
     LOG("\n===== SUMMARY =====\n");
     LOG("PASS: %d\nFAIL: %d\nWARN: %d\n", g_pass, g_fail, g_warn);
+    LOG("Elapsed: %.1f seconds\n", elapsed_sec);
+
+    if (elapsed_sec > 300.0) {
+        printf("\nTIMEOUT WARNING: elapsed %.1f seconds exceeds 300 second budget\n", elapsed_sec);
+        LOG("TIMEOUT WARNING: elapsed %.1f seconds exceeds 300 second budget\n", elapsed_sec);
+    }
 
     if (g_fail == 0)
         printf("\nALL TESTS PASSED.\n");
     else
         printf("\n%d TEST(S) FAILED.\n", g_fail);
+
+    // 5a: JSON output
+    if (json_output) {
+        FILE* jf = fopen("output/regression_results.json", "w");
+        if (jf) {
+            fprintf(jf, "{\n");
+            fprintf(jf, "  \"pass\": %d,\n", g_pass);
+            fprintf(jf, "  \"fail\": %d,\n", g_fail);
+            fprintf(jf, "  \"warn\": %d,\n", g_warn);
+            fprintf(jf, "  \"elapsed_seconds\": %.1f,\n", elapsed_sec);
+            fprintf(jf, "  \"metrics\": {\n");
+            bool first = true;
+            for (auto& m : margins) {
+                if (m.status == "SKIP") continue;
+                if (!first) fprintf(jf, ",\n");
+                first = false;
+                // Escape any quotes in id (unlikely but safe)
+                fprintf(jf, "    \"%s\": {\"actual\": %.6f, \"threshold\": %.6f, \"op\": \"%s\", \"status\": \"%s\", \"margin_pct\": %.2f}",
+                        m.id.c_str(), m.actual, m.threshold, m.op.c_str(), m.status.c_str(), m.margin_pct);
+            }
+            fprintf(jf, "\n  }\n");
+            fprintf(jf, "}\n");
+            fclose(jf);
+            printf("\nJSON results written to output/regression_results.json\n");
+        } else {
+            printf("\nWARNING: could not write output/regression_results.json\n");
+        }
+    }
+
+    // --baseline: copy regression_log.txt to baseline.txt for before-after comparison
+    if (baseline_output) {
+        if (g_log && g_log != stderr) {
+            fclose(g_log);
+            g_log = nullptr;
+        }
+        // Copy regression_log.txt to baseline.txt
+        FILE* src = fopen("output/regression_log.txt", "r");
+        FILE* dst = fopen("output/baseline.txt", "w");
+        if (src && dst) {
+            char buf[4096];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), src)) > 0)
+                fwrite(buf, 1, n, dst);
+            fclose(src);
+            fclose(dst);
+            printf("\nBaseline saved to output/baseline.txt\n");
+        } else {
+            if (src) fclose(src);
+            if (dst) fclose(dst);
+            printf("\nWARNING: could not save baseline to output/baseline.txt\n");
+        }
+    }
 
     if (g_log && g_log != stderr) fclose(g_log);
 

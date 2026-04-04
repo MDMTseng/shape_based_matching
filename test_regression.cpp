@@ -1433,6 +1433,22 @@ static void test_resolution_speed(const sbm::FeatureSet& feat200, const Mat& tem
             for (int r = lo; r <= hi; r++) avg_ms += run_times[r];
             avg_ms /= (hi - lo + 1);
 
+            // Dump all GT positions and all detections for this mode
+            LOG("  --- %s %s: %d GT objects, %d detections ---\n",
+                rc.name, mode_names[mi], n_obj, (int)last_results.size());
+            LOG("  GT positions (template center):\n");
+            for (int gi = 0; gi < n_obj; gi++)
+                LOG("    gt[%2d] (%6.1f, %6.1f) @ %5.1f\n", gi, gts[gi].cx, gts[gi].cy, gts[gi].angle);
+            LOG("  Detections (converted to center):\n");
+            for (int ri = 0; ri < (int)last_results.size(); ri++) {
+                auto& res = last_results[ri];
+                float rad = -res.angle * (float)CV_PI / 180.0f;
+                float rcx = res.x - (std::cos(rad)*o_off_x - std::sin(rad)*o_off_y);
+                float rcy = res.y - (std::sin(rad)*o_off_x + std::cos(rad)*o_off_y);
+                LOG("    det[%2d] (%6.1f, %6.1f) @ %5.1f  score=%.0f  user_xy=(%.1f,%.1f)\n",
+                    ri, rcx, rcy, res.angle, res.score, res.x, res.y);
+            }
+
             // Per-object GT matching: greedy nearest assignment (mark used results)
             int n_matched = 0;
             float total_ang_err = 0, total_pos_err = 0;

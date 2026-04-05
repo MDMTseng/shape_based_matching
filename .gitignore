@@ -3,3 +3,4 @@ build/
 .vscode/
 CMakeLists.txt.user
 output/
+tests/scripts/__pycache__/

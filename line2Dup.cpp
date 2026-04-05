@@ -547,8 +547,12 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
         if (!match_only) {
             magnitude.create(src.size(), CV_32F);
             magnitude.setTo(0);
+            // Compute directed gradient angle (0-360) from Sobel for feature theta
             angle_ori.create(src.size(), CV_32F);
-            angle_ori.setTo(0);
+            Mat dx_f, dy_f;
+            sobel_dx_16s.convertTo(dx_f, CV_32F);
+            sobel_dy_16s.convertTo(dy_f, CV_32F);
+            cv::phase(dx_f, dy_f, angle_ori, true);  // true = degrees
         }
 
         if (skip_voting) {

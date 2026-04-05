@@ -383,33 +383,23 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
                 const __m256i tan3v = _mm256_set1_epi32(TAN_B[3]);
                 const __m256i one32 = _mm256_set1_epi32(1);
                 // L1 threshold: |dx|+|dy| > T is slightly more permissive than dx²+dy²>T²
-                // Use threshold directly as L1 cutoff (conservative: accepts a few more pixels)
-                const __m256i thresh_l1 = _mm256_set1_epi16((short)threshold_sq_i);
-                // For L1 we compare |gx|+|gy| > sqrt(threshold_sq), but threshold_sq_i = threshold²
-                // So L1 threshold = threshold (the original gradient magnitude threshold)
-                const __m256i thresh_l1_v = _mm256_set1_epi16((short)(int)threshold);
-                const __m256i zero16 = _mm256_setzero_si256();
+                // Central difference threshold: |dx|+|dy| > T/4
+                // Central diff magnitudes are ~4× smaller than Sobel (no [1,2,1] weighting)
+                // so scale threshold down by 4 to match
+                const __m256i thresh_l1_v = _mm256_set1_epi16((short)std::max(1, (int)threshold / 4));
 
-                // Process 16 pixels at a time: int16 Sobel + L1 threshold,
+                // Process 16 pixels at a time: central difference + L1 threshold,
                 // then widen survivors to int32 for quantization
                 for (; c <= src.cols - 1 - 16; c += 16) {
-                    // Load 18 bytes from each row, widen uint8 → int16 (16 pixels)
-                    __m256i prev_l = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i*)(row_prev + c - 1)));
-                    __m256i prev_c = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i*)(row_prev + c)));
-                    __m256i prev_r = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i*)(row_prev + c + 1)));
+                    // Only 4 loads: left, right, up, down (no corners needed)
                     __m256i curr_l = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i*)(row_curr + c - 1)));
                     __m256i curr_r = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i*)(row_curr + c + 1)));
-                    __m256i next_l = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i*)(row_next + c - 1)));
+                    __m256i prev_c = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i*)(row_prev + c)));
                     __m256i next_c = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i*)(row_next + c)));
-                    __m256i next_r = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i*)(row_next + c + 1)));
 
-                    // Sobel 3x3 in int16 (max |gx| = 1020, fits int16)
-                    __m256i gx16 = _mm256_add_epi16(
-                        _mm256_add_epi16(_mm256_sub_epi16(prev_r, prev_l), _mm256_sub_epi16(next_r, next_l)),
-                        _mm256_slli_epi16(_mm256_sub_epi16(curr_r, curr_l), 1));
-                    __m256i gy16 = _mm256_sub_epi16(
-                        _mm256_add_epi16(_mm256_add_epi16(next_l, next_r), _mm256_slli_epi16(next_c, 1)),
-                        _mm256_add_epi16(_mm256_add_epi16(prev_l, prev_r), _mm256_slli_epi16(prev_c, 1)));
+                    // Central difference: dx = p[c+1] - p[c-1], dy = p[r+1] - p[r-1]
+                    __m256i gx16 = _mm256_sub_epi16(curr_r, curr_l);
+                    __m256i gy16 = _mm256_sub_epi16(next_c, prev_c);
 
                     // L1 magnitude threshold in int16: |gx| + |gy| > threshold
                     __m256i l1_mag = _mm256_adds_epu16(
@@ -492,12 +482,11 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
 #endif
                 // Scalar tail
                 for (; c < src.cols - 1; ++c) {
-                    int gx = (row_prev[c+1] - row_prev[c-1]) + 2*(row_curr[c+1] - row_curr[c-1])
-                           + (row_next[c+1] - row_next[c-1]);
-                    int gy = (row_next[c-1] + 2*row_next[c] + row_next[c+1])
-                           - (row_prev[c-1] + 2*row_prev[c] + row_prev[c+1]);
-                    // L1 threshold (matches SIMD path)
-                    if (std::abs(gx) + std::abs(gy) <= (int)threshold) continue;
+                    // Central difference (matches SIMD path)
+                    int gx = row_curr[c+1] - row_curr[c-1];
+                    int gy = row_next[c] - row_prev[c];
+                    // L1 threshold scaled for central diff (~4× smaller than Sobel)
+                    if (std::abs(gx) + std::abs(gy) <= (int)threshold / 4) continue;
                     int ugx = gx, ugy = gy;
                     if (ugy < 0) { ugx = -ugx; ugy = -ugy; }
                     if (ugy == 0 && ugx < 0) ugx = -ugx;

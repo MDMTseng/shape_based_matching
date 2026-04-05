@@ -439,26 +439,31 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
                     int above_bits = _mm256_movemask_epi8(above16);
                     if (above_bits == 0) continue;
 
-                    // Process lower 8 pixels if any survive L1 pre-filter
-                    int lo_bits = above_bits & 0xFFFF;
-                    if (lo_bits) {
-                        __m256i gx = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(gx16));
-                        __m256i gy = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(gy16));
+                    // Process lower 8 and upper 8 pixels separately (quantize needs int32)
+                    for (int half = 0; half < 2; ++half) {
+                        int h_bits = (half == 0) ? (above_bits & 0xFFFF) : (above_bits >> 16);
+                        if (!h_bits) continue;
+                        __m256i gx = _mm256_cvtepi16_epi32(half == 0
+                            ? _mm256_castsi256_si128(gx16)
+                            : _mm256_extracti128_si256(gx16, 1));
+                        __m256i gy = _mm256_cvtepi16_epi32(half == 0
+                            ? _mm256_castsi256_si128(gy16)
+                            : _mm256_extracti128_si256(gy16, 1));
 
-                        // Exact L2 threshold: dx²+dy² > T²
+                        // L2 threshold on survivors
                         __m256i mag_sq = _mm256_add_epi32(
                             _mm256_mullo_epi32(gx, gx), _mm256_mullo_epi32(gy, gy));
                         __m256i above = _mm256_cmpgt_epi32(mag_sq, thresh_sq_v);
-                        if (_mm256_movemask_ps(_mm256_castsi256_ps(above)) == 0) goto skip_lo;
+                        int above32 = _mm256_movemask_ps(_mm256_castsi256_ps(above));
+                        if (above32 == 0) continue;
 
-                        // Quantize
+                        // Quantize to 8-bin orientation
                         __m256i gy_neg = _mm256_cmpgt_epi32(zero32, gy);
                         __m256i ugx = _mm256_blendv_epi8(gx, _mm256_sub_epi32(zero32, gx), gy_neg);
                         __m256i ugy = _mm256_blendv_epi8(gy, _mm256_sub_epi32(zero32, gy), gy_neg);
-                        __m256i ugy_zero = _mm256_cmpeq_epi32(ugy, zero32);
-                        __m256i ugx_neg = _mm256_cmpgt_epi32(zero32, ugx);
                         ugx = _mm256_blendv_epi8(ugx, _mm256_sub_epi32(zero32, ugx),
-                            _mm256_and_si256(ugy_zero, ugx_neg));
+                            _mm256_and_si256(_mm256_cmpeq_epi32(ugy, zero32),
+                                             _mm256_cmpgt_epi32(zero32, ugx)));
                         __m256i abs_ugx = _mm256_abs_epi32(ugx);
                         __m256i test_y = _mm256_mullo_epi32(ugy, ten_k);
                         __m256i cnt = _mm256_and_si256(one32,
@@ -473,53 +478,14 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
                             _mm256_sub_epi32(four32, cnt),
                             _mm256_and_si256(_mm256_add_epi32(four32, cnt), seven32),
                             _mm256_cmpgt_epi32(zero32, ugx));
-                        __m256i bitmask = _mm256_and_si256(_mm256_sllv_epi32(one32, bin), above);
-                        __m128i p16 = _mm_packus_epi32(_mm256_castsi256_si128(bitmask),
-                                                        _mm256_extracti128_si256(bitmask, 1));
-                        __m128i p8 = _mm_packus_epi16(p16, _mm_setzero_si128());
-                        _mm_storel_epi64((__m128i*)(angle_r + c), p8);
-                    skip_lo:;
-                    }
 
-                    // Process upper 8 pixels if any survive L1 pre-filter
-                    int hi_bits = above_bits & 0xFFFF0000;
-                    if (hi_bits) {
-                        __m256i gx = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(gx16, 1));
-                        __m256i gy = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(gy16, 1));
-
-                        // Exact L2 threshold
-                        __m256i mag_sq = _mm256_add_epi32(
-                            _mm256_mullo_epi32(gx, gx), _mm256_mullo_epi32(gy, gy));
-                        __m256i above = _mm256_cmpgt_epi32(mag_sq, thresh_sq_v);
-                        if (_mm256_movemask_ps(_mm256_castsi256_ps(above)) == 0) goto skip_hi;
-
-                        __m256i gy_neg = _mm256_cmpgt_epi32(zero32, gy);
-                        __m256i ugx = _mm256_blendv_epi8(gx, _mm256_sub_epi32(zero32, gx), gy_neg);
-                        __m256i ugy = _mm256_blendv_epi8(gy, _mm256_sub_epi32(zero32, gy), gy_neg);
-                        __m256i ugy_zero = _mm256_cmpeq_epi32(ugy, zero32);
-                        __m256i ugx_neg = _mm256_cmpgt_epi32(zero32, ugx);
-                        ugx = _mm256_blendv_epi8(ugx, _mm256_sub_epi32(zero32, ugx),
-                            _mm256_and_si256(ugy_zero, ugx_neg));
-                        __m256i abs_ugx = _mm256_abs_epi32(ugx);
-                        __m256i test_y = _mm256_mullo_epi32(ugy, ten_k);
-                        __m256i cnt = _mm256_and_si256(one32,
-                            _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan0v), test_y));
-                        cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
-                            _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan1v), test_y)));
-                        cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
-                            _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan2v), test_y)));
-                        cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
-                            _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan3v), test_y)));
-                        __m256i bin = _mm256_blendv_epi8(
-                            _mm256_sub_epi32(four32, cnt),
-                            _mm256_and_si256(_mm256_add_epi32(four32, cnt), seven32),
-                            _mm256_cmpgt_epi32(zero32, ugx));
-                        __m256i bitmask = _mm256_and_si256(_mm256_sllv_epi32(one32, bin), above);
-                        __m128i p16 = _mm_packus_epi32(_mm256_castsi256_si128(bitmask),
-                                                        _mm256_extracti128_si256(bitmask, 1));
-                        __m128i p8 = _mm_packus_epi16(p16, _mm_setzero_si128());
-                        _mm_storel_epi64((__m128i*)(angle_r + c + 8), p8);
-                    skip_hi:;
+                        // Store bitmask
+                        alignas(32) int bin_arr[8];
+                        _mm256_store_si256((__m256i*)bin_arr, bin);
+                        int offset = half * 8;
+                        for (int i = 0; i < 8; ++i)
+                            if (above32 & (1 << i))
+                                angle_r[c + offset + i] = (uchar)(1 << bin_arr[i]);
                     }
                 }
 #endif
@@ -1652,8 +1618,8 @@ std::vector<Match> Detector::match(Mat source, float threshold,
                 using PClock = std::chrono::high_resolution_clock;
                 auto fused_t0 = PClock::now();
 
-            // ROW-LEVEL fused spread+LUT+linearize.
-#if 0 // WIP experiments (disabled): SBM_FUSED_ANGLE_SPREAD, SBM_CELL_LEVEL_SPREAD
+            // FULLY FUSED: spread + computeResponseMaps + linearize in one pass.
+#if 0 // WIP experiments removed — fused angle+spread and cell-level spread were both slower
             // FUSED ANGLE+SPREAD: compute angle bitmask rows into ring buffer,
             // then spread+LUT+decimate from ring buffer. Eliminates 20MB angle image.
             // Sequential per-row (spread depends on adjacent angle rows) but

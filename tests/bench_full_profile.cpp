@@ -108,7 +108,7 @@ int main() {
         cfg_c.weak_threshold = 50;
         cfg_c.strong_threshold = 80;
         cfg_c.skip_voting = true;
-        //cfg_c.pyramid_T = {4, 8, 16};
+
         ShapeMatcher mc(cfg_c);
         mc.addModel("L", feat, mcfg);
         mc.match(sc); // warmup
@@ -128,7 +128,7 @@ int main() {
         cfg_r.weak_threshold = 50;
         cfg_r.strong_threshold = 80;
         cfg_r.skip_voting = true;
-        //cfg_r.pyramid_T = {4, 8, 16};
+
         ShapeMatcher mr(cfg_r);
         mr.addModel("L", feat, mcfg);
         mr.match(sc); // warmup

@@ -1647,10 +1647,78 @@ std::vector<Match> Detector::match(Mat source, float threshold,
                 using PClock = std::chrono::high_resolution_clock;
                 auto fused_t0 = PClock::now();
 
-            // FULLY FUSED: spread + computeResponseMaps + linearize in one pass.
-            // Instead of creating WxH spread buffer then reading it back,
-            // compute the spread on-the-fly per row using two small temp buffers.
-            // Eliminates both h_spread and spread_quantized intermediate allocations.
+            // Two implementations:
+            // 1) Cell-level: process T×T cells directly, compute spread per sub-position
+            //    Better cache locality — loads each cell's data once
+            // 2) Row-level: original per-row pipeline with thread-local buffers
+#define SBM_CELL_LEVEL_SPREAD 0
+#if SBM_CELL_LEVEL_SPREAD
+            // CELL-LEVEL: for each T×T cell, load (T+2*half)×(T+2*half) block,
+            // compute spread for each sub-position, apply LUT, write to linear memories.
+            {
+                LinearMemories &memories = lm_level[i];
+                CV_Assert(quantized.rows % T == 0);
+                CV_Assert(quantized.cols % T == 0);
+                int src_cols = quantized.cols;
+                int src_rows = quantized.rows;
+                int mem_w = src_cols / T;
+                int mem_h = src_rows / T;
+                int half = T / 2;
+
+                for (int ori = 0; ori < 8; ++ori)
+                    memories[ori].create(T * T, mem_w * mem_h, CV_8U);
+
+                static const uchar discount_table[9] = {0, 4, 4, 4, 3, 2, 1, 0, 0};
+                static const int pop4[16] = {0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4};
+
+                // Process cells in parallel
+                int n_cells_y = mem_h, n_cells_x = mem_w;
+                #pragma omp parallel for schedule(dynamic, 4) collapse(2)
+                for (int cy = 0; cy < n_cells_y; ++cy) {
+                    for (int cx = 0; cx < n_cells_x; ++cx) {
+                        // Cell origin in source image
+                        int r0 = cy * T, c0 = cx * T;
+
+                        // For each sub-position within the cell
+                        for (int gr = 0; gr < T; ++gr) {
+                            for (int gc = 0; gc < T; ++gc) {
+                                int pr = r0 + gr;  // pixel row
+                                int pc = c0 + gc;  // pixel col
+
+                                // Compute spread: OR of angle bytes in [pr-half, pr+half] × [pc-half, pc+half]
+                                int y0 = std::max(0, pr - half);
+                                int y1 = std::min(src_rows - 1, pr + half);
+                                int x0 = std::max(0, pc - half);
+                                int x1 = std::min(src_cols - 1, pc + half);
+
+                                uchar spread = 0;
+                                for (int yy = y0; yy <= y1; ++yy) {
+                                    const uchar *row = quantized.ptr<uchar>(yy);
+                                    for (int xx = x0; xx <= x1; ++xx)
+                                        spread |= row[xx];
+                                }
+
+                                // Popcount discount
+                                int nbits = pop4[spread & 0x0F] + pop4[(spread >> 4) & 0x0F];
+                                uchar disc = (nbits < 9) ? discount_table[nbits] : 0;
+
+                                // Apply LUT for each orientation and write to linear memory
+                                int grid_index = gr * T + gc;
+                                int mem_offset = cy * mem_w + cx;
+                                for (int ori = 0; ori < 8; ++ori) {
+                                    const uchar *lut_ptr = SIMILARITY_LUT + 32 * ori;
+                                    uchar raw = std::max(
+                                        lut_ptr[spread & 0x0F],
+                                        lut_ptr[(spread >> 4) + 16]);
+                                    memories[ori].ptr(grid_index)[mem_offset] = (uchar)(raw * disc / 4);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+#else
+            // ROW-LEVEL: original fused spread+LUT+linearize per row.
             {
                 LinearMemories &memories = lm_level[i];
                 CV_Assert(quantized.rows % T == 0);
@@ -1907,6 +1975,7 @@ std::vector<Match> Detector::match(Mat source, float threshold,
                     }
                 }
             }
+#endif // SBM_CELL_LEVEL_SPREAD
 
                 if (g_profile.enabled)
                     g_profile.fused_spread_lut_ms += std::chrono::duration<double, std::milli>(

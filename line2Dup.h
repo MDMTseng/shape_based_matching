@@ -237,6 +237,11 @@ public:
                                      const std::string &format = "templates_%s.yml.gz");
     void writeClasses(const std::string &format = "templates_%s.yml.gz") const;
 
+    /// When true, extract features only at level 0 and scale coordinates
+    /// for coarser levels. Orientation labels from full-res stay valid.
+    /// When false (default), re-extract features independently at each level.
+    bool scale_pyramid_features = false;
+
 protected:
     cv::Ptr<ColorGradient> modality;
     int pyramid_levels;

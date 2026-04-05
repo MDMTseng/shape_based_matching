@@ -2504,29 +2504,46 @@ int Detector::addTemplate(const Mat source, const std::string &class_id,
     TemplatePyramid tp;
     tp.resize(pyramid_levels);
 
-    {
-        // Extract a template at each pyramid level
+    if (scale_pyramid_features) {
+        // Extract features only at level 0, scale coordinates for coarser levels.
+        // Orientation labels from full-res are valid at all scales (proven empirically).
         Ptr<ColorGradientPyramid> qp = modality->process(source, object_mask);
+        if (num_features > 0) qp->num_features = num_features;
 
-        if(num_features > 0)
-        qp->num_features = num_features;
+        bool success = qp->extractTemplate(tp[0]);
+        if (!success) return -1;
 
-        for (int l = 0; l < pyramid_levels; ++l)
-        {
-            /// @todo Could do mask subsampling here instead of in pyrDown()
-            if (l > 0)
-                qp->pyrDown();
+        for (int l = 1; l < pyramid_levels; ++l) {
+            tp[l].pyramid_level = l;
+            tp[l].angle = tp[0].angle;
+            float s = 1.0f / (1 << l);  // 0.5 for l=1, 0.25 for l=2, etc.
+            tp[l].features.clear();
+            for (auto& f : tp[0].features) {
+                Feature fn;
+                fn.x = (int)(f.x * s + 0.5f);
+                fn.y = (int)(f.y * s + 0.5f);
+                fn.label = f.label;
+                fn.theta = f.theta;
+                tp[l].features.push_back(fn);
+            }
+            tp[l].tl_x = (int)(tp[0].tl_x * s + 0.5f);
+            tp[l].tl_y = (int)(tp[0].tl_y * s + 0.5f);
+            tp[l].width = (int)(tp[0].width * s + 0.5f);
+            tp[l].height = (int)(tp[0].height * s + 0.5f);
+        }
+    } else {
+        // Original: extract independently at each pyramid level
+        Ptr<ColorGradientPyramid> qp = modality->process(source, object_mask);
+        if (num_features > 0) qp->num_features = num_features;
 
+        for (int l = 0; l < pyramid_levels; ++l) {
+            if (l > 0) qp->pyrDown();
             bool success = qp->extractTemplate(tp[l]);
-            if (!success)
-                return -1;
+            if (!success) return -1;
         }
     }
 
-    //    Rect bb =
     cropTemplates(tp);
-
-    /// @todo Can probably avoid a copy of tp here with swap
     template_pyramids.push_back(tp);
     return template_id;
 }

@@ -872,8 +872,13 @@ void ColorGradientPyramid::pyrDown()
 
 void ColorGradientPyramid::quantize(Mat &dst) const
 {
-    dst = Mat::zeros(angle.size(), CV_8U);
-    angle.copyTo(dst, mask);
+    if (mask.empty()) {
+        // No mask: direct reference, no copy (saves 40MB at 20MP)
+        dst = angle;
+    } else {
+        dst = Mat::zeros(angle.size(), CV_8U);
+        angle.copyTo(dst, mask);
+    }
 }
 
 bool ColorGradientPyramid::extractTemplate(Template &templ) const

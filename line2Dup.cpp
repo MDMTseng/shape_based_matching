@@ -1651,6 +1651,150 @@ std::vector<Match> Detector::match(Mat source, float threshold,
             // 1) Cell-level: process T×T cells directly, compute spread per sub-position
             //    Better cache locality — loads each cell's data once
             // 2) Row-level: original per-row pipeline with thread-local buffers
+#define SBM_FUSED_ANGLE_SPREAD 0  // WIP: needs architecture rework to access smoothed image here
+#if SBM_FUSED_ANGLE_SPREAD
+            // FUSED ANGLE+SPREAD: compute angle bitmask rows into ring buffer,
+            // then spread+LUT+decimate from ring buffer. Eliminates 20MB angle image.
+            // Sequential per-row (spread depends on adjacent angle rows) but
+            // column processing within each row uses AVX2.
+            if (skip_voting && match_only) {
+                LinearMemories &memories = lm_level[i];
+                CV_Assert(quantized.rows % T == 0);
+                CV_Assert(quantized.cols % T == 0);
+                int src_cols = quantized.cols;
+                int src_rows = quantized.rows;
+                int mem_w = src_cols / T;
+                int mem_h = src_rows / T;
+                int half = T / 2;
+
+                for (int ori = 0; ori < 8; ++ori)
+                    memories[ori].create(T * T, mem_w * mem_h, CV_8U);
+
+                static const uchar discount_table[9] = {0, 4, 4, 4, 3, 2, 1, 0, 0};
+                static const int pop4[16] = {0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4};
+                static const int TAN_B_local[4] = {1989, 6682, 14966, 50273};
+
+                // Ring buffer for angle bitmask rows (T+1 rows keeps enough for spread)
+                int ring_size = T + 1;
+                std::vector<std::vector<uchar>> angle_ring(ring_size, std::vector<uchar>(src_cols, 0));
+
+                // Pre-compute first (half) rows of angle bitmask
+                auto compute_angle_row = [&](int r, uchar* out) {
+                    if (r < 1 || r >= src_rows - 1) {
+                        std::memset(out, 0, src_cols);
+                        return;
+                    }
+                    std::memset(out, 0, src_cols);
+                    const uchar *row_prev = smoothed.ptr<uchar>(r-1);
+                    const uchar *row_curr = smoothed.ptr<uchar>(r);
+                    const uchar *row_next = smoothed.ptr<uchar>(r+1);
+#if SBM_GRADIENT_KERNEL == SBM_GRADIENT_KERNEL_CENTRAL_DIFF
+                    int et = std::max(1, (int)threshold / 4);
+#else
+                    int et = (int)threshold;
+#endif
+                    int et_sq = et * et;
+                    for (int c = 1; c < src_cols - 1; ++c) {
+#if SBM_GRADIENT_KERNEL == SBM_GRADIENT_KERNEL_CENTRAL_DIFF
+                        int gx = row_curr[c+1] - row_curr[c-1];
+                        int gy = row_next[c] - row_prev[c];
+#else
+                        int gx = (row_prev[c+1]-row_prev[c-1]) + 2*(row_curr[c+1]-row_curr[c-1]) + (row_next[c+1]-row_next[c-1]);
+                        int gy = (row_next[c-1]+2*row_next[c]+row_next[c+1]) - (row_prev[c-1]+2*row_prev[c]+row_prev[c+1]);
+#endif
+                        if (gx*gx + gy*gy <= et_sq) continue;
+                        int ugx = gx, ugy = gy;
+                        if (ugy < 0) { ugx = -ugx; ugy = -ugy; }
+                        if (ugy == 0 && ugx < 0) ugx = -ugx;
+                        int bin;
+                        if (ugx >= 0) {
+                            int ty = ugy * 10000;
+                            if      (ty < ugx * TAN_B_local[0]) bin = 0;
+                            else if (ty < ugx * TAN_B_local[1]) bin = 1;
+                            else if (ty < ugx * TAN_B_local[2]) bin = 2;
+                            else if (ty < ugx * TAN_B_local[3]) bin = 3;
+                            else bin = 4;
+                        } else {
+                            int agx = -ugx, ty = ugy * 10000;
+                            if      (ty < agx * TAN_B_local[0]) bin = 0;
+                            else if (ty < agx * TAN_B_local[1]) bin = 7;
+                            else if (ty < agx * TAN_B_local[2]) bin = 6;
+                            else if (ty < agx * TAN_B_local[3]) bin = 5;
+                            else bin = 4;
+                        }
+                        out[c] = (uchar)(1 << bin);
+                    }
+                };
+
+                // Pre-fill ring buffer
+                for (int r = 0; r < ring_size && r < src_rows; ++r)
+                    compute_angle_row(r, angle_ring[r % ring_size].data());
+
+                // Row-level spread buffers
+                std::vector<uchar> v_or_buf(src_cols), hv_spread_buf(src_cols);
+                std::vector<uchar> discount_buf(src_cols), response_buf(src_cols);
+
+                // Process each row: spread from ring buffer → LUT → linear memories
+                for (int r = 0; r < src_rows; ++r) {
+                    // Advance ring buffer: compute next needed angle row
+                    int next_r = r + half + 1;
+                    if (next_r < src_rows)
+                        compute_angle_row(next_r, angle_ring[next_r % ring_size].data());
+
+                    // Vertical OR from ring buffer
+                    int y0 = std::max(0, r - half);
+                    int y1 = std::min(src_rows - 1, r + half);
+                    std::memcpy(v_or_buf.data(), angle_ring[y0 % ring_size].data(), src_cols);
+                    for (int yy = y0 + 1; yy <= y1; ++yy) {
+                        const uchar *row = angle_ring[yy % ring_size].data();
+                        for (int x = 0; x < src_cols; ++x)
+                            v_or_buf[x] |= row[x];
+                    }
+
+                    // Horizontal OR
+                    {
+                        const uchar *src_p = v_or_buf.data();
+                        uchar *dst = hv_spread_buf.data();
+                        for (int x = 0; x < src_cols; ++x) {
+                            uchar acc = 0;
+                            int x0 = std::max(0, x - half);
+                            int x1 = std::min(src_cols - 1, x + half);
+                            for (int xx = x0; xx <= x1; ++xx)
+                                acc |= src_p[xx];
+                            dst[x] = acc;
+                        }
+                    }
+
+                    // Discount
+                    for (int x = 0; x < src_cols; ++x) {
+                        uchar sb = hv_spread_buf[x];
+                        int nbits = pop4[sb & 0x0F] + pop4[(sb >> 4) & 0x0F];
+                        discount_buf[x] = (nbits < 9) ? discount_table[nbits] : 0;
+                    }
+
+                    // LUT + decimate
+                    int grid_row = r % T;
+                    int dec_r = r / T;
+                    for (int ori = 0; ori < 8; ++ori) {
+                        const uchar *lut_ptr = SIMILARITY_LUT + 32 * ori;
+                        for (int c_start = 0; c_start < T; ++c_start) {
+                            int grid_index = grid_row * T + c_start;
+                            uchar *mem_ptr = memories[ori].ptr(grid_index) + dec_r * mem_w;
+                            for (int c = c_start; c < src_cols; c += T) {
+                                uchar sb = hv_spread_buf[c];
+                                uchar raw = std::max(lut_ptr[sb & 0x0F], lut_ptr[(sb >> 4) + 16]);
+                                *mem_ptr++ = (uchar)(raw * discount_buf[c] / 4);
+                            }
+                        }
+                    }
+                }
+
+                if (g_profile.enabled)
+                    g_profile.fused_spread_lut_ms += std::chrono::duration<double, std::milli>(
+                        PClock::now() - fused_t0).count();
+            } else
+#endif // SBM_FUSED_ANGLE_SPREAD
+
 #define SBM_CELL_LEVEL_SPREAD 0
 #if SBM_CELL_LEVEL_SPREAD
             // CELL-LEVEL: for each T×T cell, load (T+2*half)×(T+2*half) block,

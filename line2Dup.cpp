@@ -383,13 +383,17 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
                 const __m256i tan3v = _mm256_set1_epi32(TAN_B[3]);
                 const __m256i one32 = _mm256_set1_epi32(1);
                 // L1 threshold: |dx|+|dy| > T is slightly more permissive than dx²+dy²>T²
-                // Central difference threshold: |dx|+|dy| > T/4
-                // Central diff magnitudes are ~4× smaller than Sobel (no [1,2,1] weighting)
-                // so scale threshold down by 4 to match
-                const __m256i thresh_l1_v = _mm256_set1_epi16((short)std::max(1, (int)threshold / 4));
+                // Central difference threshold (L2): dx²+dy² > T²
+                // Central diff max |dx|=255, so dx²+dy²=130050, needs int32 for threshold
+                // But we do L1 pre-filter in int16 first, then exact L2 on survivors
+                // L1 threshold = T/4 (central diff ~4× smaller than Sobel)
+                int cd_thresh = std::max(1, (int)threshold / 4);
+                const __m256i thresh_l1_v = _mm256_set1_epi16((short)cd_thresh);
+                int cd_thresh_sq = cd_thresh * cd_thresh;
+                const __m256i thresh_sq_v = _mm256_set1_epi32(cd_thresh_sq);
 
-                // Process 16 pixels at a time: central difference + L1 threshold,
-                // then widen survivors to int32 for quantization
+                // Process 16 pixels at a time: central difference + L1 pre-filter,
+                // then L2 threshold + quantize on survivors
                 for (; c <= src.cols - 1 - 16; c += 16) {
                     // Only 4 loads: left, right, up, down (no corners needed)
                     __m256i curr_l = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i*)(row_curr + c - 1)));
@@ -401,19 +405,24 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
                     __m256i gx16 = _mm256_sub_epi16(curr_r, curr_l);
                     __m256i gy16 = _mm256_sub_epi16(next_c, prev_c);
 
-                    // L1 magnitude threshold in int16: |gx| + |gy| > threshold
+                    // L1 pre-filter in int16 (fast rejection of most pixels)
                     __m256i l1_mag = _mm256_adds_epu16(
                         _mm256_abs_epi16(gx16), _mm256_abs_epi16(gy16));
                     __m256i above16 = _mm256_cmpgt_epi16(l1_mag, thresh_l1_v);
                     int above_bits = _mm256_movemask_epi8(above16);
                     if (above_bits == 0) continue;
 
-                    // Process lower 8 pixels if any survive
+                    // Process lower 8 pixels if any survive L1 pre-filter
                     int lo_bits = above_bits & 0xFFFF;
                     if (lo_bits) {
                         __m256i gx = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(gx16));
                         __m256i gy = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(gy16));
-                        __m256i above = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(above16));
+
+                        // Exact L2 threshold: dx²+dy² > T²
+                        __m256i mag_sq = _mm256_add_epi32(
+                            _mm256_mullo_epi32(gx, gx), _mm256_mullo_epi32(gy, gy));
+                        __m256i above = _mm256_cmpgt_epi32(mag_sq, thresh_sq_v);
+                        if (_mm256_movemask_ps(_mm256_castsi256_ps(above)) == 0) goto skip_lo;
 
                         // Quantize
                         __m256i gy_neg = _mm256_cmpgt_epi32(zero32, gy);
@@ -442,14 +451,20 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
                                                         _mm256_extracti128_si256(bitmask, 1));
                         __m128i p8 = _mm_packus_epi16(p16, _mm_setzero_si128());
                         _mm_storel_epi64((__m128i*)(angle_r + c), p8);
+                    skip_lo:;
                     }
 
-                    // Process upper 8 pixels if any survive
+                    // Process upper 8 pixels if any survive L1 pre-filter
                     int hi_bits = above_bits & 0xFFFF0000;
                     if (hi_bits) {
                         __m256i gx = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(gx16, 1));
                         __m256i gy = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(gy16, 1));
-                        __m256i above = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(above16, 1));
+
+                        // Exact L2 threshold
+                        __m256i mag_sq = _mm256_add_epi32(
+                            _mm256_mullo_epi32(gx, gx), _mm256_mullo_epi32(gy, gy));
+                        __m256i above = _mm256_cmpgt_epi32(mag_sq, thresh_sq_v);
+                        if (_mm256_movemask_ps(_mm256_castsi256_ps(above)) == 0) goto skip_hi;
 
                         __m256i gy_neg = _mm256_cmpgt_epi32(zero32, gy);
                         __m256i ugx = _mm256_blendv_epi8(gx, _mm256_sub_epi32(zero32, gx), gy_neg);
@@ -477,6 +492,7 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
                                                         _mm256_extracti128_si256(bitmask, 1));
                         __m128i p8 = _mm_packus_epi16(p16, _mm_setzero_si128());
                         _mm_storel_epi64((__m128i*)(angle_r + c + 8), p8);
+                    skip_hi:;
                     }
                 }
 #endif
@@ -485,8 +501,9 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
                     // Central difference (matches SIMD path)
                     int gx = row_curr[c+1] - row_curr[c-1];
                     int gy = row_next[c] - row_prev[c];
-                    // L1 threshold scaled for central diff (~4× smaller than Sobel)
-                    if (std::abs(gx) + std::abs(gy) <= (int)threshold / 4) continue;
+                    // L2 threshold scaled for central diff (~4× smaller than Sobel)
+                    int cd_t = std::max(1, (int)threshold / 4);
+                    if (gx*gx + gy*gy <= cd_t * cd_t) continue;
                     int ugx = gx, ugy = gy;
                     if (ugy < 0) { ugx = -ugx; ugy = -ugy; }
                     if (ugy == 0 && ugx < 0) ugx = -ugx;

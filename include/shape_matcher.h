@@ -284,6 +284,9 @@ struct MatchConfig {
 
     bool skip_voting = false;        ///< Skip 3x3 neighborhood voting (saves ~7ms at 20MP).
                                      ///< Safe to enable with higher edge thresholds (50/80).
+
+    std::vector<int> pyramid_T = {4, 8};  ///< Decimation factors per pyramid level.
+                                          ///< Default {4,8}. Try {4,8,16} for 20MP+ images.
 };
 
 // ============================================================

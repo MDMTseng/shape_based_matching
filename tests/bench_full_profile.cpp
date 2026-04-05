@@ -58,17 +58,118 @@ int main() {
     Mat templ(TW, TW, CV_8U, Scalar(0));
     draw_L(templ, TW/2, TW/2, 200);
 
-    // --- Scene with 10 objects ---
+    auto feat = extractFeatures(templ);
+    feat.setOrigin(TW/2.0f, TW/2.0f);
+    ModelConfig mcfg;
+    mcfg.angle = {0, 360, 2};
+
     std::vector<ObjGT> objects;
-    // 40 objects spread across 20MP (5472x3648)
+    // Multi-resolution speed comparison
+    struct Res { int w, h; const char* name; int n_obj; };
+    Res resolutions[] = {
+        {1280, 720, "720p", 10},
+        {1920, 1080, "FHD", 10},
+        {5472, 3648, "20MP", 40},
+    };
+
+    printf("\n=== Multi-resolution speed comparison (noise=30, skip_voting=true) ===\n");
+    printf("  %-8s %6s  %8s %8s  %8s %8s\n",
+           "Res", "Objs", "Coarse", "w/ROI", "Found", "BAD");
+    printf("  ");
+    for (int i = 0; i < 60; i++) printf("-");
+    printf("\n");
+
+    for (auto& res : resolutions) {
+        objects.clear();
+        {
+            float base_angles[] = {5,15,35,55,80,110,140,170,200,230,260,290,320,350,
+                                   25,50,75,100,125,155,185,215,245,275,305,335,10,30,
+                                   65,95,120,145,165,190,210,235,255,280,310,340};
+            int cols = (int)std::ceil(std::sqrt(res.n_obj * res.w / (float)res.h));
+            int rows = (res.n_obj + cols - 1) / cols;
+            float sx = res.w / (float)(cols + 1), sy = res.h / (float)(rows + 1);
+            for (int i = 0; i < res.n_obj; i++) {
+                int c = i % cols, r = i / cols;
+                objects.push_back({(int)(sx*(c+1)), (int)(sy*(r+1)), base_angles[i % 40]});
+            }
+        }
+        Mat sc(res.h, res.w, CV_8U, Scalar(50));
+        for (auto& obj : objects)
+            place_object(templ, sc, obj.x, obj.y, obj.angle);
+        { Mat noise(sc.size(), CV_32F); RNG rng(42);
+          rng.fill(noise, RNG::NORMAL, 0, 30);
+          Mat f; sc.convertTo(f, CV_32F); f += noise; f.convertTo(sc, CV_8U); }
+
+        // Coarse only
+        MatchConfig cfg_c;
+        cfg_c.min_score = 50;
+        cfg_c.refine = RefineMode::None;
+        cfg_c.blur_kernel_size = 11;
+        cfg_c.weak_threshold = 50;
+        cfg_c.strong_threshold = 80;
+        cfg_c.skip_voting = true;
+        //cfg_c.pyramid_T = {4, 8, 16};
+        ShapeMatcher mc(cfg_c);
+        mc.addModel("L", feat, mcfg);
+        mc.match(sc); // warmup
+        double coarse_times[5];
+        for (int i = 0; i < 5; i++) {
+            auto t = Clock::now();
+            mc.match(sc);
+            coarse_times[i] = ms_since(t);
+        }
+        std::sort(coarse_times, coarse_times + 5);
+
+        // With ROI
+        MatchConfig cfg_r;
+        cfg_r.min_score = 50;
+        cfg_r.refine = RefineMode::ROI;
+        cfg_r.blur_kernel_size = 11;
+        cfg_r.weak_threshold = 50;
+        cfg_r.strong_threshold = 80;
+        cfg_r.skip_voting = true;
+        //cfg_r.pyramid_T = {4, 8, 16};
+        ShapeMatcher mr(cfg_r);
+        mr.addModel("L", feat, mcfg);
+        mr.match(sc); // warmup
+        double roi_times[5];
+        int found = 0, bad = 0;
+        for (int i = 0; i < 5; i++) {
+            auto t = Clock::now();
+            auto results = mr.match(sc);
+            roi_times[i] = ms_since(t);
+            if (i == 0) {
+                found = (int)results.size();
+                for (auto& gt : objects) {
+                    bool matched = false;
+                    for (auto& r : results) {
+                        float dx = r.x - gt.x, dy = r.y - gt.y;
+                        float ae = std::fmod(std::abs(r.angle - gt.angle), 360.0f);
+                        ae = std::min(ae, 360.0f - ae);
+                        if (dx*dx+dy*dy < 30*30 && ae < 10) { matched = true; break; }
+                    }
+                    if (!matched) bad++;
+                }
+            }
+        }
+        std::sort(roi_times, roi_times + 5);
+
+        printf("  %-8s %6d  %7.1fms %7.1fms  %6d  %4d\n",
+               res.name, res.n_obj, coarse_times[2], roi_times[2], found, bad);
+    }
+    printf("\n");
+
+    // Original detailed test continues with 20MP
+    objects.clear();
     {
-        float angles[] = {5,15,25,35,50,65,80,95,110,125,140,155,170,185,200,215,230,245,260,275,
-                          290,305,320,335,350,10,30,55,75,100,120,145,165,190,210,235,255,280,310,340};
+        float base_angles[] = {5,15,35,55,80,110,140,170,200,230,260,290,320,350,
+                               25,50,75,100,125,155,185,215,245,275,305,335,10,30,
+                               65,95,120,145,165,190,210,235,255,280,310,340};
         int cols = 8, rows = 5;
         for (int i = 0; i < 40; i++) {
             int c = i % cols, r = i / cols;
             int x = 300 + c * 650, y = 300 + r * 650;
-            objects.push_back({x, y, angles[i]});
+            objects.push_back({x, y, base_angles[i]});
         }
     }
     Mat scene(3648, 5472, CV_8U, Scalar(50));
@@ -82,10 +183,6 @@ int main() {
     printf("Template: %dx%d, Scene: %dx%d, %d objects, noise=0\n\n",
            TW, TW, scene.cols, scene.rows, (int)objects.size());
 
-    // --- Features ---
-    auto feat = extractFeatures(templ);
-    feat.setOrigin(TW/2.0f, TW/2.0f);
-
     // ==========================================
     // 1. addModel profile
     // ==========================================
@@ -98,9 +195,8 @@ int main() {
     cfg.nms_angle = 360;  // position-only NMS to isolate edge threshold effect
     cfg.weak_threshold = 50;
     cfg.strong_threshold = 80;
+    cfg.skip_voting = true;
     ShapeMatcher matcher(cfg);
-    ModelConfig mcfg;
-    mcfg.angle = {0, 360, 2};
     matcher.addModel("L", feat, mcfg);
     printf("  addModel:              %7.1f ms (180 templates + selectOpt + lock precomp)\n\n", ms_since(t0));
 

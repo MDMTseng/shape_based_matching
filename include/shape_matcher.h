@@ -191,6 +191,9 @@ struct MatchConfig {
     float min_score = 50.0f;       ///< Minimum similarity (0-100)
     int max_results = 0;           ///< Max results (0 = unlimited)
     float nms_radius = -1;         ///< Spatial NMS radius (-1 = auto from template size)
+    float nms_angle = 360.0f;      ///< NMS angle tolerance (deg). Matches at same position
+                                    ///< but different angles (>nms_angle) are kept.
+                                    ///< Set to 30 for angle-aware NMS (noisy scenes).
     float match_scale = 1.0f;      ///< Scene downscale for faster matching (e.g., 0.5)
     RefineMode refine = RefineMode::ICP;
 

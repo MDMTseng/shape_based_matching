@@ -926,13 +926,31 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         nms_r = std::min(fs.templ_width, fs.templ_height) / 2.0f;
     }
     if (nms_r < 1) nms_r = 1;
+    // Compute angle step for angle-aware NMS
+    float nms_angle_step = 2.0f;
+    if (!impl_->models.empty())
+        nms_angle_step = impl_->models[0].config.angle.step;
+    int templates_per_scale = 1;
+    if (!impl_->models.empty()) {
+        auto& ac = impl_->models[0].config.angle;
+        templates_per_scale = std::max(1, (int)((ac.end - ac.start) / ac.step));
+    }
+
     std::vector<line2Dup::Match> nms_matches;
     for (auto& m : raw_matches) {
         bool suppressed = false;
         for (auto& k : nms_matches) {
             float dx = (float)((int)(m.x * inv_scale) - (int)(k.x * inv_scale));
             float dy = (float)((int)(m.y * inv_scale) - (int)(k.y * inv_scale));
-            if (dx*dx + dy*dy < nms_r * nms_r) { suppressed = true; break; }
+            if (dx*dx + dy*dy < nms_r * nms_r) {
+                // Also check angle similarity — only suppress if angles are close
+                int aid_m = m.template_id % templates_per_scale;
+                int aid_k = k.template_id % templates_per_scale;
+                int adiff = std::abs(aid_m - aid_k);
+                adiff = std::min(adiff, templates_per_scale - adiff);
+                float angle_diff = adiff * nms_angle_step;
+                if (angle_diff < cfg.nms_angle) { suppressed = true; break; }
+            }
         }
         if (!suppressed) {
             nms_matches.push_back(m);

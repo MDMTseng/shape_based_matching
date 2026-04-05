@@ -340,7 +340,10 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
     Mat smoothed;
     int ks = blur_kernel_size | 1;  // ensure odd
     auto pt0 = pnow();
-    GaussianBlur(src, smoothed, Size(ks, ks), 0, 0, BORDER_REPLICATE);
+    if (ks <= 1)
+        smoothed = src;
+    else
+        GaussianBlur(src, smoothed, Size(ks, ks), 0, 0, BORDER_REPLICATE);
     if (g_profile.enabled) g_profile.blur_ms += pms(pt0);
 
     if(src.channels() == 1){

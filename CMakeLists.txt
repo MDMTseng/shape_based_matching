@@ -111,3 +111,21 @@ target_link_libraries(test_diagnostics ${OpenCV_LIBS})
 
 add_executable(test_convergence line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_convergence.cpp)
 target_link_libraries(test_convergence ${OpenCV_LIBS})
+
+add_executable(test_constraints line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_constraints.cpp)
+target_link_libraries(test_constraints ${OpenCV_LIBS})
+
+add_executable(test_draw_roi line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_draw_roi.cpp)
+target_link_libraries(test_draw_roi ${OpenCV_LIBS})
+
+add_executable(test_lock_compare line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_lock_compare.cpp)
+target_link_libraries(test_lock_compare ${OpenCV_LIBS})
+
+add_executable(test_select_v2 line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_select_v2.cpp)
+target_link_libraries(test_select_v2 ${OpenCV_LIBS})
+
+add_executable(bench_full_profile line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/bench_full_profile.cpp)
+target_link_libraries(bench_full_profile ${OpenCV_LIBS})
+
+add_executable(bench_param_sweep line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/bench_param_sweep.cpp)
+target_link_libraries(bench_param_sweep ${OpenCV_LIBS})

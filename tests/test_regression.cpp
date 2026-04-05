@@ -2176,11 +2176,87 @@ static void test_different_shapes(const Mat& templ200) {
         tri_roi_ang = tr.second;
     }
 
+    // Print triangle lock weights for investigation
+    {
+        sbm::FeatureSet feat_dbg;
+        { OutputGuard guard; feat_dbg = sbm::extractFeatures(templ_tri); }
+        feat_dbg.setOrigin(templ_tri.cols/2.0f, templ_tri.rows/2.0f);
+        feat_dbg.selectOptimizedPoints(15);
+        auto& pts = feat_dbg.cached_opt_points;
+        auto& img = feat_dbg.templ_image;
+        float tcx = templ_tri.cols / 2.0f, tcy = templ_tri.rows / 2.0f;
+        int roi_h = 15;
+
+        printf("\n  Triangle lock weights (%d points):\n", (int)pts.size());
+        printf("    %-4s  %-12s  %-8s  %-12s  %-12s  %-8s\n",
+               "#", "Position", "Leverage", "lock_major", "lock_minor", "Ratio");
+        for (int i = 0; i < (int)pts.size(); i++) {
+            float lev = std::sqrt(pts[i].x*pts[i].x + pts[i].y*pts[i].y);
+            float lm = 0, ln = 0;
+            int tx=(int)(pts[i].x+tcx+0.5f), ty=(int)(pts[i].y+tcy+0.5f);
+            if (tx-roi_h>=0 && ty-roi_h>=0 && tx+roi_h<img.cols && ty+roi_h<img.rows) {
+                cv::Mat patch = img(cv::Rect(tx-roi_h, ty-roi_h, 2*roi_h+1, 2*roi_h+1));
+                int se = roi_h;
+                int sx0=std::max(0,tx-roi_h-se), sy0=std::max(0,ty-roi_h-se);
+                int sx1=std::min(img.cols,tx+roi_h+1+se), sy1=std::min(img.rows,ty+roi_h+1+se);
+                if (sx1-sx0>=patch.cols && sy1-sy0>=patch.rows) {
+                    cv::Mat search=img(cv::Rect(sx0,sy0,sx1-sx0,sy1-sy0));
+                    cv::Mat resp; cv::matchTemplate(search,patch,resp,cv::TM_CCORR_NORMED);
+                    cv::Point ml; cv::minMaxLoc(resp,nullptr,nullptr,nullptr,&ml);
+                    cv::Mat rdx,rdy; cv::Sobel(resp,rdx,CV_32F,1,0,3); cv::Sobel(resp,rdy,CV_32F,0,1,3);
+                    float sxx=0,sxy=0,syy=0,sw=std::max(3.f,se*0.5f),inv2s=1.f/(2*sw*sw);
+                    for(int ry=0;ry<resp.rows;ry++){
+                        const float*gx=rdx.ptr<float>(ry),*gy=rdy.ptr<float>(ry);
+                        float dy2=(float)(ry-ml.y);
+                        for(int rx=0;rx<resp.cols;rx++){
+                            float dx2=(float)(rx-ml.x),w=std::exp(-(dx2*dx2+dy2*dy2)*inv2s);
+                            sxx+=w*gx[rx]*gx[rx]; sxy+=w*gx[rx]*gy[rx]; syy+=w*gy[rx]*gy[rx];
+                        }
+                    }
+                    float tr=sxx+syy,disc=std::sqrt(std::max(0.f,(sxx-syy)*(sxx-syy)/4+sxy*sxy));
+                    lm=std::max(0.f,tr/2+disc); ln=std::max(0.f,tr/2-disc);
+                }
+            }
+            printf("    %-4d  (%5.0f,%5.0f)  %6.0f    %10.3f    %10.3f    %6.1f\n",
+                   i, pts[i].x, pts[i].y, lev, lm, ln,
+                   ln > 1e-6f ? lm/ln : 999.0f);
+        }
+        auto ca = feat_dbg.analyzeConstraints();
+        printf("  Constraint analysis: %s\n", ca.summary.c_str());
+    }
+
+    // Triangle with noise σ=20
+    float tri_roi_n30_ang = 99.0f;
+    if (tri_found > 0.5f) {
+        // Same test_shape lambda but with noise added to scene
+        sbm::FeatureSet feat_tn;
+        { OutputGuard guard; feat_tn = sbm::extractFeatures(templ_tri); }
+        feat_tn.setOrigin(templ_tri.cols/2.0f, templ_tri.rows/2.0f);
+        feat_tn.selectOptimizedPoints(15);
+        Mat scene_n(scene_sz, scene_sz, CV_8U, Scalar(0));
+        place_object(templ_tri, scene_n, scene_sz/2, scene_sz/2, 55);
+        // Add noise
+        { cv::Mat noise(scene_n.size(), CV_32F); cv::RNG rng(42);
+          rng.fill(noise, cv::RNG::NORMAL, 0, 20);
+          cv::Mat sf; scene_n.convertTo(sf, CV_32F); sf += noise; sf.convertTo(scene_n, CV_8U); }
+        sbm::MatchConfig cfg_n; cfg_n.min_score = 20; cfg_n.refine = sbm::RefineMode::ROI;
+        sbm::ShapeMatcher matcher_n(cfg_n);
+        sbm::ModelConfig mcfg_n; mcfg_n.angle = {0, 360, 2};
+        { OutputGuard guard;
+          matcher_n.addModel("Tri_n30", feat_tn, mcfg_n);
+          auto res = matcher_n.match(scene_n);
+          if (!res.empty()) tri_roi_n30_ang = angle_err(res[0].angle, 55.0f);
+        }
+        LOG("  18 Triangle noise=20 ROI angle err=%.3fdeg\n", tri_roi_n30_ang);
+        printf("  INFO: 18 Triangle noise=20 ROI angle err=%.3fdeg\n", tri_roi_n30_ang);
+    }
+
     RECORD("shape_rect_found", rect_found);
     RECORD("shape_pole_found", pole_found);
     RECORD("shape_tri_found", tri_found);
     RECORD("shape_rect_roi_ang", rect_roi_ang);
     RECORD("shape_tri_roi_ang", tri_roi_ang);
+    RECORD("shape_tri_roi_n30_ang", tri_roi_n30_ang);
 
     CHECK(rect_found > 0.5f, "18 Rectangle detected");
     CHECK(pole_found > 0.5f, "18 Thin pole detected");

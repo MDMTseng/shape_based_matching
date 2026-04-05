@@ -385,28 +385,24 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
 
                 // Process 8 pixels at a time
                 for (; c <= src.cols - 1 - 8; c += 8) {
-                    // Inline Sobel 3x3: load 3 rows, compute dx and dy
-                    // dx = (p[r-1][c+1] - p[r-1][c-1]) + 2*(p[r][c+1] - p[r][c-1]) + (p[r+1][c+1] - p[r+1][c-1])
-                    // dy = (p[r+1][c-1] + 2*p[r+1][c] + p[r+1][c+1]) - (p[r-1][c-1] + 2*p[r-1][c] + p[r-1][c+1])
+                    // Load 3 rows with 3 loads + shifts (instead of 8 loads)
+                    __m128i prev_raw = _mm_loadu_si128((const __m128i*)(row_prev + c - 1));
+                    __m128i curr_raw = _mm_loadu_si128((const __m128i*)(row_curr + c - 1));
+                    __m128i next_raw = _mm_loadu_si128((const __m128i*)(row_next + c - 1));
 
-                    // Load 8 pixels from each position, widen uint8 → int32
-                    // Top row
-                    __m256i tl = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)(row_prev + c - 1)));
-                    __m256i tc = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)(row_prev + c)));
-                    __m256i tr = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)(row_prev + c + 1)));
-                    // Middle row
-                    __m256i ml = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)(row_curr + c - 1)));
-                    __m256i mr = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)(row_curr + c + 1)));
-                    // Bottom row
-                    __m256i bl = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)(row_next + c - 1)));
-                    __m256i bc = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)(row_next + c)));
-                    __m256i br = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)(row_next + c + 1)));
+                    __m256i tl = _mm256_cvtepu8_epi32(prev_raw);
+                    __m256i tc = _mm256_cvtepu8_epi32(_mm_srli_si128(prev_raw, 1));
+                    __m256i tr = _mm256_cvtepu8_epi32(_mm_srli_si128(prev_raw, 2));
+                    __m256i ml = _mm256_cvtepu8_epi32(curr_raw);
+                    __m256i mr = _mm256_cvtepu8_epi32(_mm_srli_si128(curr_raw, 2));
+                    __m256i bl = _mm256_cvtepu8_epi32(next_raw);
+                    __m256i bc = _mm256_cvtepu8_epi32(_mm_srli_si128(next_raw, 1));
+                    __m256i br = _mm256_cvtepu8_epi32(_mm_srli_si128(next_raw, 2));
 
-                    // dx = (tr - tl) + 2*(mr - ml) + (br - bl)
+                    // Sobel 3x3
                     __m256i gx = _mm256_add_epi32(
                         _mm256_add_epi32(_mm256_sub_epi32(tr, tl), _mm256_sub_epi32(br, bl)),
                         _mm256_slli_epi32(_mm256_sub_epi32(mr, ml), 1));
-                    // dy = (bl + 2*bc + br) - (tl + 2*tc + tr)
                     __m256i gy = _mm256_sub_epi32(
                         _mm256_add_epi32(_mm256_add_epi32(bl, br), _mm256_slli_epi32(bc, 1)),
                         _mm256_add_epi32(_mm256_add_epi32(tl, tr), _mm256_slli_epi32(tc, 1)));
@@ -442,13 +438,14 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
                         _mm256_and_si256(_mm256_add_epi32(four, cnt), seven),
                         _mm256_cmpgt_epi32(zero, ugx));
 
-                    // Write bitmask where above threshold
-                    alignas(32) int bin_arr[8];
-                    _mm256_store_si256((__m256i*)bin_arr, bin);
-                    for (int i = 0; i < 8; ++i) {
-                        if (above_bits & (1 << i))
-                            angle_r[c + i] = (uchar)(1 << bin_arr[i]);
-                    }
+                    // Vectorized store: 1<<bin via variable shift, mask, pack to uint8
+                    __m256i bitmask = _mm256_sllv_epi32(one32, bin);
+                    bitmask = _mm256_and_si256(bitmask, above);
+                    __m128i lo = _mm256_castsi256_si128(bitmask);
+                    __m128i hi = _mm256_extracti128_si256(bitmask, 1);
+                    __m128i packed16 = _mm_packus_epi32(lo, hi);
+                    __m128i packed8 = _mm_packus_epi16(packed16, _mm_setzero_si128());
+                    _mm_storel_epi64((__m128i*)(angle_r + c), packed8);
                 }
 #endif
                 // Scalar tail

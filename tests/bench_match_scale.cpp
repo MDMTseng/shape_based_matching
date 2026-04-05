@@ -136,7 +136,7 @@ int main() {
     printf("  20MP %dx%d, 40 objects, 200x200 L-shape\n", W, H);
     printf("==========================================================================\n\n");
 
-    float scales[] = {1.0f, 0.7f, 0.5f};
+    float scales[] = {1.0f, 0.7f, 0.5f, 0.3f};
     struct Scene { const char* name; const Mat* img; int blur_k; };
     Scene scenes[] = { {"clean", &scene_clean, 7}, {"noise=30", &scene_noisy, 11} };
 
@@ -159,24 +159,9 @@ int main() {
                     cfg.blur_kernel_size = sc.blur_k;
                     cfg.skip_voting = true;
                     cfg.match_scale = scale;
-                    cfg.match_scale_reextract = true;
                     auto r = run_config(*sc.img, objects, feat, mcfg, cfg);
                     printf("  %-7.1f  %-12s  %7.1fms  %2d/40  %5.1f  %5.1f  %5.1f  %5.2f  %5.1f\n",
-                           scale, scale < 0.99f ? "re-extract" : "full-res",
-                           r.time_ms, r.found, r.score, r.ang_m, r.ang_w, r.pos_m, r.pos_w);
-                }
-                // --- scale-in-place (only for reduced scales) ---
-                if (scale < 0.99f) {
-                    MatchConfig cfg;
-                    cfg.min_score = 50;
-                    cfg.refine = refine;
-                    cfg.blur_kernel_size = sc.blur_k;
-                    cfg.skip_voting = true;
-                    cfg.match_scale = scale;
-                    cfg.match_scale_reextract = false;
-                    auto r = run_config(*sc.img, objects, feat, mcfg, cfg);
-                    printf("  %-7.1f  %-12s  %7.1fms  %2d/40  %5.1f  %5.1f  %5.1f  %5.2f  %5.1f\n",
-                           scale, "scale-only",
+                           scale, scale < 0.99f ? "scale-inplace" : "full-res",
                            r.time_ms, r.found, r.score, r.ang_m, r.ang_w, r.pos_m, r.pos_w);
                 }
             }

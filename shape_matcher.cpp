@@ -1531,21 +1531,10 @@ struct ShapeMatcher::Impl {
     std::vector<ModelInfo> models;
     int total_templates = 0;
 
-    // Scaled detector for match_scale < 1.0: features re-extracted from
-    // downscaled template so orientation labels align with the downscaled scene.
-    std::unique_ptr<line2Dup::Detector> scaled_detector;
-    float scaled_match_scale = 1.0f;
-
     Impl(const MatchConfig& cfg)
         : match_config(cfg),
-          detector(128, cfg.T_levels,
-                   cfg.weak_threshold, cfg.strong_threshold) {
-        if (cfg.match_scale < 1.0f && cfg.match_scale > 0.1f && cfg.match_scale_reextract) {
-            scaled_detector.reset(new line2Dup::Detector(
-                128, cfg.T_levels, cfg.weak_threshold, cfg.strong_threshold));
-            scaled_match_scale = cfg.match_scale;
-        }
-    }
+          detector(128, {4, 8},
+                   cfg.weak_threshold, cfg.strong_threshold) {}
 
     // Convert FeatureSet to meiqua TemplatePyramid
     static void featureSetToTemplates(const FeatureSet& fs,
@@ -1795,41 +1784,6 @@ int ShapeMatcher::addModel(const std::string& name,
         s += config.scale.step;
     } while (s <= config.scale.max + 0.001f && config.scale.max > config.scale.min);
 
-    // Build scaled templates for match_scale < 1.0
-    // Re-extract features from downscaled template so orientation labels
-    // align with the downscaled scene's gradient field.
-    if (impl_->scaled_detector && !features.templ_image.empty()) {
-        float ms = impl_->scaled_match_scale;
-        cv::Mat small_templ;
-        cv::resize(features.templ_image, small_templ,
-                   cv::Size((int)(features.templ_image.cols * ms + 0.5f),
-                            (int)(features.templ_image.rows * ms + 0.5f)));
-        auto scaled_feat = extractFeatures(small_templ, cv::Mat(), 128,
-                                           impl_->match_config.T_levels);
-
-        // Skip if extraction failed (template too small)
-        if (scaled_feat.levels.empty() ||
-            scaled_feat.levels[0].features.size() < 5) {
-            sbm_log(sbm::LogLevel::Warning, "match_scale",
-                    "scale %.2f: template too small, falling back to full-res", ms);
-            impl_->scaled_detector.reset();
-        }
-
-        if (impl_->scaled_detector) {
-            float s2 = config.scale.min;
-            do {
-                impl_->addModelAtScaleTo(*impl_->scaled_detector,
-                                         info.class_id, scaled_feat, config.angle, s2);
-                if (config.flip) {
-                    auto flipped = Impl::flipFeatures(scaled_feat);
-                    impl_->addModelAtScaleTo(*impl_->scaled_detector,
-                                             info.class_id_flip, flipped, config.angle, s2);
-                }
-                s2 += config.scale.step;
-            } while (s2 <= config.scale.max + 0.001f && config.scale.max > config.scale.min);
-        }
-    }
-
     info.num_variants = count;
     impl_->models.push_back(info);
     impl_->total_templates += count;
@@ -1868,15 +1822,11 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
             class_ids.push_back(m.class_id_flip);
     }
 
-    // Select which detector to use: scaled (re-extracted features) or full-res
-    line2Dup::Detector& match_detector = (using_match_scale && impl_->scaled_detector)
-        ? *impl_->scaled_detector : impl_->detector;
+    line2Dup::Detector& match_detector = impl_->detector;
 
-    // Fallback: scale features in-place when no re-extracted scaled detector
-    // (match_scale_reextract=false). Save originals for lossless restore.
+    // Scale features in-place for match_scale. Save originals for lossless restore.
     std::map<std::string, std::vector<std::vector<line2Dup::Template>>> saved_templates;
-    bool scaling_in_place = using_match_scale && !impl_->scaled_detector;
-    if (scaling_in_place) {
+    if (using_match_scale) {
         float s = cfg.match_scale;
         for (auto& cid : class_ids) {
             auto& tps = impl_->detector.getClassTemplates(cid);
@@ -1902,8 +1852,8 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
     // Run meiqua matching
     auto raw_matches = match_detector.match(padded, cfg.min_score, class_ids);
 
-    // Restore original templates if we scaled in-place
-    if (scaling_in_place) {
+    // Restore original templates
+    if (using_match_scale) {
         for (auto& cid : class_ids)
             impl_->detector.getClassTemplates(cid) = std::move(saved_templates[cid]);
     }
@@ -1990,14 +1940,9 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         // Compute object center (user origin, rotated + scaled)
         float scaled_tw = fs.templ_width * matched_scale;
         float scaled_th = fs.templ_height * matched_scale;
-        // tmpl[0].tl_x coordinate space depends on which detector was used:
-        //   scaled_detector (re-extract): tl_x is in downscaled coords → * inv_scale
-        //   main detector (scale-in-place): tl_x is full-res (restored) → use as-is
-        bool using_scaled_det = (using_match_scale && impl_->scaled_detector != nullptr);
-        float tl_x_fullres = using_scaled_det ? tmpl[0].tl_x * inv_scale : (float)tmpl[0].tl_x;
-        float tl_y_fullres = using_scaled_det ? tmpl[0].tl_y * inv_scale : (float)tmpl[0].tl_y;
-        float scene_x = m.x * inv_scale + (scaled_tw / 2.0f - tl_x_fullres);
-        float scene_y = m.y * inv_scale + (scaled_th / 2.0f - tl_y_fullres);
+        // tl_x/tl_y are in full-res coords (restored after scale-in-place matching)
+        float scene_x = m.x * inv_scale + (scaled_tw / 2.0f - tmpl[0].tl_x);
+        float scene_y = m.y * inv_scale + (scaled_th / 2.0f - tmpl[0].tl_y);
 
         // Transform user origin from template center to scene coords
         float ox = fs.origin.x - fs.templ_width / 2.0f;

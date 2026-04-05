@@ -376,13 +376,114 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
         // Values are tan(22.5°), tan(45°), tan(67.5°), tan(∞) scaled by 2^15
         static const int TAN_B[4] = {1989, 6682, 14966, 50273};
 
-        // Step 1: Compute magnitude + unfiltered 8-bin quantization.
-        // Sobel 3x3 on uint8: max |dx|=1020, so 1020*50273=51M fits int32.
-        pt0 = pnow();
+        // Skip the old quantize loop — handled in fused or voting path below.
+
+        if (skip_voting) {
+        if (g_profile.enabled) g_profile.quantize_ms += pms(pt0);
+            // Fused path: quantize dx/dy → bitmask directly into angle.
+            // Eliminates quantized_unfiltered and mag_mask intermediates (~80MB at 20MP).
+            pt0 = pnow();
+            angle = Mat::zeros(src.size(), CV_8U);
+
+            #pragma omp parallel for schedule(static)
+            for (int r = 1; r < src.rows - 1; ++r) {
+                const short *dx = sobel_dx_16s.ptr<short>(r);
+                const short *dy = sobel_dy_16s.ptr<short>(r);
+                float *mag_r = match_only ? nullptr : magnitude.ptr<float>(r);
+                uchar *angle_r = angle.ptr<uchar>(r);
+
+                int c = 1;
+#ifdef __AVX2__
+                const __m256i zero = _mm256_setzero_si256();
+                const __m256i four = _mm256_set1_epi32(4);
+                const __m256i seven = _mm256_set1_epi32(7);
+                const __m256i ten_k = _mm256_set1_epi32(10000);
+                const __m256i tan0 = _mm256_set1_epi32(TAN_B[0]);
+                const __m256i tan1 = _mm256_set1_epi32(TAN_B[1]);
+                const __m256i tan2 = _mm256_set1_epi32(TAN_B[2]);
+                const __m256i tan3 = _mm256_set1_epi32(TAN_B[3]);
+                const __m256i thresh_v = _mm256_set1_epi32(threshold_sq_i);
+                const __m256i one32 = _mm256_set1_epi32(1);
+                // LUT: bin (0-7) → bitmask (1<<bin)
+                alignas(16) static const uchar b2b[16] = {1,2,4,8,16,32,64,128,0,0,0,0,0,0,0,0};
+                const __m256i bit_lut = _mm256_broadcastsi128_si256(_mm_load_si128((const __m128i*)b2b));
+
+                for (; c <= src.cols - 1 - 8; c += 8) {
+                    __m128i dx8 = _mm_loadu_si128((const __m128i*)(dx + c));
+                    __m128i dy8 = _mm_loadu_si128((const __m128i*)(dy + c));
+                    __m256i gx = _mm256_cvtepi16_epi32(dx8);
+                    __m256i gy = _mm256_cvtepi16_epi32(dy8);
+                    __m256i mag_sq = _mm256_add_epi32(
+                        _mm256_mullo_epi32(gx, gx), _mm256_mullo_epi32(gy, gy));
+                    if (mag_r) _mm256_storeu_ps(mag_r + c, _mm256_cvtepi32_ps(mag_sq));
+                    __m256i above = _mm256_cmpgt_epi32(mag_sq, thresh_v);
+                    int above_bits = _mm256_movemask_ps(_mm256_castsi256_ps(above));
+                    if (above_bits == 0) continue;
+
+                    __m256i gy_neg = _mm256_cmpgt_epi32(zero, gy);
+                    __m256i ugx = _mm256_blendv_epi8(gx, _mm256_sub_epi32(zero, gx), gy_neg);
+                    __m256i ugy = _mm256_blendv_epi8(gy, _mm256_sub_epi32(zero, gy), gy_neg);
+                    __m256i ugy_zero = _mm256_cmpeq_epi32(ugy, zero);
+                    __m256i ugx_neg = _mm256_cmpgt_epi32(zero, ugx);
+                    ugx = _mm256_blendv_epi8(ugx, _mm256_sub_epi32(zero, ugx),
+                        _mm256_and_si256(ugy_zero, ugx_neg));
+
+                    __m256i abs_ugx = _mm256_abs_epi32(ugx);
+                    __m256i test_y = _mm256_mullo_epi32(ugy, ten_k);
+                    __m256i cnt = _mm256_and_si256(one32,
+                        _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan0), test_y));
+                    cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
+                        _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan1), test_y)));
+                    cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
+                        _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan2), test_y)));
+                    cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
+                        _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan3), test_y)));
+                    __m256i bin = _mm256_blendv_epi8(
+                        _mm256_sub_epi32(four, cnt),
+                        _mm256_and_si256(_mm256_add_epi32(four, cnt), seven),
+                        _mm256_cmpgt_epi32(zero, ugx));
+
+                    // Convert 8 int32 bins to bitmask bytes, masked by threshold
+                    alignas(32) int bin_arr[8];
+                    _mm256_store_si256((__m256i*)bin_arr, bin);
+                    for (int i = 0; i < 8; ++i) {
+                        if (above_bits & (1 << i))
+                            angle_r[c + i] = (uchar)(1 << bin_arr[i]);
+                    }
+                }
+#endif
+                for (; c < src.cols - 1; ++c) {
+                    int gx = dx[c], gy = dy[c];
+                    int mag_sq_i = (int)((int64_t)gx*gx + (int64_t)gy*gy);
+                    if (mag_r) mag_r[c] = (float)mag_sq_i;
+                    if (mag_sq_i <= threshold_sq_i) continue;
+                    int ugx = gx, ugy = gy;
+                    if (ugy < 0) { ugx = -ugx; ugy = -ugy; }
+                    if (ugy == 0 && ugx < 0) ugx = -ugx;
+                    int bin;
+                    if (ugx >= 0) {
+                        int ty = ugy * 10000;
+                        if      (ty < ugx * TAN_B[0]) bin = 0;
+                        else if (ty < ugx * TAN_B[1]) bin = 1;
+                        else if (ty < ugx * TAN_B[2]) bin = 2;
+                        else if (ty < ugx * TAN_B[3]) bin = 3;
+                        else bin = 4;
+                    } else {
+                        int agx = -ugx, ty = ugy * 10000;
+                        if      (ty < agx * TAN_B[0]) bin = 0;
+                        else if (ty < agx * TAN_B[1]) bin = 7;
+                        else if (ty < agx * TAN_B[2]) bin = 6;
+                        else if (ty < agx * TAN_B[3]) bin = 5;
+                        else bin = 4;
+                    }
+                    angle_r[c] = (uchar)(1 << bin);
+                }
+            }
+            if (g_profile.enabled) g_profile.voting_ms += pms(pt0);
+        } else {
+        // Voting path: need quantize → intermediate buffers → vote → bitmask
         Mat quantized_unfiltered = Mat::zeros(src.size(), CV_8U);
         Mat mag_mask = Mat::zeros(src.size(), CV_8U);
-        float threshold_sq = threshold * threshold;
-        int threshold_sq_i = (int)threshold_sq;
 
         #pragma omp parallel for schedule(static)
         for (int r = 1; r < src.rows - 1; ++r) {
@@ -391,162 +492,38 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
             float *mag_r = match_only ? nullptr : magnitude.ptr<float>(r);
             uchar *qr = quantized_unfiltered.ptr<uchar>(r);
             uchar *mask_r = mag_mask.ptr<uchar>(r);
-
-            int c = 1;
-#ifdef __AVX2__
-            // AVX2: process 8 pixels at a time in int32.
-            // Widen int16 dx/dy to int32, compute magnitude, threshold,
-            // undirected reduction, and bin via 4 multiply-compares.
-            const __m256i zero = _mm256_setzero_si256();
-            const __m256i four = _mm256_set1_epi32(4);
-            const __m256i seven = _mm256_set1_epi32(7);
-            const __m256i ten_k = _mm256_set1_epi32(10000);
-            const __m256i tan0 = _mm256_set1_epi32(TAN_B[0]);
-            const __m256i tan1 = _mm256_set1_epi32(TAN_B[1]);
-            const __m256i tan2 = _mm256_set1_epi32(TAN_B[2]);
-            const __m256i tan3 = _mm256_set1_epi32(TAN_B[3]);
-            const __m256i thresh_v = _mm256_set1_epi32(threshold_sq_i);
-            const __m256i one32 = _mm256_set1_epi32(1);
-
-            for (; c <= src.cols - 1 - 8; c += 8) {
-                // Widen 8 int16 → 8 int32
-                __m128i dx8 = _mm_loadu_si128((const __m128i*)(dx + c));
-                __m128i dy8 = _mm_loadu_si128((const __m128i*)(dy + c));
-                __m256i gx = _mm256_cvtepi16_epi32(dx8);
-                __m256i gy = _mm256_cvtepi16_epi32(dy8);
-
-                // Magnitude squared
-                __m256i mag_sq = _mm256_add_epi32(
-                    _mm256_mullo_epi32(gx, gx), _mm256_mullo_epi32(gy, gy));
-
-                // Store as float (only for template extraction, not matching)
-                if (mag_r) _mm256_storeu_ps(mag_r + c, _mm256_cvtepi32_ps(mag_sq));
-
-                // Threshold mask
-                __m256i above = _mm256_cmpgt_epi32(mag_sq, thresh_v);
-                int above_bits = _mm256_movemask_ps(_mm256_castsi256_ps(above));
-
-                // Store mag_mask (extract low byte of each int32 mask)
-                for (int i = 0; i < 8; ++i)
-                    mask_r[c + i] = (above_bits & (1 << i)) ? 0xFF : 0;
-
-                if (above_bits == 0) continue;
-
-                // Undirected reduction: if gy < 0, negate both
-                __m256i gy_neg = _mm256_cmpgt_epi32(zero, gy);
-                __m256i ugx = _mm256_blendv_epi8(gx, _mm256_sub_epi32(zero, gx), gy_neg);
-                __m256i ugy = _mm256_blendv_epi8(gy, _mm256_sub_epi32(zero, gy), gy_neg);
-
-                // If ugy==0 && ugx<0, negate ugx
-                __m256i ugy_zero = _mm256_cmpeq_epi32(ugy, zero);
-                __m256i ugx_neg = _mm256_cmpgt_epi32(zero, ugx);
-                __m256i fix = _mm256_and_si256(ugy_zero, ugx_neg);
-                ugx = _mm256_blendv_epi8(ugx, _mm256_sub_epi32(zero, ugx), fix);
-
-                // Bin computation: count how many TAN boundaries the ratio exceeds
-                __m256i abs_ugx = _mm256_abs_epi32(ugx);
-                __m256i test_y = _mm256_mullo_epi32(ugy, ten_k);
-
-                // product_i = abs_ugx * TAN_B[i]; count where product > test_y
-                __m256i cnt = _mm256_and_si256(one32,
-                    _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan0), test_y));
-                cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
-                    _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan1), test_y)));
-                cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
-                    _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan2), test_y)));
-                cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
-                    _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan3), test_y)));
-
-                // ugx >= 0: bin = 4 - count
-                __m256i bin_pos = _mm256_sub_epi32(four, cnt);
-                // ugx < 0:  bin = (4 + count) & 7
-                __m256i bin_neg = _mm256_and_si256(
-                    _mm256_add_epi32(four, cnt), seven);
-
-                __m256i ugx_is_neg = _mm256_cmpgt_epi32(zero, ugx);
-                __m256i bin = _mm256_blendv_epi8(bin_pos, bin_neg, ugx_is_neg);
-
-                // Store 8 bins as uint8 (extract low byte of each int32)
-                // Only store where above threshold
-                alignas(32) int bin_arr[8];
-                _mm256_store_si256((__m256i*)bin_arr, bin);
-                for (int i = 0; i < 8; ++i) {
-                    if (above_bits & (1 << i))
-                        qr[c + i] = (uchar)bin_arr[i];
-                }
-            }
-#endif
-            // Scalar tail
-            for (; c < src.cols - 1; ++c) {
+            for (int c = 1; c < src.cols - 1; ++c) {
                 int gx = dx[c], gy = dy[c];
-                // Use int64 to avoid overflow: max Sobel 3x3 on uint8 is 1020,
-                // so 1020^2+1020^2=2M fits int32, but defensive for other kernels.
                 int mag_sq_i = (int)((int64_t)gx*gx + (int64_t)gy*gy);
                 if (mag_r) mag_r[c] = (float)mag_sq_i;
-
                 if (mag_sq_i <= threshold_sq_i) continue;
                 mask_r[c] = 0xFF;
-
                 int ugx = gx, ugy = gy;
                 if (ugy < 0) { ugx = -ugx; ugy = -ugy; }
                 if (ugy == 0 && ugx < 0) ugx = -ugx;
-
                 int bin;
                 if (ugx >= 0) {
-                    int test_y = ugy * 10000;
-                    if (test_y < ugx * TAN_B[0]) bin = 0;
-                    else if (test_y < ugx * TAN_B[1]) bin = 1;
-                    else if (test_y < ugx * TAN_B[2]) bin = 2;
-                    else if (test_y < ugx * TAN_B[3]) bin = 3;
+                    int ty = ugy * 10000;
+                    if      (ty < ugx * TAN_B[0]) bin = 0;
+                    else if (ty < ugx * TAN_B[1]) bin = 1;
+                    else if (ty < ugx * TAN_B[2]) bin = 2;
+                    else if (ty < ugx * TAN_B[3]) bin = 3;
                     else bin = 4;
                 } else {
-                    int agx = -ugx;
-                    int test_y = ugy * 10000;
-                    if (test_y < agx * TAN_B[0]) bin = 0;
-                    else if (test_y < agx * TAN_B[1]) bin = 7;
-                    else if (test_y < agx * TAN_B[2]) bin = 6;
-                    else if (test_y < agx * TAN_B[3]) bin = 5;
+                    int agx = -ugx, ty = ugy * 10000;
+                    if      (ty < agx * TAN_B[0]) bin = 0;
+                    else if (ty < agx * TAN_B[1]) bin = 7;
+                    else if (ty < agx * TAN_B[2]) bin = 6;
+                    else if (ty < agx * TAN_B[3]) bin = 5;
                     else bin = 4;
                 }
                 qr[c] = (uchar)bin;
             }
         }
-
         if (g_profile.enabled) g_profile.quantize_ms += pms(pt0);
 
         pt0 = pnow();
         angle = Mat::zeros(src.size(), CV_8U);
-
-        if (skip_voting) {
-        // Convert bin index to bitmask directly (skip 3x3 voting).
-        // The spread stage already does neighborhood OR, making voting redundant
-        // especially with higher edge thresholds (50/80) that reject noise.
-        #pragma omp parallel for schedule(static)
-        for (int r = 1; r < src.rows - 1; ++r) {
-            const uchar *qr = quantized_unfiltered.ptr<uchar>(r);
-            const uchar *mask_r = mag_mask.ptr<uchar>(r);
-            uchar *angle_r = angle.ptr<uchar>(r);
-            int c = 1;
-#ifdef __AVX2__
-            alignas(16) static const uchar bin_to_bit[16] = {
-                1, 2, 4, 8, 16, 32, 64, 128, 0, 0, 0, 0, 0, 0, 0, 0
-            };
-            const __m256i bit_lut = _mm256_broadcastsi128_si256(
-                _mm_load_si128((const __m128i*)bin_to_bit));
-            for (; c <= src.cols - 1 - 32; c += 32) {
-                __m256i bins = _mm256_loadu_si256((const __m256i*)(qr + c));
-                __m256i mag_ok = _mm256_loadu_si256((const __m256i*)(mask_r + c));
-                __m256i bitmask = _mm256_shuffle_epi8(bit_lut, bins);
-                _mm256_storeu_si256((__m256i*)(angle_r + c),
-                    _mm256_and_si256(bitmask, mag_ok));
-            }
-#endif
-            for (; c < src.cols - 1; ++c) {
-                if (mask_r[c])
-                    angle_r[c] = (uchar)(1 << qr[c]);
-            }
-        }
-        } else {
         // 3x3 neighborhood voting: keep bin only if >= NEIGHBOR_THRESHOLD neighbors agree.
 #ifdef __AVX2__
         alignas(16) static const uchar bin_to_bit[16] = {

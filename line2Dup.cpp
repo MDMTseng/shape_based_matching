@@ -1652,12 +1652,8 @@ std::vector<Match> Detector::match(Mat source, float threshold,
                 using PClock = std::chrono::high_resolution_clock;
                 auto fused_t0 = PClock::now();
 
-            // Two implementations:
-            // 1) Cell-level: process T×T cells directly, compute spread per sub-position
-            //    Better cache locality — loads each cell's data once
-            // 2) Row-level: original per-row pipeline with thread-local buffers
-#define SBM_FUSED_ANGLE_SPREAD 0  // WIP: needs architecture rework to access smoothed image here
-#if SBM_FUSED_ANGLE_SPREAD
+            // ROW-LEVEL fused spread+LUT+linearize.
+#if 0 // WIP experiments (disabled): SBM_FUSED_ANGLE_SPREAD, SBM_CELL_LEVEL_SPREAD
             // FUSED ANGLE+SPREAD: compute angle bitmask rows into ring buffer,
             // then spread+LUT+decimate from ring buffer. Eliminates 20MB angle image.
             // Sequential per-row (spread depends on adjacent angle rows) but
@@ -1798,10 +1794,6 @@ std::vector<Match> Detector::match(Mat source, float threshold,
                     g_profile.fused_spread_lut_ms += std::chrono::duration<double, std::milli>(
                         PClock::now() - fused_t0).count();
             } else
-#endif // SBM_FUSED_ANGLE_SPREAD
-
-#define SBM_CELL_LEVEL_SPREAD 0
-#if SBM_CELL_LEVEL_SPREAD
             // CELL-LEVEL: for each T×T cell, load (T+2*half)×(T+2*half) block,
             // compute spread for each sub-position, apply LUT, write to linear memories.
             {
@@ -1866,8 +1858,8 @@ std::vector<Match> Detector::match(Mat source, float threshold,
                     }
                 }
             }
-#else
-            // ROW-LEVEL: original fused spread+LUT+linearize per row.
+#endif // disabled WIP experiments
+            // FULLY FUSED: spread + computeResponseMaps + linearize in one pass.
             {
                 LinearMemories &memories = lm_level[i];
                 CV_Assert(quantized.rows % T == 0);
@@ -2124,7 +2116,6 @@ std::vector<Match> Detector::match(Mat source, float threshold,
                     }
                 }
             }
-#endif // SBM_CELL_LEVEL_SPREAD
 
                 if (g_profile.enabled)
                     g_profile.fused_spread_lut_ms += std::chrono::duration<double, std::milli>(

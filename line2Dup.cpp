@@ -2,6 +2,15 @@
 #include "sbm_log.h"
 #include <iostream>
 
+// Gradient kernel for fused quantize path:
+//   SBM_GRADIENT_KERNEL_CENTRAL_DIFF (0): p[c+1]-p[c-1], 4 loads, needs Gaussian pre-blur
+//   SBM_GRADIENT_KERNEL_SOBEL3X3     (1): Sobel 3x3, 8 loads, has built-in [1,2,1] smoothing
+#define SBM_GRADIENT_KERNEL_CENTRAL_DIFF 0
+#define SBM_GRADIENT_KERNEL_SOBEL3X3     1
+#ifndef SBM_GRADIENT_KERNEL
+#define SBM_GRADIENT_KERNEL SBM_GRADIENT_KERNEL_CENTRAL_DIFF
+#endif
+
 #ifdef __AVX2__
 #include <immintrin.h>
 #elif defined(_MSC_VER) && defined(__AVX2__)
@@ -383,27 +392,45 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
                 const __m256i tan3v = _mm256_set1_epi32(TAN_B[3]);
                 const __m256i one32 = _mm256_set1_epi32(1);
                 // L1 threshold: |dx|+|dy| > T is slightly more permissive than dx²+dy²>T²
-                // Central difference threshold (L2): dx²+dy² > T²
-                // Central diff max |dx|=255, so dx²+dy²=130050, needs int32 for threshold
-                // But we do L1 pre-filter in int16 first, then exact L2 on survivors
-                // L1 threshold = T/4 (central diff ~4× smaller than Sobel)
-                int cd_thresh = std::max(1, (int)threshold / 4);
-                const __m256i thresh_l1_v = _mm256_set1_epi16((short)cd_thresh);
-                int cd_thresh_sq = cd_thresh * cd_thresh;
-                const __m256i thresh_sq_v = _mm256_set1_epi32(cd_thresh_sq);
+                // Threshold scaling: central diff is ~4× smaller than Sobel
+#if SBM_GRADIENT_KERNEL == SBM_GRADIENT_KERNEL_CENTRAL_DIFF
+                int edge_thresh = std::max(1, (int)threshold / 4);
+#else
+                int edge_thresh = (int)threshold;
+#endif
+                const __m256i thresh_l1_v = _mm256_set1_epi16((short)edge_thresh);
+                const __m256i thresh_sq_v = _mm256_set1_epi32(edge_thresh * edge_thresh);
 
-                // Process 16 pixels at a time: central difference + L1 pre-filter,
-                // then L2 threshold + quantize on survivors
                 for (; c <= src.cols - 1 - 16; c += 16) {
-                    // Only 4 loads: left, right, up, down (no corners needed)
+#if SBM_GRADIENT_KERNEL == SBM_GRADIENT_KERNEL_CENTRAL_DIFF
+                    // Central difference: 4 loads, needs pre-blur (Gaussian)
                     __m256i curr_l = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i*)(row_curr + c - 1)));
                     __m256i curr_r = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i*)(row_curr + c + 1)));
                     __m256i prev_c = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i*)(row_prev + c)));
                     __m256i next_c = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i*)(row_next + c)));
-
-                    // Central difference: dx = p[c+1] - p[c-1], dy = p[r+1] - p[r-1]
                     __m256i gx16 = _mm256_sub_epi16(curr_r, curr_l);
                     __m256i gy16 = _mm256_sub_epi16(next_c, prev_c);
+#else
+                    // Sobel 3x3: 8 loads (3 per row + shifts), built-in [1,2,1] smoothing
+                    __m128i prev_raw = _mm_loadu_si128((const __m128i*)(row_prev + c - 1));
+                    __m128i curr_raw = _mm_loadu_si128((const __m128i*)(row_curr + c - 1));
+                    __m128i next_raw = _mm_loadu_si128((const __m128i*)(row_next + c - 1));
+                    // Widen to int16 for 16-wide processing (only need first 16 pixels from 18-byte load)
+                    __m256i prev_l = _mm256_cvtepu8_epi16(prev_raw);
+                    __m256i prev_c = _mm256_cvtepu8_epi16(_mm_srli_si128(prev_raw, 1));
+                    __m256i prev_r = _mm256_cvtepu8_epi16(_mm_srli_si128(prev_raw, 2));
+                    __m256i curr_l = _mm256_cvtepu8_epi16(curr_raw);
+                    __m256i curr_r = _mm256_cvtepu8_epi16(_mm_srli_si128(curr_raw, 2));
+                    __m256i next_l = _mm256_cvtepu8_epi16(next_raw);
+                    __m256i next_c = _mm256_cvtepu8_epi16(_mm_srli_si128(next_raw, 1));
+                    __m256i next_r = _mm256_cvtepu8_epi16(_mm_srli_si128(next_raw, 2));
+                    __m256i gx16 = _mm256_add_epi16(
+                        _mm256_add_epi16(_mm256_sub_epi16(prev_r, prev_l), _mm256_sub_epi16(next_r, next_l)),
+                        _mm256_slli_epi16(_mm256_sub_epi16(curr_r, curr_l), 1));
+                    __m256i gy16 = _mm256_sub_epi16(
+                        _mm256_add_epi16(_mm256_add_epi16(next_l, next_r), _mm256_slli_epi16(next_c, 1)),
+                        _mm256_add_epi16(_mm256_add_epi16(prev_l, prev_r), _mm256_slli_epi16(prev_c, 1)));
+#endif
 
                     // L1 pre-filter in int16 (fast rejection of most pixels)
                     __m256i l1_mag = _mm256_adds_epu16(
@@ -498,12 +525,20 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
 #endif
                 // Scalar tail
                 for (; c < src.cols - 1; ++c) {
-                    // Central difference (matches SIMD path)
+#if SBM_GRADIENT_KERNEL == SBM_GRADIENT_KERNEL_CENTRAL_DIFF
+                    // Central difference
                     int gx = row_curr[c+1] - row_curr[c-1];
                     int gy = row_next[c] - row_prev[c];
-                    // L2 threshold scaled for central diff (~4× smaller than Sobel)
-                    int cd_t = std::max(1, (int)threshold / 4);
-                    if (gx*gx + gy*gy <= cd_t * cd_t) continue;
+                    int et = std::max(1, (int)threshold / 4);
+#else
+                    // Sobel 3x3
+                    int gx = (row_prev[c+1] - row_prev[c-1]) + 2*(row_curr[c+1] - row_curr[c-1])
+                           + (row_next[c+1] - row_next[c-1]);
+                    int gy = (row_next[c-1] + 2*row_next[c] + row_next[c+1])
+                           - (row_prev[c-1] + 2*row_prev[c] + row_prev[c+1]);
+                    int et = (int)threshold;
+#endif
+                    if (gx*gx + gy*gy <= et * et) continue;
                     int ugx = gx, ugy = gy;
                     if (ugy < 0) { ugx = -ugx; ugy = -ugy; }
                     if (ugy == 0 && ugx < 0) ugx = -ugx;

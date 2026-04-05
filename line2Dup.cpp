@@ -364,44 +364,20 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
         int threshold_sq_i = (int)threshold_sq;
 
         if (skip_voting && match_only) {
-            // Fully fused path: gradient + quantize + bitmask in one pass.
-            //
-            // Optionally downsample before gradient computation:
-            // An 11×11 Gaussian at full res ≈ 5×5 at half res, so the smoothed
-            // image is already band-limited. Computing gradients at half res
-            // then upsampling the bitmask gives ~4× fewer gradient computations.
-            // Angle quantization (8 bins) is scale-invariant for strong edges.
-#define SBM_GRADIENT_DOWNSAMPLE 1  // 1 = full res (default), 2 = half res gradient
-            Mat grad_src;
-            int grad_ds = SBM_GRADIENT_DOWNSAMPLE;
-            if (grad_ds > 1) {
-                // Fast subsample: just take every grad_ds-th pixel (no interpolation).
-                // The image is already Gaussian-smoothed so aliasing is minimal.
-                int dw = smoothed.cols / grad_ds, dh = smoothed.rows / grad_ds;
-                grad_src.create(dh, dw, CV_8U);
-                #pragma omp parallel for schedule(static)
-                for (int r = 0; r < dh; ++r) {
-                    const uchar *src_row = smoothed.ptr<uchar>(r * grad_ds);
-                    uchar *dst_row = grad_src.ptr<uchar>(r);
-                    for (int c = 0; c < dw; ++c)
-                        dst_row[c] = src_row[c * grad_ds];
-                }
-            } else {
-                grad_src = smoothed;
-            }
-            // Compute gradient + quantize on grad_src (may be downsampled)
+            // Fully fused path: Sobel + Quantize + Bitmask in one pass.
+            // Reads smoothed image once, writes angle bitmask once.
+            // Eliminates dx, dy, quantized_unfiltered, mag_mask intermediates.
+            // Memory traffic: read ~60MB (3 rows × width per pixel) → write 20MB = ~80MB
+            // vs original: ~340MB across separate Sobel+Quantize+Vote passes.
             pt0 = pnow();
-            Mat angle_grad = Mat::zeros(grad_src.size(), CV_8U);
-            int grad_cols = grad_src.cols, grad_rows = grad_src.rows;
-            // Scale threshold for downsampled gradient (pixel differences are similar
-            // after area-based downsampling, so threshold stays roughly the same)
+            angle = Mat::zeros(src.size(), CV_8U);
 
             #pragma omp parallel for schedule(static)
-            for (int r = 1; r < grad_rows - 1; ++r) {
-                const uchar *row_prev = grad_src.ptr<uchar>(r-1);
-                const uchar *row_curr = grad_src.ptr<uchar>(r);
-                const uchar *row_next = grad_src.ptr<uchar>(r+1);
-                uchar *angle_r = angle_grad.ptr<uchar>(r);
+            for (int r = 1; r < src.rows - 1; ++r) {
+                const uchar *row_prev = smoothed.ptr<uchar>(r-1);
+                const uchar *row_curr = smoothed.ptr<uchar>(r);
+                const uchar *row_next = smoothed.ptr<uchar>(r+1);
+                uchar *angle_r = angle.ptr<uchar>(r);
 
                 int c = 1;
 #ifdef __AVX2__
@@ -425,7 +401,7 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
                 const __m256i thresh_l1_v = _mm256_set1_epi16((short)edge_thresh);
                 const __m256i thresh_sq_v = _mm256_set1_epi32(edge_thresh * edge_thresh);
 
-                for (; c <= grad_cols - 1 - 16; c += 16) {
+                for (; c <= src.cols - 1 - 16; c += 16) {
 #if SBM_GRADIENT_KERNEL == SBM_GRADIENT_KERNEL_CENTRAL_DIFF
                     // Central difference: 4 loads, needs pre-blur (Gaussian)
                     __m256i curr_l = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i*)(row_curr + c - 1)));
@@ -548,7 +524,7 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
                 }
 #endif
                 // Scalar tail
-                for (; c < grad_cols - 1; ++c) {
+                for (; c < src.cols - 1; ++c) {
 #if SBM_GRADIENT_KERNEL == SBM_GRADIENT_KERNEL_CENTRAL_DIFF
                     // Central difference
                     int gx = row_curr[c+1] - row_curr[c-1];
@@ -585,16 +561,9 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
                     angle_r[c] = (uchar)(1 << bin);
                 }
             }
-
-            // Upsample angle bitmask back to full resolution if downsampled
-            if (grad_ds > 1) {
-                resize(angle_grad, angle, src.size(), 0, 0, INTER_NEAREST);
-            } else {
-                angle = angle_grad;
-            }
-
             if (g_profile.enabled) {
                 g_profile.sobel_ms += pms(pt0);
+                // quantize+voting time is included in sobel_ms for fused path
             }
         } else {
         // Non-fused path: separate Sobel → Quantize → Vote

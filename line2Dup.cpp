@@ -329,7 +329,8 @@ void hysteresisGradient(Mat &magnitude, Mat &quantized_angle,
 static void quantizedOrientations(const Mat &src, Mat &magnitude,
                                   Mat &angle, Mat& angle_ori, float threshold,
                                   int blur_kernel_size = 7,
-                                  bool match_only = false)
+                                  bool match_only = false,
+                                  bool skip_voting = false)
 {
     using PClock = std::chrono::high_resolution_clock;
     auto pnow = []() { return PClock::now(); };
@@ -347,49 +348,26 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
     if (g_profile.enabled) g_profile.blur_ms += pms(pt0);
 
     if(src.channels() == 1){
-        Mat sobel_dx_16s, sobel_dy_16s;
-        pt0 = pnow();
-        // Run dx and dy Sobel in parallel OpenMP sections
-        #pragma omp parallel sections
-        {
-            #pragma omp section
-            Sobel(smoothed, sobel_dx_16s, CV_16S, 1, 0, 3, 1.0, 0.0, BORDER_REPLICATE);
-            #pragma omp section
-            Sobel(smoothed, sobel_dy_16s, CV_16S, 0, 1, 3, 1.0, 0.0, BORDER_REPLICATE);
-        }
-        if (g_profile.enabled) g_profile.sobel_ms += pms(pt0);
 
-        if (!match_only) {
-            // Squared magnitude (float) for threshold compatibility — only needed for template extraction
-            magnitude.create(src.size(), CV_32F);
-            magnitude.setTo(0);
-
-            // angle_ori: compute per-feature atan2 during training, not per-pixel.
-            angle_ori.create(src.size(), CV_32F);
-            angle_ori.setTo(0);
-        }
-
-        // Direct 8-bin quantization from dx, dy (no atan2).
-        // Undirected gradients: [0,180) mapped to 8 bins of 22.5 deg each.
-        // Bin centers: 0, 22.5, 45, 67.5, 90, 112.5, 135, 157.5
         // Fixed-point tan boundaries for 8-bin orientation quantization.
-        // Values are tan(22.5°), tan(45°), tan(67.5°), tan(∞) scaled by 2^15
         static const int TAN_B[4] = {1989, 6682, 14966, 50273};
+        float threshold_sq = threshold * threshold;
+        int threshold_sq_i = (int)threshold_sq;
 
-        // Skip the old quantize loop — handled in fused or voting path below.
-
-        if (skip_voting) {
-        if (g_profile.enabled) g_profile.quantize_ms += pms(pt0);
-            // Fused path: quantize dx/dy → bitmask directly into angle.
-            // Eliminates quantized_unfiltered and mag_mask intermediates (~80MB at 20MP).
+        if (skip_voting && match_only) {
+            // Fully fused path: Sobel + Quantize + Bitmask in one pass.
+            // Reads smoothed image once, writes angle bitmask once.
+            // Eliminates dx, dy, quantized_unfiltered, mag_mask intermediates.
+            // Memory traffic: read ~60MB (3 rows × width per pixel) → write 20MB = ~80MB
+            // vs original: ~340MB across separate Sobel+Quantize+Vote passes.
             pt0 = pnow();
             angle = Mat::zeros(src.size(), CV_8U);
 
             #pragma omp parallel for schedule(static)
             for (int r = 1; r < src.rows - 1; ++r) {
-                const short *dx = sobel_dx_16s.ptr<short>(r);
-                const short *dy = sobel_dy_16s.ptr<short>(r);
-                float *mag_r = match_only ? nullptr : magnitude.ptr<float>(r);
+                const uchar *row_prev = smoothed.ptr<uchar>(r-1);
+                const uchar *row_curr = smoothed.ptr<uchar>(r);
+                const uchar *row_next = smoothed.ptr<uchar>(r+1);
                 uchar *angle_r = angle.ptr<uchar>(r);
 
                 int c = 1;
@@ -398,28 +376,49 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
                 const __m256i four = _mm256_set1_epi32(4);
                 const __m256i seven = _mm256_set1_epi32(7);
                 const __m256i ten_k = _mm256_set1_epi32(10000);
-                const __m256i tan0 = _mm256_set1_epi32(TAN_B[0]);
-                const __m256i tan1 = _mm256_set1_epi32(TAN_B[1]);
-                const __m256i tan2 = _mm256_set1_epi32(TAN_B[2]);
-                const __m256i tan3 = _mm256_set1_epi32(TAN_B[3]);
+                const __m256i tan0v = _mm256_set1_epi32(TAN_B[0]);
+                const __m256i tan1v = _mm256_set1_epi32(TAN_B[1]);
+                const __m256i tan2v = _mm256_set1_epi32(TAN_B[2]);
+                const __m256i tan3v = _mm256_set1_epi32(TAN_B[3]);
                 const __m256i thresh_v = _mm256_set1_epi32(threshold_sq_i);
                 const __m256i one32 = _mm256_set1_epi32(1);
-                // LUT: bin (0-7) → bitmask (1<<bin)
-                alignas(16) static const uchar b2b[16] = {1,2,4,8,16,32,64,128,0,0,0,0,0,0,0,0};
-                const __m256i bit_lut = _mm256_broadcastsi128_si256(_mm_load_si128((const __m128i*)b2b));
 
+                // Process 8 pixels at a time
                 for (; c <= src.cols - 1 - 8; c += 8) {
-                    __m128i dx8 = _mm_loadu_si128((const __m128i*)(dx + c));
-                    __m128i dy8 = _mm_loadu_si128((const __m128i*)(dy + c));
-                    __m256i gx = _mm256_cvtepi16_epi32(dx8);
-                    __m256i gy = _mm256_cvtepi16_epi32(dy8);
+                    // Inline Sobel 3x3: load 3 rows, compute dx and dy
+                    // dx = (p[r-1][c+1] - p[r-1][c-1]) + 2*(p[r][c+1] - p[r][c-1]) + (p[r+1][c+1] - p[r+1][c-1])
+                    // dy = (p[r+1][c-1] + 2*p[r+1][c] + p[r+1][c+1]) - (p[r-1][c-1] + 2*p[r-1][c] + p[r-1][c+1])
+
+                    // Load 8 pixels from each position, widen uint8 → int32
+                    // Top row
+                    __m256i tl = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)(row_prev + c - 1)));
+                    __m256i tc = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)(row_prev + c)));
+                    __m256i tr = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)(row_prev + c + 1)));
+                    // Middle row
+                    __m256i ml = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)(row_curr + c - 1)));
+                    __m256i mr = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)(row_curr + c + 1)));
+                    // Bottom row
+                    __m256i bl = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)(row_next + c - 1)));
+                    __m256i bc = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)(row_next + c)));
+                    __m256i br = _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)(row_next + c + 1)));
+
+                    // dx = (tr - tl) + 2*(mr - ml) + (br - bl)
+                    __m256i gx = _mm256_add_epi32(
+                        _mm256_add_epi32(_mm256_sub_epi32(tr, tl), _mm256_sub_epi32(br, bl)),
+                        _mm256_slli_epi32(_mm256_sub_epi32(mr, ml), 1));
+                    // dy = (bl + 2*bc + br) - (tl + 2*tc + tr)
+                    __m256i gy = _mm256_sub_epi32(
+                        _mm256_add_epi32(_mm256_add_epi32(bl, br), _mm256_slli_epi32(bc, 1)),
+                        _mm256_add_epi32(_mm256_add_epi32(tl, tr), _mm256_slli_epi32(tc, 1)));
+
+                    // Magnitude squared + threshold
                     __m256i mag_sq = _mm256_add_epi32(
                         _mm256_mullo_epi32(gx, gx), _mm256_mullo_epi32(gy, gy));
-                    if (mag_r) _mm256_storeu_ps(mag_r + c, _mm256_cvtepi32_ps(mag_sq));
                     __m256i above = _mm256_cmpgt_epi32(mag_sq, thresh_v);
                     int above_bits = _mm256_movemask_ps(_mm256_castsi256_ps(above));
                     if (above_bits == 0) continue;
 
+                    // Quantize to 8-bin orientation
                     __m256i gy_neg = _mm256_cmpgt_epi32(zero, gy);
                     __m256i ugx = _mm256_blendv_epi8(gx, _mm256_sub_epi32(zero, gx), gy_neg);
                     __m256i ugy = _mm256_blendv_epi8(gy, _mm256_sub_epi32(zero, gy), gy_neg);
@@ -431,19 +430,19 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
                     __m256i abs_ugx = _mm256_abs_epi32(ugx);
                     __m256i test_y = _mm256_mullo_epi32(ugy, ten_k);
                     __m256i cnt = _mm256_and_si256(one32,
-                        _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan0), test_y));
+                        _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan0v), test_y));
                     cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
-                        _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan1), test_y)));
+                        _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan1v), test_y)));
                     cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
-                        _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan2), test_y)));
+                        _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan2v), test_y)));
                     cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
-                        _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan3), test_y)));
+                        _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan3v), test_y)));
                     __m256i bin = _mm256_blendv_epi8(
                         _mm256_sub_epi32(four, cnt),
                         _mm256_and_si256(_mm256_add_epi32(four, cnt), seven),
                         _mm256_cmpgt_epi32(zero, ugx));
 
-                    // Convert 8 int32 bins to bitmask bytes, masked by threshold
+                    // Write bitmask where above threshold
                     alignas(32) int bin_arr[8];
                     _mm256_store_si256((__m256i*)bin_arr, bin);
                     for (int i = 0; i < 8; ++i) {
@@ -452,7 +451,73 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
                     }
                 }
 #endif
+                // Scalar tail
                 for (; c < src.cols - 1; ++c) {
+                    // Inline Sobel 3x3
+                    int gx = (row_prev[c+1] - row_prev[c-1]) + 2*(row_curr[c+1] - row_curr[c-1])
+                           + (row_next[c+1] - row_next[c-1]);
+                    int gy = (row_next[c-1] + 2*row_next[c] + row_next[c+1])
+                           - (row_prev[c-1] + 2*row_prev[c] + row_prev[c+1]);
+                    int mag_sq_i = gx*gx + gy*gy;
+                    if (mag_sq_i <= threshold_sq_i) continue;
+                    int ugx = gx, ugy = gy;
+                    if (ugy < 0) { ugx = -ugx; ugy = -ugy; }
+                    if (ugy == 0 && ugx < 0) ugx = -ugx;
+                    int bin;
+                    if (ugx >= 0) {
+                        int ty = ugy * 10000;
+                        if      (ty < ugx * TAN_B[0]) bin = 0;
+                        else if (ty < ugx * TAN_B[1]) bin = 1;
+                        else if (ty < ugx * TAN_B[2]) bin = 2;
+                        else if (ty < ugx * TAN_B[3]) bin = 3;
+                        else bin = 4;
+                    } else {
+                        int agx = -ugx, ty = ugy * 10000;
+                        if      (ty < agx * TAN_B[0]) bin = 0;
+                        else if (ty < agx * TAN_B[1]) bin = 7;
+                        else if (ty < agx * TAN_B[2]) bin = 6;
+                        else if (ty < agx * TAN_B[3]) bin = 5;
+                        else bin = 4;
+                    }
+                    angle_r[c] = (uchar)(1 << bin);
+                }
+            }
+            if (g_profile.enabled) {
+                g_profile.sobel_ms += pms(pt0);
+                // quantize+voting time is included in sobel_ms for fused path
+            }
+        } else {
+        // Non-fused path: separate Sobel → Quantize → Vote
+        Mat sobel_dx_16s, sobel_dy_16s;
+        pt0 = pnow();
+        #pragma omp parallel sections
+        {
+            #pragma omp section
+            Sobel(smoothed, sobel_dx_16s, CV_16S, 1, 0, 3, 1.0, 0.0, BORDER_REPLICATE);
+            #pragma omp section
+            Sobel(smoothed, sobel_dy_16s, CV_16S, 0, 1, 3, 1.0, 0.0, BORDER_REPLICATE);
+        }
+        if (g_profile.enabled) g_profile.sobel_ms += pms(pt0);
+
+        if (!match_only) {
+            magnitude.create(src.size(), CV_32F);
+            magnitude.setTo(0);
+            angle_ori.create(src.size(), CV_32F);
+            angle_ori.setTo(0);
+        }
+
+        if (skip_voting) {
+            // Fused quantize+bitmask (but separate from Sobel)
+            pt0 = pnow();
+            angle = Mat::zeros(src.size(), CV_8U);
+
+            #pragma omp parallel for schedule(static)
+            for (int r = 1; r < src.rows - 1; ++r) {
+                const short *dx = sobel_dx_16s.ptr<short>(r);
+                const short *dy = sobel_dy_16s.ptr<short>(r);
+                float *mag_r = match_only ? nullptr : magnitude.ptr<float>(r);
+                uchar *angle_r = angle.ptr<uchar>(r);
+                for (int c = 1; c < src.cols - 1; ++c) {
                     int gx = dx[c], gy = dy[c];
                     int mag_sq_i = (int)((int64_t)gx*gx + (int64_t)gy*gy);
                     if (mag_r) mag_r[c] = (float)mag_sq_i;
@@ -606,6 +671,7 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
         } // end voting
 
         if (g_profile.enabled) g_profile.voting_ms += pms(pt0);
+        } // end non-fused path
 
     }else{
 
@@ -700,7 +766,7 @@ ColorGradientPyramid::ColorGradientPyramid(const Mat &_src, const Mat &_mask,
 
 void ColorGradientPyramid::update()
 {
-    quantizedOrientations(src, magnitude, angle, angle_ori, weak_threshold, blur_kernel_size, match_only);
+    quantizedOrientations(src, magnitude, angle, angle_ori, weak_threshold, blur_kernel_size, match_only, skip_voting);
 }
 
 void ColorGradientPyramid::pyrDown()

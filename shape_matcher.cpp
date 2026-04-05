@@ -919,8 +919,13 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
     // Run meiqua matching
     auto raw_matches = impl_->detector.match(padded, cfg.min_score, class_ids);
 
-    // NMS
+    // NMS — auto radius from template size if not set
     float nms_r = cfg.nms_radius;
+    if (nms_r < 0 && !impl_->models.empty()) {
+        auto& fs = impl_->models[0].features;
+        nms_r = std::min(fs.templ_width, fs.templ_height) / 2.0f;
+    }
+    if (nms_r < 1) nms_r = 1;
     std::vector<line2Dup::Match> nms_matches;
     for (auto& m : raw_matches) {
         bool suppressed = false;

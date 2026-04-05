@@ -281,6 +281,9 @@ struct MatchConfig {
     // Edge gradient thresholds for feature extraction
     float weak_threshold = 50.0f;    ///< Min gradient magnitude to be an edge candidate
     float strong_threshold = 80.0f;  ///< Gradient magnitude for strong edge preference
+
+    bool skip_voting = false;        ///< Skip 3x3 neighborhood voting (saves ~7ms at 20MP).
+                                     ///< Safe to enable with higher edge thresholds (50/80).
 };
 
 // ============================================================

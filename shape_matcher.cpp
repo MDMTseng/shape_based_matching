@@ -1812,8 +1812,9 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
             class_ids.push_back(m.class_id_flip);
     }
 
-    // Apply blur kernel size from config
+    // Apply config to modality
     impl_->detector.getModalities()->blur_kernel_size = cfg.blur_kernel_size;
+    impl_->detector.getModalities()->skip_voting = cfg.skip_voting;
 
     // Run meiqua matching
     auto raw_matches = impl_->detector.match(padded, cfg.min_score, class_ids);

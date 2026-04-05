@@ -82,6 +82,7 @@ public:
     size_t num_features;
     float strong_threshold;
     int blur_kernel_size;  ///< Gaussian blur kernel size before Sobel (default 7, increase for noise)
+    bool skip_voting = false;  ///< Skip 3x3 neighborhood voting
     static bool selectScatteredFeatures(const std::vector<Candidate> &candidates,
                                                                             std::vector<Feature> &features,
                                                                             size_t num_features, float distance);
@@ -100,6 +101,7 @@ public:
     size_t num_features;
     float strong_threshold;
     int blur_kernel_size = 7;  ///< Gaussian blur before Sobel (7=default, increase for noise e.g. 11, 15)
+    bool skip_voting = true;   ///< Skip 3x3 neighborhood voting (spread already covers it)
     void read(const cv::FileNode &fn);
     void write(cv::FileStorage &fs) const;
 
@@ -108,6 +110,7 @@ public:
     {
         auto p = cv::makePtr<ColorGradientPyramid>(src, mask, weak_threshold, num_features, strong_threshold, match_only);
         p->blur_kernel_size = blur_kernel_size;
+        p->skip_voting = skip_voting;
         return p;
     }
 };

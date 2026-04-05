@@ -514,14 +514,41 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
 
         if (g_profile.enabled) g_profile.quantize_ms += pms(pt0);
 
-        // Step 2: AVX2-vectorized 3x3 neighborhood voting.
-        // For each pixel, count how many of its 8 neighbors share its bin.
-        // Process 32 pixels at a time with SIMD equality comparisons.
         pt0 = pnow();
         angle = Mat::zeros(src.size(), CV_8U);
 
+        if (skip_voting) {
+        // Convert bin index to bitmask directly (skip 3x3 voting).
+        // The spread stage already does neighborhood OR, making voting redundant
+        // especially with higher edge thresholds (50/80) that reject noise.
+        #pragma omp parallel for schedule(static)
+        for (int r = 1; r < src.rows - 1; ++r) {
+            const uchar *qr = quantized_unfiltered.ptr<uchar>(r);
+            const uchar *mask_r = mag_mask.ptr<uchar>(r);
+            uchar *angle_r = angle.ptr<uchar>(r);
+            int c = 1;
 #ifdef __AVX2__
-        // LUT: bin index (0-7) → bitmask (1<<bin)
+            alignas(16) static const uchar bin_to_bit[16] = {
+                1, 2, 4, 8, 16, 32, 64, 128, 0, 0, 0, 0, 0, 0, 0, 0
+            };
+            const __m256i bit_lut = _mm256_broadcastsi128_si256(
+                _mm_load_si128((const __m128i*)bin_to_bit));
+            for (; c <= src.cols - 1 - 32; c += 32) {
+                __m256i bins = _mm256_loadu_si256((const __m256i*)(qr + c));
+                __m256i mag_ok = _mm256_loadu_si256((const __m256i*)(mask_r + c));
+                __m256i bitmask = _mm256_shuffle_epi8(bit_lut, bins);
+                _mm256_storeu_si256((__m256i*)(angle_r + c),
+                    _mm256_and_si256(bitmask, mag_ok));
+            }
+#endif
+            for (; c < src.cols - 1; ++c) {
+                if (mask_r[c])
+                    angle_r[c] = (uchar)(1 << qr[c]);
+            }
+        }
+        } else {
+        // 3x3 neighborhood voting: keep bin only if >= NEIGHBOR_THRESHOLD neighbors agree.
+#ifdef __AVX2__
         alignas(16) static const uchar bin_to_bit[16] = {
             1, 2, 4, 8, 16, 32, 64, 128, 0, 0, 0, 0, 0, 0, 0, 0
         };
@@ -529,7 +556,6 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
             _mm_load_si128((const __m128i*)bin_to_bit));
         const __m256i one = _mm256_set1_epi8(1);
         const __m256i thresh_vote = _mm256_set1_epi8((char)(NEIGHBOR_THRESHOLD - 1));
-        // cmpgt > (THRESHOLD-1) means >= THRESHOLD
 
         #pragma omp parallel for schedule(static)
         for (int r = 1; r < src.rows - 1; ++r) {
@@ -541,10 +567,7 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
 
             int c = 1;
             for (; c <= src.cols - 1 - 32; c += 32) {
-                // Load center pixels
                 __m256i center = _mm256_loadu_si256((const __m256i*)(q_curr + c));
-
-                // Count matching neighbors (start with 1 for center)
                 __m256i votes = one;
                 votes = _mm256_add_epi8(votes, _mm256_and_si256(one,
                     _mm256_cmpeq_epi8(center, _mm256_loadu_si256((const __m256i*)(q_prev + c - 1)))));
@@ -562,41 +585,26 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
                     _mm256_cmpeq_epi8(center, _mm256_loadu_si256((const __m256i*)(q_next + c)))));
                 votes = _mm256_add_epi8(votes, _mm256_and_si256(one,
                     _mm256_cmpeq_epi8(center, _mm256_loadu_si256((const __m256i*)(q_next + c + 1)))));
-
-                // votes >= NEIGHBOR_THRESHOLD?
                 __m256i pass = _mm256_cmpgt_epi8(votes, thresh_vote);
-
-                // Magnitude mask
                 __m256i mag_ok = _mm256_loadu_si256((const __m256i*)(mask_r + c));
-
-                // Convert bin to bitmask: 1 << center_bin
                 __m256i bitmask = _mm256_shuffle_epi8(bit_lut, center);
-
-                // Result: bitmask where both pass and mag_ok
-                __m256i result = _mm256_and_si256(bitmask, _mm256_and_si256(pass, mag_ok));
-                _mm256_storeu_si256((__m256i*)(angle_r + c), result);
+                _mm256_storeu_si256((__m256i*)(angle_r + c),
+                    _mm256_and_si256(bitmask, _mm256_and_si256(pass, mag_ok)));
             }
-
-            // Scalar tail
             for (; c < src.cols - 1; ++c) {
                 if (mask_r[c]) {
                     uchar center_bin = q_curr[c];
                     int votes = 1;
-                    votes += (q_prev[c-1] == center_bin);
-                    votes += (q_prev[c]   == center_bin);
-                    votes += (q_prev[c+1] == center_bin);
-                    votes += (q_curr[c-1] == center_bin);
-                    votes += (q_curr[c+1] == center_bin);
-                    votes += (q_next[c-1] == center_bin);
-                    votes += (q_next[c]   == center_bin);
-                    votes += (q_next[c+1] == center_bin);
+                    votes += (q_prev[c-1] == center_bin); votes += (q_prev[c] == center_bin);
+                    votes += (q_prev[c+1] == center_bin); votes += (q_curr[c-1] == center_bin);
+                    votes += (q_curr[c+1] == center_bin); votes += (q_next[c-1] == center_bin);
+                    votes += (q_next[c] == center_bin);   votes += (q_next[c+1] == center_bin);
                     if (votes >= NEIGHBOR_THRESHOLD)
                         angle_r[c] = (uchar)(1 << center_bin);
                 }
             }
         }
 #else
-        // Scalar-only voting fallback
         #pragma omp parallel for schedule(static)
         for (int r = 1; r < src.rows - 1; ++r) {
             const uchar *q_prev = quantized_unfiltered.ptr<uchar>(r-1);
@@ -608,20 +616,17 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
                 if (mask_r[c]) {
                     uchar center_bin = q_curr[c];
                     int votes = 1;
-                    votes += (q_prev[c-1] == center_bin);
-                    votes += (q_prev[c]   == center_bin);
-                    votes += (q_prev[c+1] == center_bin);
-                    votes += (q_curr[c-1] == center_bin);
-                    votes += (q_curr[c+1] == center_bin);
-                    votes += (q_next[c-1] == center_bin);
-                    votes += (q_next[c]   == center_bin);
-                    votes += (q_next[c+1] == center_bin);
+                    votes += (q_prev[c-1] == center_bin); votes += (q_prev[c] == center_bin);
+                    votes += (q_prev[c+1] == center_bin); votes += (q_curr[c-1] == center_bin);
+                    votes += (q_curr[c+1] == center_bin); votes += (q_next[c-1] == center_bin);
+                    votes += (q_next[c] == center_bin);   votes += (q_next[c+1] == center_bin);
                     if (votes >= NEIGHBOR_THRESHOLD)
                         angle_r[c] = (uchar)(1 << center_bin);
                 }
             }
         }
 #endif
+        } // end voting
 
         if (g_profile.enabled) g_profile.voting_ms += pms(pt0);
 

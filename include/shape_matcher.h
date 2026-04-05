@@ -266,6 +266,8 @@ struct MatchConfig {
                                     ///< but different angles (>nms_angle) are kept.
                                     ///< Set to 30 for angle-aware NMS (noisy scenes).
     float match_scale = 1.0f;      ///< Scene downscale for faster matching (e.g., 0.5)
+    bool match_scale_reextract = true;  ///< Re-extract features from downscaled template (recommended)
+    std::vector<int> T_levels = {4, 8};  ///< Pyramid decimation strides (default {4,8})
     RefineMode refine = RefineMode::ICP;
 
     // ICP config (used when refine == ICP)

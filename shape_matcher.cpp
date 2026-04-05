@@ -1531,10 +1531,21 @@ struct ShapeMatcher::Impl {
     std::vector<ModelInfo> models;
     int total_templates = 0;
 
+    // Scaled detector for match_scale < 1.0: features re-extracted from
+    // downscaled template so orientation labels align with the downscaled scene.
+    std::unique_ptr<line2Dup::Detector> scaled_detector;
+    float scaled_match_scale = 1.0f;
+
     Impl(const MatchConfig& cfg)
         : match_config(cfg),
-          detector(128, {4, 8},
-                   cfg.weak_threshold, cfg.strong_threshold) {}
+          detector(128, cfg.T_levels,
+                   cfg.weak_threshold, cfg.strong_threshold) {
+        if (cfg.match_scale < 1.0f && cfg.match_scale > 0.1f && cfg.match_scale_reextract) {
+            scaled_detector.reset(new line2Dup::Detector(
+                128, cfg.T_levels, cfg.weak_threshold, cfg.strong_threshold));
+            scaled_match_scale = cfg.match_scale;
+        }
+    }
 
     // Convert FeatureSet to meiqua TemplatePyramid
     static void featureSetToTemplates(const FeatureSet& fs,
@@ -1576,11 +1587,12 @@ struct ShapeMatcher::Impl {
         return flipped;
     }
 
-    // Add templates for one model at one scale
-    int addModelAtScale(const std::string& class_id,
-                        const FeatureSet& fs,
-                        const AngleRange& angle,
-                        float scale) {
+    // Add templates for one model at one scale to a given detector
+    int addModelAtScaleTo(line2Dup::Detector& det,
+                          const std::string& class_id,
+                          const FeatureSet& fs,
+                          const AngleRange& angle,
+                          float scale) {
         // Convert to meiqua templates
         std::vector<line2Dup::Template> base_tp;
         featureSetToTemplates(fs, base_tp);
@@ -1600,7 +1612,7 @@ struct ShapeMatcher::Impl {
         }
 
         // Add base (0-degree) template
-        auto& tps = detector.getClassTemplates(class_id);
+        auto& tps = det.getClassTemplates(class_id);
         tps.push_back(base_tp);
         int count = 1;
 
@@ -1655,6 +1667,14 @@ struct ShapeMatcher::Impl {
             count++;
         }
         return count;
+    }
+
+    // Convenience: add to main detector
+    int addModelAtScale(const std::string& class_id,
+                        const FeatureSet& fs,
+                        const AngleRange& angle,
+                        float scale) {
+        return addModelAtScaleTo(detector, class_id, fs, angle, scale);
     }
 };
 
@@ -1775,6 +1795,41 @@ int ShapeMatcher::addModel(const std::string& name,
         s += config.scale.step;
     } while (s <= config.scale.max + 0.001f && config.scale.max > config.scale.min);
 
+    // Build scaled templates for match_scale < 1.0
+    // Re-extract features from downscaled template so orientation labels
+    // align with the downscaled scene's gradient field.
+    if (impl_->scaled_detector && !features.templ_image.empty()) {
+        float ms = impl_->scaled_match_scale;
+        cv::Mat small_templ;
+        cv::resize(features.templ_image, small_templ,
+                   cv::Size((int)(features.templ_image.cols * ms + 0.5f),
+                            (int)(features.templ_image.rows * ms + 0.5f)));
+        auto scaled_feat = extractFeatures(small_templ, cv::Mat(), 128,
+                                           impl_->match_config.T_levels);
+
+        // Skip if extraction failed (template too small)
+        if (scaled_feat.levels.empty() ||
+            scaled_feat.levels[0].features.size() < 5) {
+            sbm_log(sbm::LogLevel::Warning, "match_scale",
+                    "scale %.2f: template too small, falling back to full-res", ms);
+            impl_->scaled_detector.reset();
+        }
+
+        if (impl_->scaled_detector) {
+            float s2 = config.scale.min;
+            do {
+                impl_->addModelAtScaleTo(*impl_->scaled_detector,
+                                         info.class_id, scaled_feat, config.angle, s2);
+                if (config.flip) {
+                    auto flipped = Impl::flipFeatures(scaled_feat);
+                    impl_->addModelAtScaleTo(*impl_->scaled_detector,
+                                             info.class_id_flip, flipped, config.angle, s2);
+                }
+                s2 += config.scale.step;
+            } while (s2 <= config.scale.max + 0.001f && config.scale.max > config.scale.min);
+        }
+    }
+
     info.num_variants = count;
     impl_->models.push_back(info);
     impl_->total_templates += count;
@@ -1787,7 +1842,8 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
     // Optional scene downscale for faster matching
     cv::Mat match_scene = scene;
     float inv_scale = 1.0f;
-    if (cfg.match_scale < 1.0f && cfg.match_scale > 0.1f) {
+    bool using_match_scale = cfg.match_scale < 1.0f && cfg.match_scale > 0.1f;
+    if (using_match_scale) {
         inv_scale = 1.0f / cfg.match_scale;
         cv::resize(scene, match_scene,
                    cv::Size((int)(scene.cols * cfg.match_scale),
@@ -1812,12 +1868,45 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
             class_ids.push_back(m.class_id_flip);
     }
 
+    // Select which detector to use: scaled (re-extracted features) or full-res
+    line2Dup::Detector& match_detector = (using_match_scale && impl_->scaled_detector)
+        ? *impl_->scaled_detector : impl_->detector;
+
+    // Fallback: scale features in-place when no re-extracted scaled detector
+    // (match_scale_reextract=false). Save originals for lossless restore.
+    std::map<std::string, std::vector<std::vector<line2Dup::Template>>> saved_templates;
+    bool scaling_in_place = using_match_scale && !impl_->scaled_detector;
+    if (scaling_in_place) {
+        float s = cfg.match_scale;
+        for (auto& cid : class_ids) {
+            auto& tps = impl_->detector.getClassTemplates(cid);
+            saved_templates[cid] = tps;  // deep copy
+            for (auto& tp : tps)
+                for (auto& t : tp) {
+                    t.tl_x = (int)(t.tl_x * s + 0.5f);
+                    t.tl_y = (int)(t.tl_y * s + 0.5f);
+                    t.width = (int)(t.width * s + 0.5f);
+                    t.height = (int)(t.height * s + 0.5f);
+                    for (auto& f : t.features) {
+                        f.x = (int)(f.x * s + 0.5f);
+                        f.y = (int)(f.y * s + 0.5f);
+                    }
+                }
+        }
+    }
+
     // Apply config to modality
-    impl_->detector.getModalities()->blur_kernel_size = cfg.blur_kernel_size;
-    impl_->detector.getModalities()->skip_voting = cfg.skip_voting;
+    match_detector.getModalities()->blur_kernel_size = cfg.blur_kernel_size;
+    match_detector.getModalities()->skip_voting = cfg.skip_voting;
 
     // Run meiqua matching
-    auto raw_matches = impl_->detector.match(padded, cfg.min_score, class_ids);
+    auto raw_matches = match_detector.match(padded, cfg.min_score, class_ids);
+
+    // Restore original templates if we scaled in-place
+    if (scaling_in_place) {
+        for (auto& cid : class_ids)
+            impl_->detector.getClassTemplates(cid) = std::move(saved_templates[cid]);
+    }
 
     // NMS — auto radius from template size if not set
     float nms_r = cfg.nms_radius;
@@ -1886,7 +1975,7 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         if (!mi) continue;
 
         auto& fs = mi->features;
-        auto& tmpl = impl_->detector.getTemplates(m.class_id, m.template_id);
+        auto& tmpl = match_detector.getTemplates(m.class_id, m.template_id);
         float angle_step = mi->config.angle.step;
 
         // Compute raw angle from template_id
@@ -1901,8 +1990,14 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         // Compute object center (user origin, rotated + scaled)
         float scaled_tw = fs.templ_width * matched_scale;
         float scaled_th = fs.templ_height * matched_scale;
-        float scene_x = m.x * inv_scale + (scaled_tw / 2.0f - tmpl[0].tl_x * inv_scale);
-        float scene_y = m.y * inv_scale + (scaled_th / 2.0f - tmpl[0].tl_y * inv_scale);
+        // tmpl[0].tl_x coordinate space depends on which detector was used:
+        //   scaled_detector (re-extract): tl_x is in downscaled coords → * inv_scale
+        //   main detector (scale-in-place): tl_x is full-res (restored) → use as-is
+        bool using_scaled_det = (using_match_scale && impl_->scaled_detector != nullptr);
+        float tl_x_fullres = using_scaled_det ? tmpl[0].tl_x * inv_scale : (float)tmpl[0].tl_x;
+        float tl_y_fullres = using_scaled_det ? tmpl[0].tl_y * inv_scale : (float)tmpl[0].tl_y;
+        float scene_x = m.x * inv_scale + (scaled_tw / 2.0f - tl_x_fullres);
+        float scene_y = m.y * inv_scale + (scaled_th / 2.0f - tl_y_fullres);
 
         // Transform user origin from template center to scene coords
         float ox = fs.origin.x - fs.templ_width / 2.0f;

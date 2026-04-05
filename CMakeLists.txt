@@ -129,3 +129,6 @@ target_link_libraries(bench_full_profile ${OpenCV_LIBS})
 
 add_executable(bench_param_sweep line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/bench_param_sweep.cpp)
 target_link_libraries(bench_param_sweep ${OpenCV_LIBS})
+
+add_executable(bench_match_scale line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/bench_match_scale.cpp)
+target_link_libraries(bench_match_scale ${OpenCV_LIBS})

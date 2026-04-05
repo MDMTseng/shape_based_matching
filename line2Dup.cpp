@@ -372,91 +372,132 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
 
                 int c = 1;
 #ifdef __AVX2__
-                const __m256i zero = _mm256_setzero_si256();
-                const __m256i four = _mm256_set1_epi32(4);
-                const __m256i seven = _mm256_set1_epi32(7);
+                // Constants for int32 quantization (used for survivor batches)
+                const __m256i zero32 = _mm256_setzero_si256();
+                const __m256i four32 = _mm256_set1_epi32(4);
+                const __m256i seven32 = _mm256_set1_epi32(7);
                 const __m256i ten_k = _mm256_set1_epi32(10000);
                 const __m256i tan0v = _mm256_set1_epi32(TAN_B[0]);
                 const __m256i tan1v = _mm256_set1_epi32(TAN_B[1]);
                 const __m256i tan2v = _mm256_set1_epi32(TAN_B[2]);
                 const __m256i tan3v = _mm256_set1_epi32(TAN_B[3]);
-                const __m256i thresh_v = _mm256_set1_epi32(threshold_sq_i);
                 const __m256i one32 = _mm256_set1_epi32(1);
+                // L1 threshold: |dx|+|dy| > T is slightly more permissive than dx²+dy²>T²
+                // Use threshold directly as L1 cutoff (conservative: accepts a few more pixels)
+                const __m256i thresh_l1 = _mm256_set1_epi16((short)threshold_sq_i);
+                // For L1 we compare |gx|+|gy| > sqrt(threshold_sq), but threshold_sq_i = threshold²
+                // So L1 threshold = threshold (the original gradient magnitude threshold)
+                const __m256i thresh_l1_v = _mm256_set1_epi16((short)(int)threshold);
+                const __m256i zero16 = _mm256_setzero_si256();
 
-                // Process 8 pixels at a time
-                for (; c <= src.cols - 1 - 8; c += 8) {
-                    // Load 3 rows with 3 loads + shifts (instead of 8 loads)
-                    __m128i prev_raw = _mm_loadu_si128((const __m128i*)(row_prev + c - 1));
-                    __m128i curr_raw = _mm_loadu_si128((const __m128i*)(row_curr + c - 1));
-                    __m128i next_raw = _mm_loadu_si128((const __m128i*)(row_next + c - 1));
+                // Process 16 pixels at a time: int16 Sobel + L1 threshold,
+                // then widen survivors to int32 for quantization
+                for (; c <= src.cols - 1 - 16; c += 16) {
+                    // Load 18 bytes from each row, widen uint8 → int16 (16 pixels)
+                    __m256i prev_l = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i*)(row_prev + c - 1)));
+                    __m256i prev_c = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i*)(row_prev + c)));
+                    __m256i prev_r = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i*)(row_prev + c + 1)));
+                    __m256i curr_l = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i*)(row_curr + c - 1)));
+                    __m256i curr_r = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i*)(row_curr + c + 1)));
+                    __m256i next_l = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i*)(row_next + c - 1)));
+                    __m256i next_c = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i*)(row_next + c)));
+                    __m256i next_r = _mm256_cvtepu8_epi16(_mm_loadu_si128((const __m128i*)(row_next + c + 1)));
 
-                    __m256i tl = _mm256_cvtepu8_epi32(prev_raw);
-                    __m256i tc = _mm256_cvtepu8_epi32(_mm_srli_si128(prev_raw, 1));
-                    __m256i tr = _mm256_cvtepu8_epi32(_mm_srli_si128(prev_raw, 2));
-                    __m256i ml = _mm256_cvtepu8_epi32(curr_raw);
-                    __m256i mr = _mm256_cvtepu8_epi32(_mm_srli_si128(curr_raw, 2));
-                    __m256i bl = _mm256_cvtepu8_epi32(next_raw);
-                    __m256i bc = _mm256_cvtepu8_epi32(_mm_srli_si128(next_raw, 1));
-                    __m256i br = _mm256_cvtepu8_epi32(_mm_srli_si128(next_raw, 2));
+                    // Sobel 3x3 in int16 (max |gx| = 1020, fits int16)
+                    __m256i gx16 = _mm256_add_epi16(
+                        _mm256_add_epi16(_mm256_sub_epi16(prev_r, prev_l), _mm256_sub_epi16(next_r, next_l)),
+                        _mm256_slli_epi16(_mm256_sub_epi16(curr_r, curr_l), 1));
+                    __m256i gy16 = _mm256_sub_epi16(
+                        _mm256_add_epi16(_mm256_add_epi16(next_l, next_r), _mm256_slli_epi16(next_c, 1)),
+                        _mm256_add_epi16(_mm256_add_epi16(prev_l, prev_r), _mm256_slli_epi16(prev_c, 1)));
 
-                    // Sobel 3x3
-                    __m256i gx = _mm256_add_epi32(
-                        _mm256_add_epi32(_mm256_sub_epi32(tr, tl), _mm256_sub_epi32(br, bl)),
-                        _mm256_slli_epi32(_mm256_sub_epi32(mr, ml), 1));
-                    __m256i gy = _mm256_sub_epi32(
-                        _mm256_add_epi32(_mm256_add_epi32(bl, br), _mm256_slli_epi32(bc, 1)),
-                        _mm256_add_epi32(_mm256_add_epi32(tl, tr), _mm256_slli_epi32(tc, 1)));
-
-                    // Magnitude squared + threshold
-                    __m256i mag_sq = _mm256_add_epi32(
-                        _mm256_mullo_epi32(gx, gx), _mm256_mullo_epi32(gy, gy));
-                    __m256i above = _mm256_cmpgt_epi32(mag_sq, thresh_v);
-                    int above_bits = _mm256_movemask_ps(_mm256_castsi256_ps(above));
+                    // L1 magnitude threshold in int16: |gx| + |gy| > threshold
+                    __m256i l1_mag = _mm256_adds_epu16(
+                        _mm256_abs_epi16(gx16), _mm256_abs_epi16(gy16));
+                    __m256i above16 = _mm256_cmpgt_epi16(l1_mag, thresh_l1_v);
+                    int above_bits = _mm256_movemask_epi8(above16);
                     if (above_bits == 0) continue;
 
-                    // Quantize to 8-bin orientation
-                    __m256i gy_neg = _mm256_cmpgt_epi32(zero, gy);
-                    __m256i ugx = _mm256_blendv_epi8(gx, _mm256_sub_epi32(zero, gx), gy_neg);
-                    __m256i ugy = _mm256_blendv_epi8(gy, _mm256_sub_epi32(zero, gy), gy_neg);
-                    __m256i ugy_zero = _mm256_cmpeq_epi32(ugy, zero);
-                    __m256i ugx_neg = _mm256_cmpgt_epi32(zero, ugx);
-                    ugx = _mm256_blendv_epi8(ugx, _mm256_sub_epi32(zero, ugx),
-                        _mm256_and_si256(ugy_zero, ugx_neg));
+                    // Process lower 8 pixels if any survive
+                    int lo_bits = above_bits & 0xFFFF;
+                    if (lo_bits) {
+                        __m256i gx = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(gx16));
+                        __m256i gy = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(gy16));
+                        __m256i above = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(above16));
 
-                    __m256i abs_ugx = _mm256_abs_epi32(ugx);
-                    __m256i test_y = _mm256_mullo_epi32(ugy, ten_k);
-                    __m256i cnt = _mm256_and_si256(one32,
-                        _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan0v), test_y));
-                    cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
-                        _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan1v), test_y)));
-                    cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
-                        _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan2v), test_y)));
-                    cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
-                        _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan3v), test_y)));
-                    __m256i bin = _mm256_blendv_epi8(
-                        _mm256_sub_epi32(four, cnt),
-                        _mm256_and_si256(_mm256_add_epi32(four, cnt), seven),
-                        _mm256_cmpgt_epi32(zero, ugx));
+                        // Quantize
+                        __m256i gy_neg = _mm256_cmpgt_epi32(zero32, gy);
+                        __m256i ugx = _mm256_blendv_epi8(gx, _mm256_sub_epi32(zero32, gx), gy_neg);
+                        __m256i ugy = _mm256_blendv_epi8(gy, _mm256_sub_epi32(zero32, gy), gy_neg);
+                        __m256i ugy_zero = _mm256_cmpeq_epi32(ugy, zero32);
+                        __m256i ugx_neg = _mm256_cmpgt_epi32(zero32, ugx);
+                        ugx = _mm256_blendv_epi8(ugx, _mm256_sub_epi32(zero32, ugx),
+                            _mm256_and_si256(ugy_zero, ugx_neg));
+                        __m256i abs_ugx = _mm256_abs_epi32(ugx);
+                        __m256i test_y = _mm256_mullo_epi32(ugy, ten_k);
+                        __m256i cnt = _mm256_and_si256(one32,
+                            _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan0v), test_y));
+                        cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
+                            _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan1v), test_y)));
+                        cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
+                            _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan2v), test_y)));
+                        cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
+                            _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan3v), test_y)));
+                        __m256i bin = _mm256_blendv_epi8(
+                            _mm256_sub_epi32(four32, cnt),
+                            _mm256_and_si256(_mm256_add_epi32(four32, cnt), seven32),
+                            _mm256_cmpgt_epi32(zero32, ugx));
+                        __m256i bitmask = _mm256_and_si256(_mm256_sllv_epi32(one32, bin), above);
+                        __m128i p16 = _mm_packus_epi32(_mm256_castsi256_si128(bitmask),
+                                                        _mm256_extracti128_si256(bitmask, 1));
+                        __m128i p8 = _mm_packus_epi16(p16, _mm_setzero_si128());
+                        _mm_storel_epi64((__m128i*)(angle_r + c), p8);
+                    }
 
-                    // Vectorized store: 1<<bin via variable shift, mask, pack to uint8
-                    __m256i bitmask = _mm256_sllv_epi32(one32, bin);
-                    bitmask = _mm256_and_si256(bitmask, above);
-                    __m128i lo = _mm256_castsi256_si128(bitmask);
-                    __m128i hi = _mm256_extracti128_si256(bitmask, 1);
-                    __m128i packed16 = _mm_packus_epi32(lo, hi);
-                    __m128i packed8 = _mm_packus_epi16(packed16, _mm_setzero_si128());
-                    _mm_storel_epi64((__m128i*)(angle_r + c), packed8);
+                    // Process upper 8 pixels if any survive
+                    int hi_bits = above_bits & 0xFFFF0000;
+                    if (hi_bits) {
+                        __m256i gx = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(gx16, 1));
+                        __m256i gy = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(gy16, 1));
+                        __m256i above = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(above16, 1));
+
+                        __m256i gy_neg = _mm256_cmpgt_epi32(zero32, gy);
+                        __m256i ugx = _mm256_blendv_epi8(gx, _mm256_sub_epi32(zero32, gx), gy_neg);
+                        __m256i ugy = _mm256_blendv_epi8(gy, _mm256_sub_epi32(zero32, gy), gy_neg);
+                        __m256i ugy_zero = _mm256_cmpeq_epi32(ugy, zero32);
+                        __m256i ugx_neg = _mm256_cmpgt_epi32(zero32, ugx);
+                        ugx = _mm256_blendv_epi8(ugx, _mm256_sub_epi32(zero32, ugx),
+                            _mm256_and_si256(ugy_zero, ugx_neg));
+                        __m256i abs_ugx = _mm256_abs_epi32(ugx);
+                        __m256i test_y = _mm256_mullo_epi32(ugy, ten_k);
+                        __m256i cnt = _mm256_and_si256(one32,
+                            _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan0v), test_y));
+                        cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
+                            _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan1v), test_y)));
+                        cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
+                            _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan2v), test_y)));
+                        cnt = _mm256_add_epi32(cnt, _mm256_and_si256(one32,
+                            _mm256_cmpgt_epi32(_mm256_mullo_epi32(abs_ugx, tan3v), test_y)));
+                        __m256i bin = _mm256_blendv_epi8(
+                            _mm256_sub_epi32(four32, cnt),
+                            _mm256_and_si256(_mm256_add_epi32(four32, cnt), seven32),
+                            _mm256_cmpgt_epi32(zero32, ugx));
+                        __m256i bitmask = _mm256_and_si256(_mm256_sllv_epi32(one32, bin), above);
+                        __m128i p16 = _mm_packus_epi32(_mm256_castsi256_si128(bitmask),
+                                                        _mm256_extracti128_si256(bitmask, 1));
+                        __m128i p8 = _mm_packus_epi16(p16, _mm_setzero_si128());
+                        _mm_storel_epi64((__m128i*)(angle_r + c + 8), p8);
+                    }
                 }
 #endif
                 // Scalar tail
                 for (; c < src.cols - 1; ++c) {
-                    // Inline Sobel 3x3
                     int gx = (row_prev[c+1] - row_prev[c-1]) + 2*(row_curr[c+1] - row_curr[c-1])
                            + (row_next[c+1] - row_next[c-1]);
                     int gy = (row_next[c-1] + 2*row_next[c] + row_next[c+1])
                            - (row_prev[c-1] + 2*row_prev[c] + row_prev[c+1]);
-                    int mag_sq_i = gx*gx + gy*gy;
-                    if (mag_sq_i <= threshold_sq_i) continue;
+                    // L1 threshold (matches SIMD path)
+                    if (std::abs(gx) + std::abs(gy) <= (int)threshold) continue;
                     int ugx = gx, ugy = gy;
                     if (ugy < 0) { ugx = -ugx; ugy = -ugy; }
                     if (ugy == 0 && ugx < 0) ugx = -ugx;

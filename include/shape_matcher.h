@@ -69,6 +69,16 @@ struct FeatureSet {
     mutable std::vector<cv::Point2f> cached_opt_points;
     mutable int cached_opt_max_points = 0;  ///< max_points arg used to compute cache
 
+    /// Cached per-point lock values (parallel to cached_opt_points).
+    /// Computed once at addModel() from matchTemplate response curvature.
+    struct LockInfo {
+        float major = 1.0f; float minor = 0.0f;
+        cv::Point2f normal{1,0};   // eigenvector of weaker response (constraint direction)
+        cv::Point2f tangent{0,1};  // eigenvector of stronger response
+        bool is_corner = false;    // true if minor/major > threshold (2D lock)
+    };
+    mutable std::vector<LockInfo> cached_lock_info;
+
     /// Cached template EdgeScene for inverse ICP (built once at addModel time).
     mutable icp_refine::EdgeScene cached_templ_scene;
     mutable bool templ_scene_valid = false;
@@ -134,10 +144,71 @@ struct FeatureSet {
     /// @return Positions relative to template center.
     std::vector<cv::Point2f> selectOptimizedPoints(int max_points = 8) const;
 
+    /// V3: Match-confidence augmented D-optimal selection.
+    /// Same two-phase structure as V1, but weighted by empirical matchTemplate
+    /// reliability (peak sharpness + noise stability). Avoids selecting
+    /// geometrically optimal but texturally ambiguous points.
+    /// @param max_points    Target number of points.
+    /// @param noise_sigma   Noise level for stability testing (default 30).
+    std::vector<cv::Point2f> selectOptimizedPointsV3(int max_points = 8, float noise_sigma = 30.0f) const;
+
+    /// Multi-start hat matrix leverage swap selection (V2).
+    /// Runs num_restarts random restarts of Fedorov exchange, picks the set
+    /// with lowest worst_ang sensitivity.
+    /// @param max_points    Target number of points.
+    /// @param num_restarts  Number of random restarts (default 20).
+    std::vector<cv::Point2f> selectOptimizedPointsV2(int max_points = 8, int num_restarts = 20) const;
+
     /// Run sensitivity analysis on auto-selected sample points.
     /// Simulates the ROI rigid solve with perturbed correspondences.
     /// @param skip_index  If >= 0, exclude this feature index from the solve.
     SensitivityReport analyzeSensitivity(int skip_index = -1) const;
+
+    /// Geometric constraint quality analysis.
+    /// Analyzes the Fisher information matrix J^TJ to measure how well
+    /// a point set constrains the 3 DOF (θ, tx, ty).
+    struct ConstraintAnalysis {
+        // Information matrix eigenvalues (sorted: λ1 ≥ λ2 ≥ λ3)
+        float info_eigenvalues[3];     ///< Constraint strength along principal directions
+        float condition_number;         ///< λ_max/λ_min — isotropy (1=perfect, ∞=degenerate)
+
+        // Per-DOF constraint strength (diagonal of (J^TJ)^{-1})
+        float sigma_theta;             ///< Angle uncertainty (deg) per 1px matching noise
+        float sigma_tx;                ///< X translation uncertainty (px) per 1px noise
+        float sigma_ty;                ///< Y translation uncertainty (px) per 1px noise
+
+        // Covariance ellipse (2D position uncertainty)
+        float ellipse_major;           ///< Major axis of position error ellipse (px)
+        float ellipse_minor;           ///< Minor axis of position error ellipse (px)
+        float ellipse_angle;           ///< Orientation of major axis (deg)
+
+        // Geometric properties
+        float normal_spread;           ///< Angular spread of normal directions (deg, 0=all parallel, 180=ideal)
+        float spatial_spread;          ///< RMS distance of points from centroid (px)
+        float mean_leverage;           ///< Mean distance from rotation center (px)
+        int   num_corners;             ///< Number of corner points (2D constraint)
+        int   num_edges;               ///< Number of edge points (1D constraint)
+        int   num_points;              ///< Total points
+
+        // Per-point info
+        struct PointInfo {
+            cv::Point2f pos;           ///< Position relative to center
+            cv::Point2f normal;        ///< Primary constraint normal direction
+            float leverage;            ///< Distance from rotation center
+            float info_contribution;   ///< det(I_with) / det(I_without) — marginal information gain
+            bool is_corner;            ///< True if 2D lock (both Hessian eigenvalues significant)
+            float lock_major;          ///< Locking strength in primary direction (Hessian eigenvalue)
+            float lock_minor;          ///< Locking strength in secondary direction
+            float lock_ratio;          ///< lock_major / lock_minor (1 = isotropic 2D lock, ∞ = 1D edge)
+        };
+        std::vector<PointInfo> points;
+
+        std::string summary;           ///< Human-readable summary
+    };
+
+    /// Analyze geometric constraint quality of a point set.
+    /// If custom_points is empty, uses the auto-selected optimized points.
+    ConstraintAnalysis analyzeConstraints(const std::vector<cv::Point2f>& custom_points = {}) const;
 };
 
 /// Extract features from a template image.

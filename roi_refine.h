@@ -17,6 +17,11 @@ namespace roi_refine {
 struct SamplePoint {
     cv::Point2f pos;          ///< Position relative to template center
     int roi_half = 15;        ///< Half-size of the ROI patch
+    float lock_major = 1.0f;  ///< Match locking strength in primary direction
+    float lock_minor = 0.0f;  ///< Match locking strength in secondary direction
+    cv::Point2f lock_normal{0,0};  ///< Precomputed constraint normal (from response surface)
+    cv::Point2f lock_tangent{0,0}; ///< Precomputed constraint tangent
+    bool lock_is_corner = false;   ///< Precomputed corner classification
 };
 
 /// Result of ROI matching + PCA for one sample point.

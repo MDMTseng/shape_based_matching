@@ -206,6 +206,10 @@ struct MatchConfig {
     /// Default 7 handles noise up to ~30 sigma.
     /// Use 11-15 for heavy noise (sigma 40+).
     int blur_kernel_size = 7;
+
+    // Edge gradient thresholds for feature extraction
+    float weak_threshold = 50.0f;    ///< Min gradient magnitude to be an edge candidate
+    float strong_threshold = 80.0f;  ///< Gradient magnitude for strong edge preference
 };
 
 // ============================================================

@@ -709,7 +709,8 @@ struct ShapeMatcher::Impl {
 
     Impl(const MatchConfig& cfg)
         : match_config(cfg),
-          detector(128, {4, 8}, 30, 60) {}
+          detector(128, {4, 8},
+                   cfg.weak_threshold, cfg.strong_threshold) {}
 
     // Convert FeatureSet to meiqua TemplatePyramid
     static void featureSetToTemplates(const FeatureSet& fs,

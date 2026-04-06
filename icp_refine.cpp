@@ -167,15 +167,52 @@ void EdgeScene::build(const cv::Mat& sobel_dx, const cv::Mat& sobel_dy,
         }
     }
 
-    // Map: label → (x, y) of the edge pixel with that label
-    std::vector<cv::Point> label_coords(max_label + 1, cv::Point(-1, -1));
+    // Compute gradient magnitude for subpixel edge localization
+    cv::Mat grad_mag(height, width, CV_32F, cv::Scalar(0));
+    for (int r = 0; r < height; r++) {
+        const short* dxr = dx16.ptr<short>(r);
+        const short* dyr = dy16.ptr<short>(r);
+        float* mr = grad_mag.ptr<float>(r);
+        for (int c = 0; c < width; c++) {
+            float gx = (float)dxr[c], gy = (float)dyr[c];
+            mr[c] = std::sqrt(gx * gx + gy * gy);
+        }
+    }
+
+    // Map: label → subpixel (x, y) of the edge pixel with that label.
+    // Uses 2nd-order facet model on gradient magnitude to find subpixel
+    // extremum along the edge normal direction.
+    std::vector<cv::Point2f> label_coords(max_label + 1, cv::Point2f(-1, -1));
     for (int r = 0; r < height; ++r) {
         const int* lr = labels.ptr<int>(r);
         const uchar* er = edge_map.ptr<uchar>(r);
         for (int c = 0; c < width; ++c) {
-            if (er[c] > 0 && lr[c] > 0 && lr[c] <= max_label) {
-                label_coords[lr[c]] = cv::Point(c, r);
+            if (!(er[c] > 0 && lr[c] > 0 && lr[c] <= max_label)) continue;
+
+            float px = 0, py = 0;
+            if (r >= 1 && r < height - 1 && c >= 1 && c < width - 1) {
+                float m00 = grad_mag.at<float>(r-1,c-1), m01 = grad_mag.at<float>(r-1,c), m02 = grad_mag.at<float>(r-1,c+1);
+                float m10 = grad_mag.at<float>(r,  c-1), m11 = grad_mag.at<float>(r,  c), m12 = grad_mag.at<float>(r,  c+1);
+                float m20 = grad_mag.at<float>(r+1,c-1), m21 = grad_mag.at<float>(r+1,c), m22 = grad_mag.at<float>(r+1,c+1);
+                // First derivatives
+                float rx = (m12 - m10) * 0.5f;
+                float ry = (m21 - m01) * 0.5f;
+                // Second derivatives
+                float rxx = m12 - 2*m11 + m10;
+                float ryy = m21 - 2*m11 + m01;
+                float rxy = (m22 - m02 - m20 + m00) * 0.25f;
+                // Edge normal
+                float nx = normal_x.at<float>(r, c);
+                float ny = normal_y.at<float>(r, c);
+                // Subpixel offset: extremum of quadratic along normal
+                float denom = rxx*nx*nx + 2*rxy*nx*ny + ryy*ny*ny;
+                if (denom < -1e-6f) {  // must be a maximum
+                    float t = -(rx*nx + ry*ny) / denom;
+                    px = std::max(-0.5f, std::min(0.5f, nx * t));
+                    py = std::max(-0.5f, std::min(0.5f, ny * t));
+                }
             }
+            label_coords[lr[c]] = cv::Point2f(c + px, r + py);
         }
     }
 
@@ -189,10 +226,10 @@ void EdgeScene::build(const cv::Mat& sobel_dx, const cv::Mat& sobel_dy,
             if (dr[c] > max_dist) continue;
             int lbl = lr[c];
             if (lbl > 0 && lbl <= max_label) {
-                cv::Point p = label_coords[lbl];
+                cv::Point2f p = label_coords[lbl];
                 if (p.x >= 0) {
-                    cxr[c] = (float)p.x;
-                    cyr[c] = (float)p.y;
+                    cxr[c] = p.x;
+                    cyr[c] = p.y;
                 }
             }
         }

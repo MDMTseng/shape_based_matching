@@ -1522,7 +1522,6 @@ struct ModelInfo {
     std::string class_id;           // meiqua class_id (internal)
     std::string class_id_flip;      // flipped variant class_id
     int num_variants = 0;           // total templates for this model
-    float angle_bias = 0;           // calibrated bias
 };
 
 struct ShapeMatcher::Impl {

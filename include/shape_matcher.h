@@ -249,7 +249,6 @@ struct ModelConfig {
 
 enum class RefineMode {
     None,               ///< Raw coarse result only
-    BiasCorrection,     ///< Apply calibrated angle bias correction (free)
     ICP_Sparse,         ///< ICP using sparse matching features (~0.1ms/obj, ~2deg)
     ICP,                ///< ICP using dense Canny edges (~0.3ms/obj, <0.5deg)
     ROI                 ///< ROI template match + PCA constraint (~0.05ms/obj, <0.5deg)

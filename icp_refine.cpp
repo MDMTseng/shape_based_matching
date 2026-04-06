@@ -106,7 +106,8 @@ static void symmetrize3x3(float A[3][3], float reg) {
 // EdgeScene
 // -----------------------------------------------------------------------
 void EdgeScene::build(const cv::Mat& sobel_dx, const cv::Mat& sobel_dy,
-                      float canny_low, float canny_high, float max_dist) {
+                      float canny_low, float canny_high, float max_dist,
+                      bool subpixel) {
     width = sobel_dx.cols;
     height = sobel_dx.rows;
 
@@ -167,21 +168,24 @@ void EdgeScene::build(const cv::Mat& sobel_dx, const cv::Mat& sobel_dy,
         }
     }
 
-    // Compute gradient magnitude for subpixel edge localization
-    cv::Mat grad_mag(height, width, CV_32F, cv::Scalar(0));
-    for (int r = 0; r < height; r++) {
-        const short* dxr = dx16.ptr<short>(r);
-        const short* dyr = dy16.ptr<short>(r);
-        float* mr = grad_mag.ptr<float>(r);
-        for (int c = 0; c < width; c++) {
-            float gx = (float)dxr[c], gy = (float)dyr[c];
-            mr[c] = std::sqrt(gx * gx + gy * gy);
+    // Compute subpixel edge positions via 2nd-order facet model (optional)
+    cv::Mat grad_mag;
+    if (subpixel) {
+        grad_mag.create(height, width, CV_32F);
+        grad_mag.setTo(0);
+        for (int r = 0; r < height; r++) {
+            const short* dxr = dx16.ptr<short>(r);
+            const short* dyr = dy16.ptr<short>(r);
+            float* mr = grad_mag.ptr<float>(r);
+            for (int c = 0; c < width; c++) {
+                float gx = (float)dxr[c], gy = (float)dyr[c];
+                mr[c] = std::sqrt(gx * gx + gy * gy);
+            }
         }
     }
 
-    // Map: label → subpixel (x, y) of the edge pixel with that label.
-    // Uses 2nd-order facet model on gradient magnitude to find subpixel
-    // extremum along the edge normal direction.
+    // Map: label → (x, y) of the edge pixel with that label.
+    // When subpixel=true, uses facet model for fractional positions.
     std::vector<cv::Point2f> label_coords(max_label + 1, cv::Point2f(-1, -1));
     for (int r = 0; r < height; ++r) {
         const int* lr = labels.ptr<int>(r);
@@ -190,23 +194,16 @@ void EdgeScene::build(const cv::Mat& sobel_dx, const cv::Mat& sobel_dy,
             if (!(er[c] > 0 && lr[c] > 0 && lr[c] <= max_label)) continue;
 
             float px = 0, py = 0;
-            if (r >= 1 && r < height - 1 && c >= 1 && c < width - 1) {
+            if (subpixel && r >= 1 && r < height - 1 && c >= 1 && c < width - 1) {
                 float m00 = grad_mag.at<float>(r-1,c-1), m01 = grad_mag.at<float>(r-1,c), m02 = grad_mag.at<float>(r-1,c+1);
                 float m10 = grad_mag.at<float>(r,  c-1), m11 = grad_mag.at<float>(r,  c), m12 = grad_mag.at<float>(r,  c+1);
                 float m20 = grad_mag.at<float>(r+1,c-1), m21 = grad_mag.at<float>(r+1,c), m22 = grad_mag.at<float>(r+1,c+1);
-                // First derivatives
-                float rx = (m12 - m10) * 0.5f;
-                float ry = (m21 - m01) * 0.5f;
-                // Second derivatives
-                float rxx = m12 - 2*m11 + m10;
-                float ryy = m21 - 2*m11 + m01;
+                float rx = (m12 - m10) * 0.5f, ry = (m21 - m01) * 0.5f;
+                float rxx = m12 - 2*m11 + m10, ryy = m21 - 2*m11 + m01;
                 float rxy = (m22 - m02 - m20 + m00) * 0.25f;
-                // Edge normal
-                float nx = normal_x.at<float>(r, c);
-                float ny = normal_y.at<float>(r, c);
-                // Subpixel offset: extremum of quadratic along normal
+                float nx = normal_x.at<float>(r, c), ny = normal_y.at<float>(r, c);
                 float denom = rxx*nx*nx + 2*rxy*nx*ny + ryy*ny*ny;
-                if (denom < -1e-6f) {  // must be a maximum
+                if (denom < -1e-6f) {
                     float t = -(rx*nx + ry*ny) / denom;
                     px = std::max(-0.5f, std::min(0.5f, nx * t));
                     py = std::max(-0.5f, std::min(0.5f, ny * t));
@@ -632,14 +629,14 @@ Pose2D refineWithNormals(const std::vector<EdgePoint>& model_edges,
 // -----------------------------------------------------------------------
 // Build template EdgeScene (call once per template)
 // -----------------------------------------------------------------------
-EdgeScene buildTemplateScene(const cv::Mat& templ_gray, float max_dist) {
+EdgeScene buildTemplateScene(const cv::Mat& templ_gray, float max_dist, bool subpixel) {
     cv::Mat t_smooth, t_dx, t_dy;
     cv::GaussianBlur(templ_gray, t_smooth, cv::Size(5, 5), 0);
     cv::Sobel(t_smooth, t_dx, CV_16S, 1, 0, 3);
     cv::Sobel(t_smooth, t_dy, CV_16S, 0, 1, 3);
 
     EdgeScene scene;
-    scene.build(t_dx, t_dy, kTemplateCannyLow, kTemplateCannyHigh, max_dist);
+    scene.build(t_dx, t_dy, kTemplateCannyLow, kTemplateCannyHigh, max_dist, subpixel);
     return scene;
 }
 

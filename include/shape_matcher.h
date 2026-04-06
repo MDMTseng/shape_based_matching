@@ -250,7 +250,8 @@ struct ModelConfig {
 enum class RefineMode {
     None,               ///< Raw coarse result only
     ICP_Sparse,         ///< ICP using sparse matching features (~0.1ms/obj, ~2deg)
-    ICP,                ///< ICP using dense Canny edges (~0.3ms/obj, <0.5deg)
+    ICP,                ///< ICP using dense Canny edges, integer EDT (~0.3ms/obj, <0.05deg, ~0.66px)
+    ICP_Subpixel,       ///< ICP with subpixel EDT via facet model (~0.3ms/obj, ~0.1deg, ~0.11px)
     ROI                 ///< ROI template match + PCA constraint (~0.05ms/obj, <0.5deg)
                         ///< Selects ~10-20 critical points (corners + spaced edges),
                         ///< matches each via small ROI template match with subpixel,

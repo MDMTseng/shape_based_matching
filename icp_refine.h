@@ -54,8 +54,10 @@ struct EdgeScene {
     int width, height;
 
     /// Initialize from Sobel derivatives
+    /// @param subpixel  Use 2nd-order facet model for subpixel edge positions
     void build(const cv::Mat& sobel_dx, const cv::Mat& sobel_dy,
-               float canny_low = 30, float canny_high = 60, float max_dist = 10);
+               float canny_low = 30, float canny_high = 60, float max_dist = 10,
+               bool subpixel = false);
 };
 
 /// Model edge: position + normal direction
@@ -139,6 +141,7 @@ Pose2D refineInverse(const EdgeScene& templ_scene,
 
 /// Build a template EdgeScene from a grayscale template image.
 /// Call once per template at addModel time, then pass to refineInverse.
-EdgeScene buildTemplateScene(const cv::Mat& templ_gray, float max_dist = 20.0f);
+EdgeScene buildTemplateScene(const cv::Mat& templ_gray, float max_dist = 20.0f,
+                             bool subpixel = false);
 
 } // namespace icp_refine

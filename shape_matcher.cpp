@@ -1769,8 +1769,9 @@ int ShapeMatcher::addModel(const std::string& name,
     }
     // Pre-build template EdgeScene for inverse ICP refinement
     if (!info.features.templ_image.empty()) {
+        bool use_subpixel = (impl_->match_config.refine == RefineMode::ICP_Subpixel);
         info.features.cached_templ_scene =
-            icp_refine::buildTemplateScene(info.features.templ_image, 20.0f);
+            icp_refine::buildTemplateScene(info.features.templ_image, 20.0f, use_subpixel);
         info.features.templ_scene_valid = true;
     }
     info.config = config;
@@ -2008,7 +2009,8 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         if (user_angle < 0) user_angle += 360.0f;
 
         // ICP refinement at full resolution (inverse ICP)
-        bool do_icp = (cfg.refine == RefineMode::ICP || cfg.refine == RefineMode::ICP_Sparse)
+        bool do_icp = (cfg.refine == RefineMode::ICP || cfg.refine == RefineMode::ICP_Sparse
+                       || cfg.refine == RefineMode::ICP_Subpixel)
                       && !scene.empty() && fs.templ_scene_valid;
         if (do_icp) {
             icp_refine::ICPConfig icp_cfg;

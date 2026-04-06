@@ -88,11 +88,6 @@ struct FeatureSet {
     /// "pointing right", set angle_offset = -45.
     float angle_offset = 0;
 
-    /// Per-angle position bias (dx, dy) in pixels, indexed by template angle.
-    /// Calibrated at addModel time via self-matching. Subtracted from match results.
-    std::vector<cv::Point2f> pos_bias;  ///< pos_bias[angle_deg] = (bias_x, bias_y)
-    float pos_bias_step = 0;            ///< angle step used for calibration
-
     // --- Methods ---
 
     /// Set the user-defined origin (reference point in template coords).

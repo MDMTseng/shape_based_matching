@@ -1824,50 +1824,6 @@ int ShapeMatcher::addModel(const std::string& name,
         } while (s2 <= config.scale.max + 0.001f && config.scale.max > config.scale.min);
     }
 
-    // Calibrate per-angle position bias via self-matching.
-    // Render template at each angle, match, measure (dx, dy) offset.
-    // Skip for internal calibration matcher (name starts with _) to avoid recursion.
-    if (!features.templ_image.empty() && impl_->match_config.refine != RefineMode::None
-        && name[0] != '_') {
-        float cal_step = config.angle.step;
-        int n_cal = (int)((config.angle.end - config.angle.start) / cal_step);
-        info.features.pos_bias.resize(n_cal);
-        info.features.pos_bias_step = cal_step;
-
-        int tw = features.templ_image.cols, th = features.templ_image.rows;
-        int scene_w = tw * 3, scene_h = th * 3;  // small scene for calibration
-        float cx = scene_w / 2.0f, cy = scene_h / 2.0f;
-
-        MatchConfig cal_cfg = impl_->match_config;
-        cal_cfg.min_score = 30;
-        cal_cfg.match_scale = 1.0f;  // calibrate at full-res
-        cal_cfg.max_results = 1;
-        ShapeMatcher cal_matcher(cal_cfg);
-        cal_matcher.addModel("_cal_", features, config);
-
-        for (int i = 0; i < n_cal; i++) {
-            float angle = config.angle.start + i * cal_step;
-            cv::Mat cal_scene(scene_h, scene_w, CV_8U, cv::Scalar(0));
-            cv::Mat M = cv::getRotationMatrix2D(
-                cv::Point2f(tw/2.0f, th/2.0f), -angle, 1.0);
-            M.at<double>(0,2) += cx - tw/2.0;
-            M.at<double>(1,2) += cy - th/2.0;
-            cv::Mat warped;
-            cv::warpAffine(features.templ_image, warped, M,
-                           cal_scene.size(), cv::INTER_LINEAR, cv::BORDER_TRANSPARENT);
-            for (int r = 0; r < warped.rows; r++)
-                for (int c = 0; c < warped.cols; c++)
-                    if (warped.at<uchar>(r,c) > 0)
-                        cal_scene.at<uchar>(r,c) = warped.at<uchar>(r,c);
-
-            auto cal_results = cal_matcher.match(cal_scene);
-            if (!cal_results.empty()) {
-                info.features.pos_bias[i] = cv::Point2f(
-                    cal_results[0].x - cx, cal_results[0].y - cy);
-            }
-        }
-    }
-
     info.num_variants = count;
     impl_->models.push_back(info);
     impl_->total_templates += count;
@@ -2127,15 +2083,6 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
                 user_angle = std::fmod(user_angle, 360.0f);
                 if (user_angle < 0) user_angle += 360.0f;
             }
-        }
-
-        // Apply per-angle position bias correction
-        if (!fs.pos_bias.empty() && fs.pos_bias_step > 0) {
-            float angle_for_bias = std::fmod(user_angle, 360.0f);
-            if (angle_for_bias < 0) angle_for_bias += 360.0f;
-            int bi = (int)(angle_for_bias / fs.pos_bias_step + 0.5f) % (int)fs.pos_bias.size();
-            user_x -= fs.pos_bias[bi].x;
-            user_y -= fs.pos_bias[bi].y;
         }
 
         MatchResult r;

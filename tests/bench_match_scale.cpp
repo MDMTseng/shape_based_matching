@@ -1,6 +1,7 @@
 /// @file bench_match_scale.cpp
-/// @brief T-level x match_scale using addRotatedTemplates on scaled template.
+/// @brief Per-stage speed profile: s=0.25 T={2,4} vs s=0.5 T={4,8}
 
+#include "shape_matcher.h"
 #include "line2Dup.h"
 #include "sbm_log.h"
 #include <opencv2/imgproc.hpp>
@@ -12,6 +13,7 @@
 #include <vector>
 
 using namespace cv;
+using namespace sbm;
 using Clock = std::chrono::high_resolution_clock;
 
 static double ms_since(Clock::time_point t0) {
@@ -59,8 +61,8 @@ int main(int argc, char** argv) {
     resize(templ_raw(bbox), templ, Size(), sc200, sc200);
 
     printf("================================================================\n");
-    printf("  T-level x match_scale: %dx%d template, 24 objects, 20MP\n",
-           templ.cols, templ.rows);
+    printf("  Per-stage profile: s=0.25 T={2,4} vs s=0.5 T={4,8}\n");
+    printf("  Template: %dx%d, 20MP scene, 24 objects\n", templ.cols, templ.rows);
     printf("================================================================\n\n");
 
     const int W = 5472, H = 3648;
@@ -75,137 +77,78 @@ int main(int argc, char** argv) {
     Mat scene_full(H, W, CV_8U, Scalar(0));
     for (auto& obj : objects) place_object(templ, scene_full, obj.x, obj.y, obj.angle);
 
-    struct TConfig { const char* name; std::vector<int> T; };
-    TConfig t_configs[] = {
-        {"{4,8}",    {4, 8}},
-        {"{6,8}",    {6, 8}},
-        {"{6,12}",   {6, 12}},
-        {"{8,16}",   {8, 16}},
+    struct Config {
+        const char* name;
+        float scale;
+        std::vector<int> T;
     };
-    float scales[] = {1.0f, 0.5f, 0.3f};
+    Config configs[] = {
+        {"s=1.0  T={4,8}",  1.0f, {4, 8}},
+        {"s=1.0  T={8,16}", 1.0f, {8, 16}},
+        {"s=0.5  T={4,8}",  0.5f, {4, 8}},
+        {"s=0.3  T={4,8}",  0.3f, {4, 8}},
+    };
 
-    printf("  %-10s %-7s  %8s  %5s  %5s  %5s %5s %5s %5s\n",
-           "T", "Scale", "Time", "Found", "Score", "AngM", "AngW", "PosM", "PosW");
-    printf("  ");
-    for (int i = 0; i < 75; i++) printf("-");
-    printf("\n");
+    for (auto& c : configs) {
+        printf("  === %s ===\n", c.name);
 
-    Mat mask_t = Mat::ones(templ.size(), CV_8U) * 255;
+        // Resize scene
+        auto t0 = Clock::now();
+        Mat match_scene;
+        resize(scene_full, match_scene, Size((int)(W*c.scale), (int)(H*c.scale)));
+        double t_resize = ms_since(t0);
+        printf("    Scene: %dx%d\n", match_scene.cols, match_scene.rows);
+        printf("    resize:              %7.2f ms\n", t_resize);
 
-    for (auto& tc : t_configs) {
-        for (float scale : scales) {
-            // Downscale scene
-            Mat match_scene;
-            float inv_scale = 1.0f;
-            if (scale < 0.99f) {
-                inv_scale = 1.0f / scale;
-                resize(scene_full, match_scene, Size((int)(W*scale), (int)(H*scale)));
-            } else {
-                match_scene = scene_full;
+        // Use LineMOD profiling
+        line2Dup::enableProfiling(true);
+        sbm::setLogLevel(sbm::LogLevel::Debug);
+        sbm::setLogFile(stdout);
+
+        auto feat = extractFeatures(templ, Mat(), 128, c.T);
+        feat.setOrigin(templ.cols/2.0f, templ.rows/2.0f);
+        ModelConfig mcfg;
+        mcfg.angle = {0, 360, 1};
+        MatchConfig cfg;
+        cfg.min_score = 50;
+        cfg.refine = RefineMode::ROI;
+        cfg.skip_voting = true;
+        cfg.match_scale = c.scale;
+        cfg.T_levels = c.T;
+
+        ShapeMatcher matcher(cfg);
+        matcher.addModel("part", feat, mcfg);
+
+        // Warmup
+        line2Dup::resetProfiling();
+        matcher.match(scene_full);
+
+        // Profiled run
+        line2Dup::resetProfiling();
+        auto t_total_start = Clock::now();
+        auto results = matcher.match(scene_full);
+        double t_total = ms_since(t_total_start);
+        printf("    --- LineMOD internal ---\n");
+        line2Dup::printProfiling();
+        printf("    --- End-to-end ---\n");
+        printf("    Total match():       %7.2f ms\n", t_total);
+        printf("    Found: %d/%d\n", (int)results.size(), N_OBJ);
+
+        // Quick accuracy
+        int n_matched = 0;
+        for (auto& gt : objects) {
+            for (auto& r : results) {
+                float dx = r.x - gt.x, dy = r.y - gt.y;
+                if (std::sqrt(dx*dx+dy*dy) < 40) { n_matched++; break; }
             }
-
-            // Downscale template, then use addRotatedTemplates on it
-            // This ensures features + labels are extracted from the scaled image
-            Mat match_templ, match_mask;
-            if (scale < 0.99f) {
-                resize(templ, match_templ, Size((int)(templ.cols*scale+0.5f),
-                                                (int)(templ.rows*scale+0.5f)));
-                match_mask = Mat::ones(match_templ.size(), CV_8U) * 255;
-            } else {
-                match_templ = templ;
-                match_mask = mask_t;
-            }
-
-            // Check minimum template size for this T config
-            int min_templ = std::min(match_templ.cols, match_templ.rows);
-            int deepest_T = tc.T.back();
-            int deepest_dim = min_templ >> ((int)tc.T.size() - 1);
-            if (deepest_dim < deepest_T * 3) {
-                printf("  %-10s %-7.2f  SKIP (templ %dpx at deepest level, T=%d)\n",
-                       tc.name, scale, deepest_dim, deepest_T);
-                continue;
-            }
-
-            // Build detector and add templates
-            line2Dup::Detector det(128, tc.T, 30, 60);
-            det.scale_pyramid_features = true;
-            int n_added = det.addRotatedTemplates(match_templ, match_mask, "part", 0, 360, 1);
-            if (n_added <= 0) {
-                printf("  %-10s %-7.2f  FAILED\n", tc.name, scale);
-                continue;
-            }
-
-            // Pad scene: must be divisible by T[l] * 2^l for each level
-            auto lcm = [](int a, int b) { int g=a,h=b,t; while(h){t=h;h=g%h;g=t;} return a/g*b; };
-            int align = 1;
-            for (int l = 0; l < (int)tc.T.size(); l++)
-                align = lcm(align, tc.T[l] * (1 << l));
-            int pw = (match_scene.cols + align - 1) / align * align;
-            int ph = (match_scene.rows + align - 1) / align * align;
-            Mat padded;
-            if (pw != match_scene.cols || ph != match_scene.rows)
-                copyMakeBorder(match_scene, padded, 0, ph-match_scene.rows,
-                               0, pw-match_scene.cols, BORDER_CONSTANT, Scalar(0));
-            else padded = match_scene;
-
-            det.match(padded, 50); // warmup
-            const int RUNS = 5;
-            double times[5];
-            std::vector<line2Dup::Match> last;
-            for (int i = 0; i < RUNS; i++) {
-                auto t = Clock::now();
-                last = det.match(padded, 50);
-                times[i] = ms_since(t);
-            }
-            std::sort(times, times + RUNS);
-
-            float mean_score = 0;
-            for (auto& r : last) mean_score += r.similarity;
-            if (!last.empty()) mean_score /= last.size();
-
-            // NMS
-            float nms_r2 = (80*scale)*(80*scale);
-            std::vector<line2Dup::Match> nms;
-            for (auto& m : last) {
-                bool sup = false;
-                for (auto& k : nms) {
-                    float dx=(float)(m.x-k.x), dy=(float)(m.y-k.y);
-                    if (dx*dx+dy*dy < nms_r2) { sup=true; break; }
-                }
-                if (!sup) nms.push_back(m);
-            }
-
-            // Match to GT
-            int n_matched = 0;
-            float tae=0, tpe=0, wae=0, wpe=0;
-            for (auto& gt : objects) {
-                float best_d=1e9f; int best_ri=-1;
-                for (int ri=0; ri<(int)nms.size(); ri++) {
-                    auto& mtpl = det.getTemplates("part", nms[ri].template_id);
-                    float cx = (nms[ri].x + match_templ.cols/2.0f - mtpl[0].tl_x) * inv_scale;
-                    float cy = (nms[ri].y + match_templ.rows/2.0f - mtpl[0].tl_y) * inv_scale;
-                    float dx=cx-gt.x, dy=cy-gt.y;
-                    float d=std::sqrt(dx*dx+dy*dy);
-                    if (d<best_d) { best_d=d; best_ri=ri; }
-                }
-                if (best_ri>=0 && best_d<40) {
-                    float matched_angle = nms[best_ri].template_id * 1.0f;
-                    float ae=angle_err(matched_angle, gt.angle);
-                    tae+=ae; tpe+=best_d;
-                    wae=std::max(wae,ae); wpe=std::max(wpe,best_d);
-                    n_matched++;
-                }
-            }
-            float mae = n_matched>0 ? tae/n_matched : -1;
-            float mpe = n_matched>0 ? tpe/n_matched : -1;
-            const char* status = (n_matched==N_OBJ && mae<2.0) ? " <<<" :
-                                 (n_matched<N_OBJ) ? " MISS" : "";
-            printf("  %-10s %-7.2f  %7.1fms  %2d/%-2d  %5.1f  %5.1f %5.1f %5.1f %5.1f%s\n",
-                   tc.name, scale, times[RUNS/2], n_matched, N_OBJ, mean_score,
-                   mae, wae, mpe, wpe, status);
         }
-        printf("\n");
+        printf("    GT matched: %d/%d\n\n", n_matched, N_OBJ);
+
+        line2Dup::enableProfiling(false);
+        sbm::setLogFile(nullptr);
+        sbm::setLogLevel(sbm::LogLevel::Warning);
     }
+
     printf("================================================================\n");
     return 0;
 }

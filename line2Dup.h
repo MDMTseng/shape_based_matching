@@ -41,6 +41,8 @@ struct Template
 class ColorGradientPyramid
 {
 public:
+    ColorGradientPyramid() : pyramid_level(0), weak_threshold(30), num_features(128),
+                             strong_threshold(60), match_only(false) {}
     ColorGradientPyramid(const cv::Mat &src, const cv::Mat &mask,
                                              float weak_threshold, size_t num_features,
                                              float strong_threshold,
@@ -108,9 +110,20 @@ public:
     cv::Ptr<ColorGradientPyramid> process(const cv::Mat src, const cv::Mat &mask = cv::Mat(),
                                           bool match_only = false) const
     {
-        auto p = cv::makePtr<ColorGradientPyramid>(src, mask, weak_threshold, num_features, strong_threshold, match_only);
+        // Create without update, set config, then update once with correct settings.
+        // The constructor normally calls update() but with default skip_voting=false,
+        // which prevents the fused Sobel+Quantize path from running.
+        auto p = cv::Ptr<ColorGradientPyramid>(new ColorGradientPyramid());
+        p->src = src;
+        p->mask = mask;
+        p->pyramid_level = 0;
+        p->weak_threshold = weak_threshold;
+        p->num_features = num_features;
+        p->strong_threshold = strong_threshold;
+        p->match_only = match_only;
         p->blur_kernel_size = blur_kernel_size;
         p->skip_voting = skip_voting;
+        p->update();
         return p;
     }
 };

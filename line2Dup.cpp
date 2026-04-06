@@ -938,6 +938,71 @@ bool ColorGradientPyramid::extractTemplate(Template &templ) const
         sbm::sbm_log(sbm::LogLevel::Warning, "feature", "have no enough features, exhaustive mode");
     }
 
+    // Multi-scale orientation consensus: check each candidate's label at
+    // additional blur levels (simulating downscaled scene). Boost stable features
+    // so selectScatteredFeatures prefers them. This costs ~2 Sobel+phase calls
+    // on the template (tiny) but gives much better stability under match_scale.
+    if (!match_only && candidates.size() > 4) {
+        // Blur levels: sigma ~ 1/scale. For match_scale=0.5 → sigma≈1, for 0.3 → sigma≈1.7
+        float extra_sigmas[] = {1.0f, 2.0f};
+        int n_extra = 2;
+
+        // Precompute gradient bins at each blur level
+        struct BlurLevel {
+            cv::Mat dx, dy;
+        };
+        std::vector<BlurLevel> blur_levels(n_extra);
+        for (int si = 0; si < n_extra; si++) {
+            cv::Mat blurred;
+            int ks = (int)(extra_sigmas[si] * 6) | 1;
+            ks = std::max(ks, 3);
+            cv::GaussianBlur(src, blurred, cv::Size(ks, ks), extra_sigmas[si]);
+            cv::Sobel(blurred, blur_levels[si].dx, CV_16S, 1, 0, 3);
+            cv::Sobel(blurred, blur_levels[si].dy, CV_16S, 0, 1, 3);
+        }
+
+        int n_stable_debug = 0, n_unstable_debug = 0, n_partial_debug = 0;
+        for (auto& cand : candidates) {
+            int cx = cand.f.x, cy = cand.f.y;
+            if (cx < 1 || cy < 1 || cx >= src.cols-1 || cy >= src.rows-1) continue;
+
+            int base_bin = 0;
+            { int lbl = cand.f.label; while (base_bin < 8 && !(lbl & (1 << base_bin))) base_bin++; }
+
+            int n_agree = 0;
+            for (int si = 0; si < n_extra; si++) {
+                short gx = blur_levels[si].dx.at<short>(cy, cx);
+                short gy = blur_levels[si].dy.at<short>(cy, cx);
+                // Undirected: force gy >= 0
+                if (gy < 0) { gx = -gx; gy = -gy; }
+                if (gy == 0 && gx < 0) gx = -gx;
+                // Quick 8-bin quantize using atan2 approximation
+                float theta = std::atan2((float)gy, (float)gx) * 180.0f / (float)CV_PI;
+                if (theta < 0) theta += 180.0f;
+                int bin = (int)(theta / 22.5f + 0.5f) & 7;
+                if (bin == base_bin) n_agree++;
+            }
+
+            // Boost score for stable features: stable features get 1.5x score,
+            // partially stable get 1.0x (unchanged), unstable get 0.7x.
+            // This biases selectScatteredFeatures toward stable features
+            // while still allowing unstable ones if no stable alternative exists.
+            if (n_agree == n_extra) {
+                cand.score *= 1.5f;  // fully stable across all blur levels
+                n_stable_debug++;
+            } else if (n_agree == 0) {
+                cand.score *= 0.7f;  // unstable — orientation flips at all blur levels
+                n_unstable_debug++;
+            } else {
+                n_partial_debug++;
+            }
+        }
+
+        sbm::sbm_log(sbm::LogLevel::Info, "feature",
+                     "multi-scale consensus: %d stable, %d partial, %d unstable (of %d)",
+                     n_stable_debug, n_partial_debug, n_unstable_debug, (int)candidates.size());
+    }
+
     // NOTE: Stable sort to agree with old code, which used std::list::sort()
     std::stable_sort(candidates.begin(), candidates.end());
 
@@ -2027,10 +2092,75 @@ std::vector<Match> Detector::match(Mat source, float threshold,
                         }
 
                         // Strided decimate from response row to linear memories.
-                        // For T=4: use SSE shuffles to extract every 4th byte.
-                        // Each 16-byte load yields 4 output bytes; 4 loads → 16 outputs.
-                        if (T == 4) {
-                            // Shuffle masks: pick every 4th byte at each offset
+                        // SSE paths for T=2 and T=4 extract every Nth byte via shuffles.
+                        if (T == 2) {
+                            // T=2: pick every 2nd byte. Each 16-byte load → 8 output bytes.
+                            // Two offsets (even/odd), 2 loads → 16 outputs.
+                            alignas(16) static const uint8_t shuf_t2[2][16] = {
+                                {0,2,4,6,8,10,12,14, 0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80},
+                                {1,3,5,7,9,11,13,15, 0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80},
+                            };
+                            for (int c_start = 0; c_start < 2; ++c_start) {
+                                int grid_index = grid_row * 2 + c_start;
+                                uchar *mem_ptr = memories[ori].ptr(grid_index) + dec_r * mem_w;
+                                __m128i mask = _mm_load_si128((const __m128i*)shuf_t2[c_start]);
+                                int c = 0;
+                                for (; c + 32 <= src_cols; c += 32) {
+                                    const uchar *p = resp_row + c;
+                                    __m128i v0 = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(p)),     mask);
+                                    __m128i v1 = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(p + 16)), mask);
+                                    __m128i out = _mm_unpacklo_epi64(v0, v1);
+                                    _mm_storeu_si128((__m128i*)mem_ptr, out);
+                                    mem_ptr += 16;
+                                }
+                                // Scalar tail
+                                for (int cc = c + c_start; cc < src_cols; cc += 2) {
+                                    *mem_ptr++ = resp_row[cc];
+                                }
+                            }
+                        } else if (T == 8) {
+                            // T=8: per-offset SSE pass, same pattern as T=4.
+                            // Each 32-byte AVX2 load → 4 output bytes (every 8th byte).
+                            // 4 loads → 16 output bytes per offset.
+                            // Shuffle picks bytes {0,8,16,24} from 32-byte AVX2 lane —
+                            // but pshufb works per 16-byte lane, so use 16-byte SSE:
+                            // each 16-byte load → 2 bytes, 8 loads → 16 bytes.
+                            alignas(16) static const uint8_t shuf_t8[16] = {
+                                0, 8, 0x80,0x80,0x80,0x80,0x80,0x80,
+                                0x80,0x80,0x80,0x80,0x80,0x80,0x80,0x80
+                            };
+                            __m128i mask = _mm_load_si128((const __m128i*)shuf_t8);
+                            for (int c_start = 0; c_start < 8; ++c_start) {
+                                int grid_index = grid_row * 8 + c_start;
+                                uchar *mem_ptr = memories[ori].ptr(grid_index) + dec_r * mem_w;
+                                int c = c_start;
+                                for (; c + 128 <= src_cols; c += 128) {
+                                    const uchar *p = resp_row + c;
+                                    __m128i v0 = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(p)),      mask);
+                                    __m128i v1 = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(p + 16)),  mask);
+                                    __m128i v2 = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(p + 32)),  mask);
+                                    __m128i v3 = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(p + 48)),  mask);
+                                    __m128i v4 = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(p + 64)),  mask);
+                                    __m128i v5 = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(p + 80)),  mask);
+                                    __m128i v6 = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(p + 96)),  mask);
+                                    __m128i v7 = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)(p + 112)), mask);
+                                    __m128i v01 = _mm_unpacklo_epi16(v0, v1);
+                                    __m128i v23 = _mm_unpacklo_epi16(v2, v3);
+                                    __m128i v45 = _mm_unpacklo_epi16(v4, v5);
+                                    __m128i v67 = _mm_unpacklo_epi16(v6, v7);
+                                    __m128i v0123 = _mm_unpacklo_epi32(v01, v23);
+                                    __m128i v4567 = _mm_unpacklo_epi32(v45, v67);
+                                    __m128i out = _mm_unpacklo_epi64(v0123, v4567);
+                                    _mm_storeu_si128((__m128i*)mem_ptr, out);
+                                    mem_ptr += 16;
+                                }
+                                for (int cc = c; cc < src_cols; cc += 8) {
+                                    *mem_ptr++ = resp_row[cc];
+                                }
+                            }
+                        } else if (T == 4) {
+                            // T=4: pick every 4th byte. Each 16-byte load → 4 output bytes.
+                            // Four offsets, 4 loads → 16 outputs.
                             alignas(16) static const uint8_t shuf_t4[4][16] = {
                                 {0,4,8,12, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80},
                                 {1,5,9,13, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80},

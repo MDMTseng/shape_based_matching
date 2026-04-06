@@ -634,3 +634,116 @@ for maximum speed. This gives 3-5x speedup with zero accuracy loss.
    fine texture, reducing scores by ~10-15% at non-cardinal angles. This is
    a test artifact — real scenes with actual rotated objects would have their
    own native gradient field.
+
+---
+
+## Per-Angle Position Bias Calibration
+
+ROI refinement has angle-dependent position bias: the measured position
+systematically shifts by up to 0.5px as a function of the object's rotation
+angle. The bias pattern is a smooth sinusoid (template origin vs true rotation
+center offset that rotates with the object) plus sharp spikes at 45-degree
+intervals (orientation bin boundary effects).
+
+### Calibration Method
+
+At `addModel()` time, for each template angle:
+1. Render the template at that angle via warpAffine into a small scene
+2. Match and refine with the same ShapeMatcher pipeline
+3. Measure (dx, dy) offset from the known GT position
+4. Store as a per-angle lookup table
+
+At `match()` time, subtract the calibrated bias for the matched angle.
+Cost: zero per-match (one array lookup). Calibration cost: ~50ms at
+`addModel` time (360 self-matches on a small scene).
+
+### Results (FHD, real metal part template, 24 objects, clean)
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Position mean | 0.30 px | **0.17 px** |
+| Position worst | 0.60 px | **0.40 px** |
+| Bias magnitude | 0.056 px | **0.024 px** |
+| RMS (x, y) | (0.234, 0.238) | **(0.129, 0.153)** |
+
+### 360-Degree Sweep (single object, all angles)
+
+| Metric | Value |
+|--------|-------|
+| Position mean | **0.064 px** |
+| Position worst | 0.51 px |
+| Angle mean | **0.053 deg** |
+| Angle worst | 0.17 deg |
+| Detection rate | **360/360** |
+
+### Residual Error Pattern
+
+The 360-degree error chart shows 45-degree periodic position spikes
+(~0.5px) coinciding with 8-bin orientation quantization boundaries.
+These spikes are sub-pixel-position-dependent (vary with where the
+object is placed in the scene) and cannot be removed by angle-only
+calibration. The smooth sinusoidal bias component IS fully removed.
+
+Blurring the template for ROI refine was tested but **made accuracy
+worse** (0.064 → 0.178px mean) — sharp templates give better
+matchTemplate peak localization.
+
+---
+
+## NMS Radius Configuration
+
+Changed auto NMS radius from `min(w,h) / 2` to `min(w,h) * nms_radius_scale`
+with configurable `nms_radius_scale` (default 0.75).
+
+The original 0.5 multiplier was too tight for templates with strong internal
+edges: secondary coarse-match peaks at 60-85px from true positives survived
+NMS, generating false positives that wasted ROI refine time.
+
+| nms_radius_scale | FP count | Total time (s=0.3, 24 obj) |
+|------------------|----------|---------------------------|
+| 0.50 (old) | 37 FP | 17ms |
+| 0.60 | 18 FP | 15ms |
+| **0.75 (new default)** | **4 FP** | **14ms** |
+
+### Score Gap Analysis (s=0.5, real template)
+
+| | Count | Score range |
+|---|-------|-------------|
+| True positives | 24 | 79.5 - 84.6 |
+| False positives | 0 | — (all eliminated by min_score=65) |
+| Score gap | | **21.6 points** |
+
+With `min_score=65` (raised from 50): zero FP, zero missed TP.
+
+---
+
+## Cached Scaled Detector
+
+When `match_scale < 1.0`, pre-build a separate detector with scaled template
+features at `addModel()` time. The `match()` call uses this detector directly
+instead of deep-copying and scaling templates every frame.
+
+Previously, each `match()` call deep-copied 360 template pyramids (each with
+~85 features), scaled coordinates, matched, then restored from the copy.
+The copy/restore added ~1-3ms per call.
+
+With the cached detector, the scale-in-place overhead is eliminated. Both
+paths produce identical results. Falls back to scale-in-place when no
+cached detector is available.
+
+---
+
+## Combined Pipeline Performance (FHD 1920x1080, 24 objects, clean)
+
+All optimizations combined: fused Sobel+Quantize, match_scale, bias
+calibration, NMS radius, min_score tuning.
+
+| Config | Total | TP/FP | Angle | Position |
+|--------|-------|-------|-------|----------|
+| s=1.0 score=65 | **12ms** | 24/0 | 0.07 deg | 0.17 px |
+| s=0.5 score=65 | **6ms** | 24/0 | 0.07 deg | 0.16 px |
+
+Compared to the original pipeline before all optimizations on this branch:
+- FHD full-res: ~45ms → **12ms** (3.8x speedup)
+- FHD with match_scale=0.5: → **6ms** (7.5x speedup)
+- 20MP with match_scale=0.3: → **14ms** from ~90ms original

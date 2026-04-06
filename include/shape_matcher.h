@@ -88,6 +88,11 @@ struct FeatureSet {
     /// "pointing right", set angle_offset = -45.
     float angle_offset = 0;
 
+    /// Per-angle position bias (dx, dy) in pixels, indexed by template angle.
+    /// Calibrated at addModel time via self-matching. Subtracted from match results.
+    std::vector<cv::Point2f> pos_bias;  ///< pos_bias[angle_deg] = (bias_x, bias_y)
+    float pos_bias_step = 0;            ///< angle step used for calibration
+
     // --- Methods ---
 
     /// Set the user-defined origin (reference point in template coords).
@@ -259,9 +264,10 @@ enum class RefineMode {
 };
 
 struct MatchConfig {
-    float min_score = 50.0f;       ///< Minimum similarity (0-100)
+    float min_score = 65.0f;       ///< Minimum similarity (0-100)
     int max_results = 0;           ///< Max results (0 = unlimited)
     float nms_radius = -1;         ///< Spatial NMS radius (-1 = auto from template size)
+    float nms_radius_scale = 0.75f; ///< Auto NMS radius = min(w,h) * this (0.5=tight, 0.75=default, 1.0=aggressive)
     float nms_angle = 360.0f;      ///< NMS angle tolerance (deg). Matches at same position
                                     ///< but different angles (>nms_angle) are kept.
                                     ///< Set to 30 for angle-aware NMS (noisy scenes).

@@ -1531,10 +1531,19 @@ struct ShapeMatcher::Impl {
     std::vector<ModelInfo> models;
     int total_templates = 0;
 
+    // Pre-built scaled detector for match_scale < 1.0.
+    // Features are scaled once at addModel time — zero per-match overhead.
+    std::unique_ptr<line2Dup::Detector> scaled_detector;
+
     Impl(const MatchConfig& cfg)
         : match_config(cfg),
           detector(128, cfg.T_levels,
-                   cfg.weak_threshold, cfg.strong_threshold) {}
+                   cfg.weak_threshold, cfg.strong_threshold) {
+        if (cfg.match_scale < 1.0f && cfg.match_scale > 0.1f) {
+            scaled_detector.reset(new line2Dup::Detector(
+                128, cfg.T_levels, cfg.weak_threshold, cfg.strong_threshold));
+        }
+    }
 
     // Convert FeatureSet to meiqua TemplatePyramid
     static void featureSetToTemplates(const FeatureSet& fs,
@@ -1784,6 +1793,81 @@ int ShapeMatcher::addModel(const std::string& name,
         s += config.scale.step;
     } while (s <= config.scale.max + 0.001f && config.scale.max > config.scale.min);
 
+    // Build pre-scaled templates for match_scale (scale coordinates once at setup)
+    if (impl_->scaled_detector) {
+        float ms = impl_->match_config.match_scale;
+        FeatureSet scaled_fs = features;
+        // Scale feature coordinates in all levels
+        for (auto& lv : scaled_fs.levels) {
+            lv.tl_x = (int)(lv.tl_x * ms + 0.5f);
+            lv.tl_y = (int)(lv.tl_y * ms + 0.5f);
+            lv.width = (int)(lv.width * ms + 0.5f);
+            lv.height = (int)(lv.height * ms + 0.5f);
+            for (auto& f : lv.features) {
+                f.x = (int)(f.x * ms + 0.5f);
+                f.y = (int)(f.y * ms + 0.5f);
+            }
+        }
+        scaled_fs.templ_width = (int)(features.templ_width * ms + 0.5f);
+        scaled_fs.templ_height = (int)(features.templ_height * ms + 0.5f);
+
+        float s2 = config.scale.min;
+        do {
+            impl_->addModelAtScaleTo(*impl_->scaled_detector,
+                                     info.class_id, scaled_fs, config.angle, s2);
+            if (config.flip) {
+                auto flipped = Impl::flipFeatures(scaled_fs);
+                impl_->addModelAtScaleTo(*impl_->scaled_detector,
+                                         info.class_id_flip, flipped, config.angle, s2);
+            }
+            s2 += config.scale.step;
+        } while (s2 <= config.scale.max + 0.001f && config.scale.max > config.scale.min);
+    }
+
+    // Calibrate per-angle position bias via self-matching.
+    // Render template at each angle, match, measure (dx, dy) offset.
+    // Skip for internal calibration matcher (name starts with _) to avoid recursion.
+    if (!features.templ_image.empty() && impl_->match_config.refine != RefineMode::None
+        && name[0] != '_') {
+        float cal_step = config.angle.step;
+        int n_cal = (int)((config.angle.end - config.angle.start) / cal_step);
+        info.features.pos_bias.resize(n_cal);
+        info.features.pos_bias_step = cal_step;
+
+        int tw = features.templ_image.cols, th = features.templ_image.rows;
+        int scene_w = tw * 3, scene_h = th * 3;  // small scene for calibration
+        float cx = scene_w / 2.0f, cy = scene_h / 2.0f;
+
+        MatchConfig cal_cfg = impl_->match_config;
+        cal_cfg.min_score = 30;
+        cal_cfg.match_scale = 1.0f;  // calibrate at full-res
+        cal_cfg.max_results = 1;
+        ShapeMatcher cal_matcher(cal_cfg);
+        cal_matcher.addModel("_cal_", features, config);
+
+        for (int i = 0; i < n_cal; i++) {
+            float angle = config.angle.start + i * cal_step;
+            cv::Mat cal_scene(scene_h, scene_w, CV_8U, cv::Scalar(0));
+            cv::Mat M = cv::getRotationMatrix2D(
+                cv::Point2f(tw/2.0f, th/2.0f), -angle, 1.0);
+            M.at<double>(0,2) += cx - tw/2.0;
+            M.at<double>(1,2) += cy - th/2.0;
+            cv::Mat warped;
+            cv::warpAffine(features.templ_image, warped, M,
+                           cal_scene.size(), cv::INTER_LINEAR, cv::BORDER_TRANSPARENT);
+            for (int r = 0; r < warped.rows; r++)
+                for (int c = 0; c < warped.cols; c++)
+                    if (warped.at<uchar>(r,c) > 0)
+                        cal_scene.at<uchar>(r,c) = warped.at<uchar>(r,c);
+
+            auto cal_results = cal_matcher.match(cal_scene);
+            if (!cal_results.empty()) {
+                info.features.pos_bias[i] = cv::Point2f(
+                    cal_results[0].x - cx, cal_results[0].y - cy);
+            }
+        }
+    }
+
     info.num_variants = count;
     impl_->models.push_back(info);
     impl_->total_templates += count;
@@ -1822,11 +1906,15 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
             class_ids.push_back(m.class_id_flip);
     }
 
-    line2Dup::Detector& match_detector = impl_->detector;
+    // Use scaled_detector if available (pre-built at addModel time),
+    // otherwise fall back to scale-in-place on the main detector.
+    line2Dup::Detector& match_detector = (using_match_scale && impl_->scaled_detector)
+        ? *impl_->scaled_detector : impl_->detector;
 
-    // Scale features in-place for match_scale. Save originals for lossless restore.
+    // Fallback: scale features in-place (only when no pre-built scaled detector)
     std::map<std::string, std::vector<std::vector<line2Dup::Template>>> saved_templates;
-    if (using_match_scale) {
+    bool scaling_in_place = using_match_scale && !impl_->scaled_detector;
+    if (scaling_in_place) {
         float s = cfg.match_scale;
         for (auto& cid : class_ids) {
             auto& tps = impl_->detector.getClassTemplates(cid);
@@ -1852,8 +1940,8 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
     // Run meiqua matching
     auto raw_matches = match_detector.match(padded, cfg.min_score, class_ids);
 
-    // Restore original templates
-    if (using_match_scale) {
+    // Restore original templates if we scaled in-place
+    if (scaling_in_place) {
         for (auto& cid : class_ids)
             impl_->detector.getClassTemplates(cid) = std::move(saved_templates[cid]);
     }
@@ -1862,7 +1950,7 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
     float nms_r = cfg.nms_radius;
     if (nms_r < 0 && !impl_->models.empty()) {
         auto& fs = impl_->models[0].features;
-        nms_r = std::min(fs.templ_width, fs.templ_height) / 2.0f;
+        nms_r = std::min(fs.templ_width, fs.templ_height) * cfg.nms_radius_scale;
     }
     if (nms_r < 1) nms_r = 1;
     // Compute angle step for angle-aware NMS
@@ -1940,9 +2028,14 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         // Compute object center (user origin, rotated + scaled)
         float scaled_tw = fs.templ_width * matched_scale;
         float scaled_th = fs.templ_height * matched_scale;
-        // tl_x/tl_y are in full-res coords (restored after scale-in-place matching)
-        float scene_x = m.x * inv_scale + (scaled_tw / 2.0f - tmpl[0].tl_x);
-        float scene_y = m.y * inv_scale + (scaled_th / 2.0f - tmpl[0].tl_y);
+        // tl_x coordinate space depends on which detector was used:
+        //   scaled_detector: tl_x is in scaled coords → multiply by inv_scale
+        //   main detector (scale-in-place restored): tl_x is full-res → use as-is
+        bool tmpl_is_scaled = (using_match_scale && impl_->scaled_detector != nullptr);
+        float tl_x_fr = tmpl_is_scaled ? tmpl[0].tl_x * inv_scale : (float)tmpl[0].tl_x;
+        float tl_y_fr = tmpl_is_scaled ? tmpl[0].tl_y * inv_scale : (float)tmpl[0].tl_y;
+        float scene_x = m.x * inv_scale + (scaled_tw / 2.0f - tl_x_fr);
+        float scene_y = m.y * inv_scale + (scaled_th / 2.0f - tl_y_fr);
 
         // Transform user origin from template center to scene coords
         float ox = fs.origin.x - fs.templ_width / 2.0f;
@@ -2034,6 +2127,15 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
                 user_angle = std::fmod(user_angle, 360.0f);
                 if (user_angle < 0) user_angle += 360.0f;
             }
+        }
+
+        // Apply per-angle position bias correction
+        if (!fs.pos_bias.empty() && fs.pos_bias_step > 0) {
+            float angle_for_bias = std::fmod(user_angle, 360.0f);
+            if (angle_for_bias < 0) angle_for_bias += 360.0f;
+            int bi = (int)(angle_for_bias / fs.pos_bias_step + 0.5f) % (int)fs.pos_bias.size();
+            user_x -= fs.pos_bias[bi].x;
+            user_y -= fs.pos_bias[bi].y;
         }
 
         MatchResult r;

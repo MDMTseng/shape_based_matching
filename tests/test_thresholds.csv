@@ -3,49 +3,52 @@
 # hides regressions. If a test fails, fix the algorithm — not the threshold.
 # See TEST_IMPROVEMENT_PLAN.md section 6e for threshold management rules.
 #
+# Format: actual value + ~15% margin for accuracy, ~20% for speed (OS variance)
+# Each entry shows: typical value, threshold, and original value for history.
+#
 id,type,metric,op,threshold,description
 # ======== 1. Coarse Matching ========
 1a_detect,check,coarse_detect_count,==,6,Coarse detection: all 6 test angles found
-1a_angle,check,coarse_worst_ang,<,14.5,Coarse worst angle error (deg) — typical 13.0 (original: 16.0)
-1a_pos,check,coarse_worst_pos,<,12.5,Coarse worst position error (px) — typical 11.3 (original: 15.0)
+1a_angle,check,coarse_worst_ang,<,15.0,Coarse worst angle error (deg) — typical 13.0 (original: 16.0)
+1a_pos,check,coarse_worst_pos,<,13.0,Coarse worst position error (px) — typical 11.3 (original: 15.0)
 1b_multi,check,multi_obj_found,>=,10,Multi-object FHD: all 10 found (original: >=9)
-1c_speed,warn,coarse_fhd_ms,<,16.0,Coarse FHD single match speed (ms) — typical 13 (original: 24.0 / pre-fused: 18.0)
+1c_speed,warn,coarse_fhd_ms,<,16.0,Coarse FHD single match speed (ms) — typical 13 (original: 24.0)
 # ======== 2. ICP (Inverse) Refinement ========
 2a_icp_ang_mean,check,icp_ang_mean,<,0.055,ICP angle mean across 72 angles (deg) — typical 0.046 (original: 0.15)
-2a_icp_ang_worst,check,icp_ang_worst,<,0.25,ICP angle worst case (deg) — typical 0.204 (original: 0.5)
-2a_icp_pos_mean,check,icp_pos_mean,<,0.72,ICP position mean (px) — EDT limit ~0.66 (original: 0.8)
+2a_icp_ang_worst,check,icp_ang_worst,<,0.24,ICP angle worst case (deg) — typical 0.204 (original: 0.5)
+2a_icp_pos_mean,check,icp_pos_mean,<,0.72,ICP position mean (px) — typical 0.662, EDT limit ~0.66 (original: 0.8)
 2a_icp_pos_mean_low,check,icp_pos_mean,>,0.3,ICP position mean lower bound (px) — should not be suspiciously good
-2b_icp_diverge,check,icp_old_fail_worst_pos,<,1.05,ICP no divergence at old failure angles (px) — typical 0.87 (original: 2.0)
-2c_icp_noise,check,icp_noise20_ang_mean,<,0.55,ICP noise sigma=20 angle mean (deg) — typical 0.46 (original: 1.0)
-2d_icp_speed,warn,icp_250_ms,<,1.8,ICP speed on 250x250 single object (ms) — typical 1.2-1.5 (original: 5.0)
+2b_icp_diverge,check,icp_old_fail_worst_pos,<,1.01,ICP no divergence at old failure angles (px) — typical 0.87 (original: 2.0)
+2c_icp_noise,check,icp_noise20_ang_mean,<,0.53,ICP noise sigma=20 angle mean (deg) — typical 0.46 (original: 1.0)
+2d_icp_speed,warn,icp_250_ms,<,1.1,ICP speed on 250x250 single object (ms) — typical 0.7-0.9 (original: 5.0)
 # ======== 3. ROI Refinement ========
-3a_roi_ang_mean,check,roi_ang_mean,<,0.15,ROI angle mean across 72 angles (deg) — typical 0.134 (original: 0.2)
-3a_roi_ang_worst,check,roi_ang_worst,<,0.53,ROI angle worst case (deg) — typical 0.477 (original: 0.7)
+3a_roi_ang_mean,check,roi_ang_mean,<,0.155,ROI angle mean across 72 angles (deg) — typical 0.134 (original: 0.2)
+3a_roi_ang_worst,check,roi_ang_worst,<,0.55,ROI angle worst case (deg) — typical 0.477 (original: 0.7)
 3a_roi_pos_mean,check,roi_pos_mean,<,0.07,ROI position mean (px) — typical 0.060 (original: 0.1)
 3a_roi_pos_mean_low,check,roi_pos_mean,>,0.01,ROI position mean lower bound (px) — sanity check
-3b_pca_65,check,roi_pca_65_err,<,0.008,ROI PCA fix at 65deg (deg) — typical 0.003 (original: 0.5)
-3b_pca_70,check,roi_pca_70_err,<,0.17,ROI PCA fix at 70deg (deg) — typical 0.137 (original: 0.5)
+3b_pca_65,check,roi_pca_65_err,<,0.005,ROI PCA fix at 65deg (deg) — typical 0.003 (original: 0.5)
+3b_pca_70,check,roi_pca_70_err,<,0.16,ROI PCA fix at 70deg (deg) — typical 0.137 (original: 0.5)
 3c_subpixel,check,roi_subpx_mean_pos,<,0.055,ROI sub-pixel sweep mean position error (px) — typical 0.048 (original: 0.1)
-3d_noise30,check,roi_noise30_mean_pos,<,0.095,ROI noise sigma=30 position (px) — typical 0.077 (original: 0.15)
-3d_noise40,check,roi_noise40_mean_pos,<,0.105,ROI noise sigma=40 position (px) — typical 0.089 (original: 0.2)
-3e_roi_speed,warn,roi_refine_ms,<,0.95,ROI refine speed per call (ms) — typical 0.75 (original: 0.85)
+3d_noise30,check,roi_noise30_mean_pos,<,0.09,ROI noise sigma=30 position (px) — typical 0.077 (original: 0.15)
+3d_noise40,check,roi_noise40_mean_pos,<,0.10,ROI noise sigma=40 position (px) — typical 0.089 (original: 0.2)
+3e_roi_speed,warn,roi_refine_ms,<,0.95,ROI refine speed per call (ms) — typical 0.75-0.83 (original: 0.85)
 # ======== 4. Feature Selection ========
 4a_pts8,check,opt_pts_8_count,>=,1,selectOptimizedPoints(8) returns at least 1 point
 4a_pts8_max,check,opt_pts_8_count,<=,8,selectOptimizedPoints(8) returns at most 8
 4a_pts15,check,opt_pts_15_count,>=,1,selectOptimizedPoints(15) returns at least 1 point
-4b_sens,check,opt_pts_worst_ang,<,0.9,Sensitivity worst_ang for L-shape 8pts — typical 0.74 (original: 1.1)
+4b_sens,check,opt_pts_worst_ang,<,0.86,Sensitivity worst_ang for L-shape 8pts — typical 0.74 (original: 1.1)
 4c_corners,check,opt_pts_corner_count,>=,5,Corner priority: at least 5 corners in 8 selected — typical 6 (original: >=2)
 4d_cache,check,cache_consistent,==,1,Cache returns consistent result on second call
 # ======== 5. Sensitivity Analysis ========
-5a_lshape,check,lshape_worst_ang,<,0.9,L-shape not fragile — typical 0.74 (original: 1.1)
+5a_lshape,check,lshape_worst_ang,<,0.86,L-shape not fragile — typical 0.74 (original: 1.1)
 5b_line,check,line_worst_pos,>,0.9,Degenerate single line detected as high-sensitivity — typical 1.12 (original: >0.4)
 # ======== 6. Speed Benchmarks — must not regress (~20% headroom)
-6_speed_coarse,warn,fhd10_coarse_ms,<,17.0,FHD 10-obj coarse speed (ms) — typical 14ms (original: 25.0 / pre-fused: 18.0)
-6_speed_icp,warn,fhd10_icp_ms,<,18.0,FHD 10-obj ICP speed (ms) — typical 15ms (original: 25.0 / pre-fused: 20.0)
-6_speed_roi,warn,fhd10_roi_ms,<,19.0,FHD 10-obj ROI speed (ms) — typical 16ms (original: 27.0 / pre-fused: 21.0)
+6_speed_coarse,warn,fhd10_coarse_ms,<,17.0,FHD 10-obj coarse speed (ms) — typical 14ms (original: 25.0)
+6_speed_icp,warn,fhd10_icp_ms,<,18.0,FHD 10-obj ICP speed (ms) — typical 15ms (original: 25.0)
+6_speed_roi,warn,fhd10_roi_ms,<,19.0,FHD 10-obj ROI speed (ms) — typical 16ms (original: 27.0)
 # ======== 7. Cross-validation ========
-7a_roi_better_pos,check,roi_icp_pos_ratio,<,0.12,ROI position should be much better than ICP — typical 0.091 (original: 0.5)
-7b_icp_better_ang_clean,check,icp_roi_ang_ratio,<,0.45,ICP angle should be better than ROI on clean — typical 0.34 (original: 1.5)
+7a_roi_better_pos,check,roi_icp_pos_ratio,<,0.11,ROI position should be much better than ICP — typical 0.091 (original: 0.5)
+7b_icp_better_ang_clean,check,icp_roi_ang_ratio,<,0.40,ICP angle should be better than ROI on clean — typical 0.34 (original: 1.5)
 # ======== 8. Edge Cases ========
 8a_edge_icp,check,edge_icp_found,==,1,Near-edge object found by ICP
 8a_edge_roi,check,edge_roi_found,==,1,Near-edge object found by ROI
@@ -60,39 +63,39 @@ id,type,metric,op,threshold,description
 9b_coarse_b21,check,coarse_detect_b21,==,1,Coarse detects object at blur k=21
 9b_coarse_b31,check,coarse_detect_b31,==,1,Coarse detects object at blur k=31
 # 9c: ICP accuracy under noise
-9c_icp_n10_ang,check,icp_n10_ang,<,0.055,ICP angle at noise=10 (deg) — typical 0.044 (original: 0.5)
-9c_icp_n20_ang,check,icp_n20_ang,<,0.5,ICP angle at noise=20 (deg) — typical 0.42 (original: 2.0)
-9c_icp_n30_ang,warn,icp_n30_ang,<,1.5,ICP angle at noise=30 (deg) — typical 1.03 (original: 5.0)
+9c_icp_n10_ang,check,icp_n10_ang,<,0.053,ICP angle at noise=10 (deg) — typical 0.044 (original: 0.5)
+9c_icp_n20_ang,check,icp_n20_ang,<,0.49,ICP angle at noise=20 (deg) — typical 0.42 (original: 2.0)
+9c_icp_n30_ang,warn,icp_n30_ang,<,1.2,ICP angle at noise=30 (deg) — typical 1.03 (original: 5.0)
 # 9d: ICP accuracy under blur
-9d_icp_b5_ang,check,icp_b5_ang,<,0.015,ICP angle at blur k=5 (deg) — typical 0.011 (original: 0.5)
-9d_icp_b11_ang,check,icp_b11_ang,<,0.07,ICP angle at blur k=11 (deg) — typical 0.053 (original: 1.0)
-9d_icp_b21_ang,check,icp_b21_ang,<,0.05,ICP angle at blur k=21 (deg) — typical 0.039 (original: 2.0)
+9d_icp_b5_ang,check,icp_b5_ang,<,0.013,ICP angle at blur k=5 (deg) — typical 0.011 (original: 0.5)
+9d_icp_b11_ang,check,icp_b11_ang,<,0.065,ICP angle at blur k=11 (deg) — typical 0.053 (original: 1.0)
+9d_icp_b21_ang,check,icp_b21_ang,<,0.045,ICP angle at blur k=21 (deg) — typical 0.039 (original: 2.0)
 # 9e: ROI accuracy under noise
-9e_roi_n20_pos,check,roi_n20_pos,<,0.045,ROI position at noise=20 (px) — typical 0.035 (original: 0.15)
-9e_roi_n30_pos,check,roi_n30_pos,<,0.055,ROI position at noise=30 (px) — typical 0.042 (original: 0.2)
-9e_roi_n40_pos,check,roi_n40_pos,<,0.06,ROI position at noise=40 (px) — typical 0.048 (original: 0.3)
-9e_roi_n50_pos,warn,roi_n50_pos,<,0.08,ROI position at noise=50 (px) — typical 0.060 (original: 1.0)
+9e_roi_n20_pos,check,roi_n20_pos,<,0.042,ROI position at noise=20 (px) — typical 0.035 (original: 0.15)
+9e_roi_n30_pos,check,roi_n30_pos,<,0.050,ROI position at noise=30 (px) — typical 0.042 (original: 0.2)
+9e_roi_n40_pos,check,roi_n40_pos,<,0.056,ROI position at noise=40 (px) — typical 0.048 (original: 0.3)
+9e_roi_n50_pos,warn,roi_n50_pos,<,0.07,ROI position at noise=50 (px) — typical 0.060 (original: 1.0)
 9e_roi_n40_ang,check,roi_n40_ang,<,0.23,ROI angle at noise=40 (deg) — typical 0.193 (original: 0.5)
 # 9f: ROI accuracy under blur
-9f_roi_b5_ang,check,roi_b5_ang,<,0.008,ROI angle at blur k=5 (deg) — typical 0.005 (original: 0.5)
-9f_roi_b11_ang,check,roi_b11_ang,<,0.05,ROI angle at blur k=11 (deg) — typical 0.035 (original: 1.0)
-9f_roi_b21_ang,check,roi_b21_ang,<,0.3,ROI angle at blur k=21 (deg) — typical 0.255 (original: 2.0)
-9f_roi_b11_pos,check,roi_b11_pos,<,0.085,ROI position at blur k=11 (px) — typical 0.067 (original: 0.5)
+9f_roi_b5_ang,check,roi_b5_ang,<,0.006,ROI angle at blur k=5 (deg) — typical 0.005 (original: 0.5)
+9f_roi_b11_ang,check,roi_b11_ang,<,0.042,ROI angle at blur k=11 (deg) — typical 0.035 (original: 1.0)
+9f_roi_b21_ang,check,roi_b21_ang,<,0.30,ROI angle at blur k=21 (deg) — typical 0.255 (original: 2.0)
+9f_roi_b11_pos,check,roi_b11_pos,<,0.08,ROI position at blur k=11 (px) — typical 0.067 (original: 0.5)
 # 9g: Combined noise+blur
-9g_icp_n20b5_ang,check,icp_n20b5_ang,<,0.02,ICP angle at n=20 b=5 combined (deg) — typical 0.015 (original: 1.0)
-9g_roi_n30b11_ang,check,roi_n30b11_ang,<,0.14,ROI angle at n=30 b=11 combined (deg) — typical 0.108 (original: 1.0)
-9g_roi_n30b11_pos,check,roi_n30b11_pos,<,0.14,ROI position at n=30 b=11 combined (px) — typical 0.110 (original: 0.5)
-9g_roi_n50b11_pos,warn,roi_n50b11_pos,<,0.2,ROI position at n=50 b=11 combined (px) — typical 0.139 (original: 2.0)
-# ======== 10. Multi-resolution — speed must not regress (~5% headroom)
-10_360p_coarse,warn,speed_360p_Coarse_ms,<,4.0,360p 3-obj coarse (ms) — typical 1.0-2.7 very-high-variance (original: 3.0)
-10_360p_icp,warn,speed_360p_ICP_ms,<,5.0,360p 3-obj ICP (ms) — typical 1.4-3.5 very-high-variance (original: 3.0)
-10_360p_roi,warn,speed_360p_ROI_ms,<,6.0,360p 3-obj ROI (ms) — typical 2.8-4.7 very-high-variance (original: 4.5)
-10_1080p_coarse,warn,speed_1080p_Coarse_ms,<,18.0,1080p 20-obj coarse (ms) — typical 15 (original: 26.0 / pre-fused: 19.0)
-10_1080p_icp,warn,speed_1080p_ICP_ms,<,18.0,1080p 20-obj ICP (ms) — typical 16 (original: 27.0 / pre-fused: 19.0)
-10_1080p_roi,warn,speed_1080p_ROI_ms,<,20.0,1080p 20-obj ROI (ms) — typical 17 (original: 28.0 / pre-fused: 21.0)
-10_20mp_coarse,warn,speed_20mp_Coarse_ms,<,100.0,20MP 20-obj coarse (ms) — typical 85 (original: 180.0 / pre-fused: 115.0)
-10_20mp_icp,warn,speed_20mp_ICP_ms,<,100.0,20MP 20-obj ICP (ms) — typical 85 (original: 180.0 / pre-fused: 118.0)
-10_20mp_roi,warn,speed_20mp_ROI_ms,<,105.0,20MP 20-obj ROI (ms) — typical 91 (original: 185.0 / pre-fused: 118.0)
+9g_icp_n20b5_ang,check,icp_n20b5_ang,<,0.018,ICP angle at n=20 b=5 combined (deg) — typical 0.015 (original: 1.0)
+9g_roi_n30b11_ang,check,roi_n30b11_ang,<,0.13,ROI angle at n=30 b=11 combined (deg) — typical 0.108 (original: 1.0)
+9g_roi_n30b11_pos,check,roi_n30b11_pos,<,0.13,ROI position at n=30 b=11 combined (px) — typical 0.110 (original: 0.5)
+9g_roi_n50b11_pos,warn,roi_n50b11_pos,<,0.17,ROI position at n=50 b=11 combined (px) — typical 0.139 (original: 2.0)
+# ======== 10. Multi-resolution — speed must not regress (~20% headroom)
+10_360p_coarse,warn,speed_360p_Coarse_ms,<,2.0,360p 3-obj coarse (ms) — typical 0.9 (original: 3.0)
+10_360p_icp,warn,speed_360p_ICP_ms,<,3.0,360p 3-obj ICP (ms) — typical 1.7 (original: 3.0)
+10_360p_roi,warn,speed_360p_ROI_ms,<,5.5,360p 3-obj ROI (ms) — typical 4.1 (original: 4.5)
+10_1080p_coarse,warn,speed_1080p_Coarse_ms,<,18.0,1080p 20-obj coarse (ms) — typical 15 (original: 26.0)
+10_1080p_icp,warn,speed_1080p_ICP_ms,<,18.0,1080p 20-obj ICP (ms) — typical 16 (original: 27.0)
+10_1080p_roi,warn,speed_1080p_ROI_ms,<,20.0,1080p 20-obj ROI (ms) — typical 17 (original: 28.0)
+10_20mp_coarse,warn,speed_20mp_Coarse_ms,<,100.0,20MP 20-obj coarse (ms) — typical 85 (original: 180.0)
+10_20mp_icp,warn,speed_20mp_ICP_ms,<,100.0,20MP 20-obj ICP (ms) — typical 85 (original: 180.0)
+10_20mp_roi,warn,speed_20mp_ROI_ms,<,105.0,20MP 20-obj ROI (ms) — typical 91 (original: 185.0)
 # Detection count
 10_360p_roi_found,check,speed_360p_ROI_found,==,3,360p 3-obj ROI: all found
 10_1080p_roi_found,check,speed_1080p_ROI_found,>=,20,1080p 20-obj ROI: all found (original: >=18)
@@ -100,13 +103,13 @@ id,type,metric,op,threshold,description
 10_1080p_icp_found,check,speed_1080p_ICP_found,>=,20,1080p 20-obj ICP: all found (original: >=18)
 10_20mp_icp_found,check,speed_20mp_ICP_found,>=,20,20MP 20-obj ICP: all found (original: >=18)
 # Per-object accuracy for ROI
-10_1080p_roi_ang,check,speed_1080p_ROI_mean_ang,<,0.13,1080p ROI mean angle error (deg) — typical 0.10 (original: 1.0)
-10_1080p_roi_pos,check,speed_1080p_ROI_mean_pos,<,0.1,1080p ROI mean position error (px) — typical 0.08 (original: 1.0)
-10_20mp_roi_ang,check,speed_20mp_ROI_mean_ang,<,0.13,20MP ROI mean angle error (deg) — typical 0.10 (original: 1.0)
-10_20mp_roi_pos,check,speed_20mp_ROI_mean_pos,<,0.1,20MP ROI mean position error (px) — typical 0.08 (original: 1.0)
+10_1080p_roi_ang,check,speed_1080p_ROI_mean_ang,<,0.13,1080p ROI mean angle error (deg) — typical 0.10-0.12 (original: 1.0)
+10_1080p_roi_pos,check,speed_1080p_ROI_mean_pos,<,0.10,1080p ROI mean position error (px) — typical 0.08 (original: 1.0)
+10_20mp_roi_ang,check,speed_20mp_ROI_mean_ang,<,0.12,20MP ROI mean angle error (deg) — typical 0.10 (original: 1.0)
+10_20mp_roi_pos,check,speed_20mp_ROI_mean_pos,<,0.10,20MP ROI mean position error (px) — typical 0.08 (original: 1.0)
 # Per-object accuracy for ICP
-10_1080p_icp_ang,check,speed_1080p_ICP_mean_ang,<,0.08,1080p ICP mean angle error (deg) — typical 0.06 (original: 1.0)
-10_20mp_icp_ang,check,speed_20mp_ICP_mean_ang,<,0.09,20MP ICP mean angle error (deg) — typical 0.07 (original: 1.0)
+10_1080p_icp_ang,check,speed_1080p_ICP_mean_ang,<,0.08,1080p ICP mean angle error (deg) — typical 0.067 (original: 1.0)
+10_20mp_icp_ang,check,speed_20mp_ICP_mean_ang,<,0.08,20MP ICP mean angle error (deg) — typical 0.064 (original: 1.0)
 # ======== 11. Determinism ========
 11a_pos_diff,check,determinism_pos_max_diff,<,0.001,Determinism: max position diff across 5 runs (px)
 11a_ang_diff,check,determinism_ang_max_diff,<,0.001,Determinism: max angle diff across 5 runs (deg)

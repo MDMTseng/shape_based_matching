@@ -164,7 +164,9 @@ FeatureSet FeatureSet::load(const std::string& path) {
 FeatureSet extractFeatures(const cv::Mat& templ_gray,
                            const cv::Mat& mask,
                            int num_features,
-                           const std::vector<int>& pyramid_T) {
+                           const std::vector<int>& pyramid_T,
+                           float weak_thresh,
+                           float strong_thresh) {
     FeatureSet fs;
     fs.templ_width = templ_gray.cols;
     fs.templ_height = templ_gray.rows;
@@ -176,7 +178,7 @@ FeatureSet extractFeatures(const cv::Mat& templ_gray,
         use_mask = cv::Mat(templ_gray.size(), CV_8U, cv::Scalar(255));
 
     // Use meiqua detector to extract features
-    line2Dup::Detector det(num_features, pyramid_T, 30, 60);
+    line2Dup::Detector det(num_features, pyramid_T, weak_thresh, strong_thresh);
     int id = det.addTemplate(templ_gray, "_extract_", use_mask);
     if (id < 0) return fs;
 

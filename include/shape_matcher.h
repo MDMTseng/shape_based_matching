@@ -216,10 +216,14 @@ struct FeatureSet {
 /// @param mask        Object mask (255 = object, 0 = background). Optional.
 /// @param num_features  Max features to extract (0 = auto).
 /// @param pyramid_T   Decimation factors per pyramid level (e.g., {4, 8}).
+/// @param weak_thresh   Min gradient magnitude for an edge candidate.
+/// @param strong_thresh Gradient magnitude for a strong-edge preference.
 FeatureSet extractFeatures(const cv::Mat& templ_gray,
                            const cv::Mat& mask = cv::Mat(),
                            int num_features = 128,
-                           const std::vector<int>& pyramid_T = {4, 8});
+                           const std::vector<int>& pyramid_T = {4, 8},
+                           float weak_thresh = 30.0f,
+                           float strong_thresh = 60.0f);
 
 // ============================================================
 // ModelConfig: how to generate rotation/scale/flip variants

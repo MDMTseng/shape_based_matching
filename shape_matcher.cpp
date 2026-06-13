@@ -249,6 +249,7 @@ FeatureSet extractFeatures(const cv::Mat& templ_gray,
             const short* dyr = dy16.ptr<short>(r);
             for (int c = 0; c < templ_gray.cols; ++c) {
                 if (canny_edges.at<uchar>(r, c) == 0) continue;
+                if (use_mask.at<uchar>(r, c) == 0) continue;   // restrict refine pts to the object mask
                 float gx = (float)dxr[c], gy = (float)dyr[c];
                 float mag = std::sqrt(gx*gx + gy*gy);
                 if (mag < 1e-6f) continue;
@@ -277,6 +278,7 @@ FeatureSet extractFeatures(const cv::Mat& templ_gray,
             for (int c = 3; c < templ_gray.cols - 3; ++c) {
                 float val = harris_resp.at<float>(r, c);
                 if (val < corner_thresh) continue;
+                if (use_mask.at<uchar>(r, c) == 0) continue;   // restrict refine pts to the object mask
 
                 // Check if local maximum in 5x5
                 bool is_max = true;

@@ -76,6 +76,7 @@ struct FeatureSet {
         cv::Point2f normal{1,0};   // eigenvector of weaker response (constraint direction)
         cv::Point2f tangent{0,1};  // eigenvector of stronger response
         bool is_corner = false;    // true if minor/major > threshold (2D lock)
+        float score_floor = 0.0f;  // worst self-correlation under coarse-error angle envelope
     };
     mutable std::vector<LockInfo> cached_lock_info;
 
@@ -141,8 +142,15 @@ struct FeatureSet {
     /// Uses sensitivity-balanced iterative optimization:
     /// greedy initial selection, then swap least/best to equalize sensitivity.
     /// @param max_points  Target number of points.
+    /// @param min_spacing Minimum pairwise distance (px) between selected points, to
+    ///   stop their ROI windows from overlapping heavily. 0 = off (legacy), <0 = auto
+    ///   (= ROI half-size), >0 = explicit.
+    /// @param edge_only  Skip the corner phase and select EDGE points only (D-optimal).
+    ///   Avoids corner-clustering degeneracy; fixes worst-case on shapes with clustered
+    ///   corners while keeping the original 2D refine. Same per-point matching as before.
     /// @return Positions relative to template center.
-    std::vector<cv::Point2f> selectOptimizedPoints(int max_points = 8) const;
+    std::vector<cv::Point2f> selectOptimizedPoints(int max_points = 8, float min_spacing = 0.0f,
+                                                   bool edge_only = false) const;
 
     /// V3: Match-confidence augmented D-optimal selection.
     /// Same two-phase structure as V1, but weighted by empirical matchTemplate
@@ -280,6 +288,62 @@ struct MatchConfig {
     int icp_iterations = 30;
     float icp_max_dist = 10.0f;
 
+    /// ROI sample-point self-distinctiveness filter (0 = disabled).
+    /// At addModel() each ROI point self-matches inside the template; its peak
+    /// sharpness (response-Hessian major curvature) measures how well-localized the
+    /// match is. Points whose distinctiveness < roi_distinct_pct * (max over points)
+    /// are dropped from the ROI set (kept >= 4). Edge points (sharp across the edge,
+    /// flat along it) are retained; only genuinely flat/ambiguous points are removed.
+    /// Typical: 0.2-0.4. Setup-time only, zero per-match cost.
+    float roi_distinct_pct = 0.0f;
+
+    /// Weight ROI constraints by per-point self-match distinctiveness (lock_major)
+    /// instead of a flat 1.0. Down-weights ambiguous points without removing them
+    /// (keeps point-count redundancy). Softer alternative to roi_distinct_pct.
+    bool roi_weight_by_distinct = false;
+
+    /// Reject ROI points that matched the wrong place (gross outliers). At addModel
+    /// each point's "score floor" is calibrated by self-correlating it under the
+    /// coarse-localization angle error envelope (roi_reject_angle_tol); at match a
+    /// point scoring below score_floor * roi_reject_pct is dropped. Targets the
+    /// "large initial angle -> completely wrong match" case.
+    bool roi_reject_low_score = false;
+    float roi_reject_angle_tol = 3.0f;   ///< Coarse angle-error envelope (deg) for the floor.
+    float roi_reject_pct = 0.8f;         ///< Accept if match score >= floor * this.
+
+    /// Minimum pairwise spacing (px) between auto-selected ROI points, to limit ROI
+    /// window overlap. <0 = auto (ROI half-size). 0 = no spacing constraint (legacy).
+    /// NOTE: large spacing can exclude clustered discriminative points and hurt
+    /// conditioning on some shapes — tune per part.
+    float roi_min_spacing = 0.0f;
+
+    /// Select EDGE points only for ROI refine (skip corners), D-optimal. Keeps the
+    /// original 2D matchTemplate refine unchanged — only the point set differs.
+    /// Avoids corner-clustering degeneracy and fixes worst-case on such shapes.
+    /// Pairs well with roi_min_spacing (~12px). Default off (legacy corner+edge mix).
+    bool roi_edge_only_points = false;
+
+    /// For edge (non-corner) ROI points, match a 1D intensity profile along the edge
+    /// normal instead of a full 2D template match. Faster and avoids the ill-defined
+    /// along-edge peak (an edge only constrains across its normal). Corners still use
+    /// 2D. Pairs well with edge-heavy point selection.
+    bool roi_edge_1d_match = false;
+
+    /// For edge ROI points: run the fast 2D matchTemplate, then collapse the response
+    /// along the edge tangent into a 1D profile and take the across-normal subpixel
+    /// peak. ~2D speed, but tangent-averaged (denoised) and 1D-constrained.
+    bool roi_edge_collapse = false;
+
+    /// Max ROI solve iterations (Gauss-Newton on point-to-line residuals; the dst
+    /// correspondences are matched once and re-solved). 0 = library default (3).
+    int roi_max_iters = 0;
+
+    /// Re-match ROI correspondences every iteration at the improved pose (ICP-style)
+    /// instead of fixing them after the first match. Corrects translation / along-edge
+    /// / large initial-error cases a fixed-correspondence solve cannot (esp. helps 1D
+    /// edge matching). Costs extra matches per refine.
+    bool roi_iterative_rematch = false;
+
     /// Gaussian blur kernel size before gradient computation.
     /// Larger = more noise-robust but blurs fine edges.
     /// Default 7 handles noise up to ~30 sigma.
@@ -305,6 +369,12 @@ struct MatchResult {
     float scale;               ///< Matched scale factor
     bool flipped;              ///< Whether this is a flipped match
     float score;               ///< Confidence (0-100)
+    float refine_residual = -1.0f; ///< ROI refine fit quality: mean |point-to-line|
+                                   ///< residual (px) of the matched sample points at
+                                   ///< the final pose. Low (~<1px) = trustworthy; high
+                                   ///< = points disagree (occlusion / wrong / off match).
+                                   ///< -1 = not computed (refine != ROI). Use to detect
+                                   ///< completely-off matches at the result level.
 };
 
 // ============================================================

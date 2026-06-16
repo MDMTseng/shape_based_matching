@@ -132,3 +132,75 @@ target_link_libraries(bench_param_sweep ${OpenCV_LIBS})
 
 add_executable(bench_match_scale line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/bench_match_scale.cpp)
 target_link_libraries(bench_match_scale ${OpenCV_LIBS})
+
+# Flip-template bug experiment (see flip_template_problem.md). Hermetic; no data.
+add_executable(test_flip_refine line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_flip_refine.cpp)
+target_link_libraries(test_flip_refine ${OpenCV_LIBS})
+
+# Flip-as-separate-model detection accuracy (see flip_template_problem.md). Hermetic.
+add_executable(test_flip_separate line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_flip_separate.cpp)
+target_link_libraries(test_flip_separate ${OpenCV_LIBS})
+
+# Visualize the flag/F templates (features + ROI + centre) for the score-collapse probe.
+add_executable(test_flag_viz line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_flag_viz.cpp)
+target_link_libraries(test_flag_viz ${OpenCV_LIBS})
+
+# Angle-sweep self-match probe: anti-aliasing vs per-angle template generation.
+add_executable(test_flag_sweep line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_flag_sweep.cpp)
+target_link_libraries(test_flag_sweep ${OpenCV_LIBS})
+
+# Multi-template matching: several distinct shapes + a flip pair in one matcher.
+add_executable(test_multi_template line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_multi_template.cpp)
+target_link_libraries(test_multi_template ${OpenCV_LIBS})
+
+# Refine-accuracy decomposition: per-shape, per-RefineMode origin/angle error.
+add_executable(test_refine_accuracy line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_refine_accuracy.cpp)
+target_link_libraries(test_refine_accuracy ${OpenCV_LIBS})
+
+# ROI error decomposition: angle-quantization vs subpixel-match floor vs anti-aliasing.
+add_executable(test_roi_error_decomp line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_roi_error_decomp.cpp)
+target_link_libraries(test_roi_error_decomp ${OpenCV_LIBS})
+
+# L-shape ROI outlier chase: 1-deg sweep, flag spikes.
+add_executable(test_L_outlier line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_L_outlier.cpp)
+target_link_libraries(test_L_outlier ${OpenCV_LIBS})
+
+# ROI self-distinctiveness point filter (roi_distinct_pct) under noise.
+add_executable(test_roi_distinct line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_roi_distinct.cpp)
+target_link_libraries(test_roi_distinct ${OpenCV_LIBS})
+
+# ROI per-point score-gate outlier rejection (roi_reject_low_score) under coarse init + noise.
+add_executable(test_roi_reject line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_roi_reject.cpp)
+target_link_libraries(test_roi_reject ${OpenCV_LIBS})
+
+# ROI per-result residual confidence: detect off matches (occlusion/clutter).
+add_executable(test_roi_confidence line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_roi_confidence.cpp)
+target_link_libraries(test_roi_confidence ${OpenCV_LIBS})
+
+# ROI auto-selection point overlap quantification.
+add_executable(test_roi_overlap line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_roi_overlap.cpp)
+target_link_libraries(test_roi_overlap ${OpenCV_LIBS})
+
+# ROI min-spacing sweep: overlap vs conditioning knee.
+add_executable(test_roi_spacing line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_roi_spacing.cpp)
+target_link_libraries(test_roi_spacing ${OpenCV_LIBS})
+
+# Edge-uniform (FPS over edges) vs corner-priority ROI point selection.
+add_executable(test_edge_uniform line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_edge_uniform.cpp)
+target_link_libraries(test_edge_uniform ${OpenCV_LIBS})
+
+# 1D vs 2D ROI refine speed.
+add_executable(test_roi_speed_1d line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_roi_speed_1d.cpp)
+target_link_libraries(test_roi_speed_1d ${OpenCV_LIBS})
+
+# Library edge-only ROI point selection (original 2D refine).
+add_executable(test_edge_only line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_edge_only.cpp)
+target_link_libraries(test_edge_only ${OpenCV_LIBS})
+
+# Does ROI iteration need re-matching, or just re-solving?
+add_executable(test_roi_iters line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_roi_iters.cpp)
+target_link_libraries(test_roi_iters ${OpenCV_LIBS})
+
+# ROI refine cost vs scene size (5MP).
+add_executable(test_roi_largescene line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/test_roi_largescene.cpp)
+target_link_libraries(test_roi_largescene ${OpenCV_LIBS})

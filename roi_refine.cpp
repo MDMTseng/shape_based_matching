@@ -76,12 +76,126 @@ std::vector<SamplePoint> selectCriticalPoints(
 }
 
 // -----------------------------------------------------------------------
+// Bilinear intensity sample (CV_8U)
+// -----------------------------------------------------------------------
+static inline float bilinearSample(const cv::Mat& img, float x, float y) {
+    if (x < 0 || y < 0 || x >= img.cols - 1 || y >= img.rows - 1) return 0.0f;
+    int x0 = (int)x, y0 = (int)y; float fx = x - x0, fy = y - y0;
+    const uchar* r0 = img.ptr<uchar>(y0);
+    const uchar* r1 = img.ptr<uchar>(y0 + 1);
+    float a = r0[x0]*(1-fx) + r0[x0+1]*fx;
+    float b = r1[x0]*(1-fx) + r1[x0+1]*fx;
+    return a*(1-fy) + b*fy;
+}
+
+// -----------------------------------------------------------------------
+// 1D edge match: sample the template intensity profile ACROSS the edge (along the
+// normal) and slide it over the scene profile along the same (rotated) normal.
+// Returns the matched scene point (= expected + delta * normal_scene). Only the
+// across-edge displacement is measured — the along-edge slide is left unconstrained,
+// which is exactly what an edge should contribute (1D constraint).
+// -----------------------------------------------------------------------
+static cv::Point2f match1D_alongNormal(const cv::Mat& templ_img, const cv::Mat& scene_img,
+                                       cv::Point2f templ_pt, cv::Point2f n_templ,
+                                       cv::Point2f sc_center, cv::Point2f n_scene,
+                                       int half_len, int search_half, float* out_score,
+                                       cv::Point2f t_templ = cv::Point2f(0,0),
+                                       cv::Point2f t_scene = cv::Point2f(0,0),
+                                       int tangent_half = 0) {
+    if (out_score) *out_score = -1.0f;
+    int M = half_len;            // template profile half-length
+    int S = half_len + search_half;
+    int W = tangent_half;        // average each profile sample over +-W along the edge
+    float inv = 1.0f / (2*W + 1);
+    std::vector<float> pt(2*M+1), ps(2*S+1);
+    // Each profile sample is averaged over a band of width (2W+1) along the tangent
+    // (edge) direction -> denoises without blurring the across-edge step.
+    for (int k = -M; k <= M; k++) {
+        float bx = templ_pt.x + k*n_templ.x, by = templ_pt.y + k*n_templ.y;
+        float s = 0;
+        for (int j = -W; j <= W; j++) s += bilinearSample(templ_img, bx + j*t_templ.x, by + j*t_templ.y);
+        pt[k+M] = s * inv;
+    }
+    for (int k = -S; k <= S; k++) {
+        float bx = sc_center.x + k*n_scene.x, by = sc_center.y + k*n_scene.y;
+        float s = 0;
+        for (int j = -W; j <= W; j++) s += bilinearSample(scene_img, bx + j*t_scene.x, by + j*t_scene.y);
+        ps[k+S] = s * inv;
+    }
+
+    std::vector<float> resp(2*search_half+1, -2.0f);
+    float best = -2.0f; int bestd = 0;
+    for (int d = -search_half; d <= search_half; d++) {
+        double dot = 0, e2 = 0, s2 = 0;
+        for (int k = -M; k <= M; k++) { float a = pt[k+M], b = ps[k+d+S]; dot += a*b; e2 += a*a; s2 += b*b; }
+        float ncc = (e2 > 1e-6 && s2 > 1e-6) ? (float)(dot / std::sqrt(e2*s2)) : -2.0f;
+        resp[d+search_half] = ncc;
+        if (ncc > best) { best = ncc; bestd = d; }
+    }
+    // Parabolic subpixel on the 1D response
+    float dd = (float)bestd; int bi = bestd + search_half;
+    if (bi > 0 && bi < (int)resp.size() - 1) {
+        float a = resp[bi-1], b = resp[bi], c = resp[bi+1], den = a - 2*b + c;
+        if (std::abs(den) > kEpsilon) dd += std::max(-1.0f, std::min(1.0f, 0.5f*(a-c)/den));
+    }
+    if (out_score) *out_score = best;
+    return cv::Point2f(sc_center.x + dd*n_scene.x, sc_center.y + dd*n_scene.y);
+}
+
+// -----------------------------------------------------------------------
+// Edge match by NARROW-SEARCH matchTemplate: build an (n x n) template strip and an
+// (n x m) scene strip in the edge frame (n = tangent width, m = n + 2*search along
+// the normal). matchTemplate of (n x m) vs (n x n) returns a 1 x (2*search+1) result
+// directly — a 1D profile along the normal, with the n-wide template averaging over
+// the tangent for free (SIMD). Subpixel peak of that 1D result = across-edge shift.
+// -----------------------------------------------------------------------
+// Extract a strip aligned to (n=along cols, t=along rows) centred at `c`, of output
+// size (2*Lu+1) cols x (2*W+1) rows, via warpAffine (SIMD). Output(u,v) samples
+// src at c + (u-Lu)*n + (v-W)*t.
+static void extractStrip(const cv::Mat& src, cv::Point2f c, cv::Point2f n, cv::Point2f t,
+                         int Lu, int W, cv::Mat& out) {
+    double M[6] = { n.x, t.x, c.x - Lu*n.x - W*t.x,
+                    n.y, t.y, c.y - Lu*n.y - W*t.y };
+    cv::Mat Mm(2, 3, CV_64F, M);
+    cv::warpAffine(src, out, Mm, cv::Size(2*Lu+1, 2*W+1),
+                   cv::INTER_LINEAR | cv::WARP_INVERSE_MAP, cv::BORDER_REPLICATE);
+}
+
+static cv::Point2f matchEdge_strip(const cv::Mat& templ_img, const cv::Mat& scene_img,
+                                   cv::Point2f templ_pt, cv::Point2f n_templ, cv::Point2f t_templ,
+                                   cv::Point2f sc_center, cv::Point2f n_scene, cv::Point2f t_scene,
+                                   int half, int search_half, float* out_score) {
+    if (out_score) *out_score = -1.0f;
+    int W = std::min(half, 8);          // tangent half-width (averaging) -> n = 2W+1
+    int Lt = std::min(half, 6);         // template normal half-extent
+    int Ls = Lt + search_half;          // scene normal half-extent -> m = 2Ls+1
+    cv::Mat tstrip, sstrip;
+    extractStrip(templ_img, templ_pt, n_templ, t_templ, Lt, W, tstrip);   // (2W+1) x (2Lt+1)
+    extractStrip(scene_img, sc_center, n_scene, t_scene, Ls, W, sstrip);  // (2W+1) x (2Ls+1)
+    cv::Mat result;
+    cv::matchTemplate(sstrip, tstrip, result, cv::TM_CCORR_NORMED);  // 1 x (2*search+1)
+    const float* R = result.ptr<float>(0);
+    int n = result.cols, bi = 0; float best = -2.0f;
+    for (int i = 0; i < n; i++) if (R[i] > best) { best = R[i]; bi = i; }
+    float dd = (float)bi;
+    if (bi > 0 && bi < n-1) {
+        float a=R[bi-1], b=R[bi], c=R[bi+1], den=a-2*b+c;
+        if (std::abs(den) > kEpsilon) dd += std::max(-1.0f, std::min(1.0f, 0.5f*(a-c)/den));
+    }
+    float delta = dd - search_half;     // result index 0 == u-offset -search_half
+    if (out_score) *out_score = best;
+    return cv::Point2f(sc_center.x + delta*n_scene.x, sc_center.y + delta*n_scene.y);
+}
+
+// -----------------------------------------------------------------------
 // Subpixel ROI template match
 // -----------------------------------------------------------------------
 static cv::Point2f matchROI_subpixel(const cv::Mat& templ_roi,
                                       const cv::Mat& scene_img,
                                       cv::Point2f expected,
-                                      int search_half) {
+                                      int search_half,
+                                      float* out_score = nullptr) {
+    if (out_score) *out_score = -1.0f;  // <0 => could not match
     int ex = (int)(expected.x + 0.5f), ey = (int)(expected.y + 0.5f);
     int half = templ_roi.rows / 2;
 
@@ -93,6 +207,10 @@ static cv::Point2f matchROI_subpixel(const cv::Mat& templ_roi,
     if (x1 - x0 < templ_roi.cols || y1 - y0 < templ_roi.rows)
         return expected;
 
+    // NOTE: cloning this strided search window to contiguous before matchTemplate was
+    // tried for large (5MP) scenes and gave NO measurable speedup (per-call refine
+    // stays ~0.81ms; the 60x60 window is only ~60 cache lines / microseconds to read).
+    // At 5MP the COARSE matching dominates total time, not the refine.
     cv::Mat search_roi = scene_img(cv::Rect(x0, y0, x1 - x0, y1 - y0));
 
     cv::Mat result;
@@ -101,8 +219,13 @@ static cv::Point2f matchROI_subpixel(const cv::Mat& templ_roi,
     double max_val;
     cv::Point max_loc;
     cv::minMaxLoc(result, nullptr, &max_val, nullptr, &max_loc);
+    if (out_score) *out_score = (float)max_val;   // peak correlation = match confidence
 
-    // Subpixel via parabolic interpolation
+    // Subpixel via parabolic interpolation.
+    // NOTE: a 2D quadratic facet fit and TM_CCOEFF_NORMED were both tried (2026-06-15)
+    // and did NOT lower the ~0.12-0.15px floor (and destabilized some shapes) — the
+    // floor is inherent to the warp-and-correlate per-point match, not the peak
+    // interpolation. For sub-0.1px use RefineMode::ICP_Subpixel.
     float sx = (float)max_loc.x, sy = (float)max_loc.y;
     int mx = max_loc.x, my = max_loc.y;
     int rh = result.rows, rw = result.cols;
@@ -247,7 +370,8 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
                     const cv::Mat& scene_img,
                     const std::vector<SamplePoint>& sample_points,
                     const cv::Vec3f& initial_pose,
-                    const ROIConfig& config) {
+                    const ROIConfig& config,
+                    float* out_residual) {
 
     cv::Vec3f pose = initial_pose;
 
@@ -260,6 +384,7 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
         cv::Point2f tangent;       // PCA tangent (for corners)
         bool is_corner;
         int sample_idx;
+        float score;               // peak correlation at match (confidence)
     };
     std::vector<MatchedPoint> matched_points;
     float last_match_angle = -999;
@@ -283,15 +408,20 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
 
     std::vector<Constraint> constraints;
 
-    // Re-match if first iteration OR if angle changed > 2° since last match
-    bool do_match = (std::abs(angle_deg - last_match_angle) > kAngleRematchDeg);
+    // Re-match if first iteration OR angle changed > threshold since last match.
+    // iterative_rematch forces a re-match (and re-warp) every iteration (ICP-style),
+    // so the match re-centres at the improved pose and corrects translation/along-edge
+    // init error that a fixed-correspondence solve cannot.
+    bool do_match = config.iterative_rematch ||
+                    (std::abs(angle_deg - last_match_angle) > kAngleRematchDeg);
 
     if (do_match) {
         last_match_angle = angle_deg;
         matched_points.clear();
 
         // Warp ROI patches only if angle changed significantly from cache
-        bool need_warp = (std::abs(angle_deg - cached_angle) > kAngleRewarpDeg);
+        bool need_warp = config.iterative_rematch ||
+                         (std::abs(angle_deg - cached_angle) > kAngleRewarpDeg);
         if (need_warp) {
             cached_angle = angle_deg;
             cached_rois.clear();
@@ -305,6 +435,10 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
                 int ty = (int)(sp.pos.y + tcy + 0.5f);
                 int h = safeROIHalf(tx, ty, templ_img.cols, templ_img.rows, config.roi_half);
                 if (h < kMinROIHalf) continue;
+                // NOTE: a contiguous-clone "cache-friendly" block was tried and reverted
+                // — a 2h x 2h (~30x30) sub-image is only ~30 cache lines and already
+                // fits entirely in L1, so cloning adds a copy with no warp speedup. The
+                // strided view is fine here; it would only matter for large blocks.
                 cv::Mat roi_unrot = templ_img(cv::Rect(tx-h, ty-h, 2*h, 2*h));
                 cv::Mat roi;
                 if (std::abs(angle_deg) > 0.5f) {
@@ -327,11 +461,8 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
             float ex = cs * sp.pos.x - sn * sp.pos.y + cx;
             float ey = sn * sp.pos.x + cs * sp.pos.y + cy;
 
-            cv::Point2f matched = matchROI_subpixel(roi, scene_img,
-                                                     cv::Point2f(ex, ey),
-                                                     config.search_half);
-
-            // PCA on UNROTATED template patch (eigenvectors in template space)
+            // PCA on UNROTATED template patch (eigenvectors in template space).
+            // Computed first so we know the edge normal + corner-ness before matching.
             int tx = (int)(sp.pos.x + tcx + 0.5f);
             int ty = (int)(sp.pos.y + tcy + 0.5f);
             int h = safeROIHalf(tx, ty, templ_img.cols, templ_img.rows, config.roi_half);
@@ -344,14 +475,51 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
                 eigvals[0] = eigvals[1] = 0;
                 eigvecs[0] = cv::Point2f(1,0); eigvecs[1] = cv::Point2f(0,1);
             }
+            bool is_corner = (eigvals[0] > kEpsilon && eigvals[1] > kEpsilon &&
+                              eigvals[0] / eigvals[1] < config.corner_eigen_ratio);
+            cv::Point2f n_templ = eigvecs[1];   // across-edge normal (template frame)
+
+            float match_score = -1.0f;
+            cv::Point2f matched;
+            if (config.edge_collapse && !is_corner && h >= kMinROIHalf) {
+                // Narrow-search matchTemplate -> direct 1D across-edge profile.
+                cv::Point2f t_templ = eigvecs[0];
+                cv::Point2f n_scene(cs*n_templ.x - sn*n_templ.y, sn*n_templ.x + cs*n_templ.y);
+                cv::Point2f t_scene(cs*t_templ.x - sn*t_templ.y, sn*t_templ.x + cs*t_templ.y);
+                matched = matchEdge_strip(templ_img, scene_img,
+                                          cv::Point2f((float)tx, (float)ty), n_templ, t_templ,
+                                          cv::Point2f(ex, ey), n_scene, t_scene,
+                                          h, config.search_half, &match_score);
+            } else if (config.edge_1d_match && !is_corner && h >= kMinROIHalf) {
+                // 1D profile match along the (rotated) normal — only the across-edge
+                // displacement is measured. Each sample is averaged over a band along
+                // the edge tangent (window width) to denoise.
+                cv::Point2f n_scene(cs*n_templ.x - sn*n_templ.y,
+                                    sn*n_templ.x + cs*n_templ.y);
+                cv::Point2f t_templ = eigvecs[0];                 // along-edge (template)
+                cv::Point2f t_scene(cs*t_templ.x - sn*t_templ.y,  // along-edge (scene)
+                                    sn*t_templ.x + cs*t_templ.y);
+                // Short template profile (<= ~6px) so it doesn't span a thin bar and
+                // pick up the opposite edge (1D-profile ambiguity on thin features).
+                int prof_h = std::min(h, 6);
+                int tang_h = std::min(h, 10);                     // tangent averaging band
+                matched = match1D_alongNormal(templ_img, scene_img,
+                                              cv::Point2f((float)tx, (float)ty), n_templ,
+                                              cv::Point2f(ex, ey), n_scene,
+                                              prof_h, config.search_half, &match_score,
+                                              t_templ, t_scene, tang_h);
+            } else {
+                matched = matchROI_subpixel(roi, scene_img, cv::Point2f(ex, ey),
+                                            config.search_half, &match_score);
+            }
 
             MatchedPoint mp;
             mp.dst = matched;
-            mp.normal = eigvecs[1];   // store unrotated — rotate per iteration
+            mp.normal = n_templ;      // store unrotated — rotate per iteration
             mp.tangent = eigvecs[0];
-            mp.is_corner = (eigvals[0] > kEpsilon && eigvals[1] > kEpsilon &&
-                            eigvals[0] / eigvals[1] < config.corner_eigen_ratio);
+            mp.is_corner = is_corner;
             mp.sample_idx = cr.sample_idx;
+            mp.score = match_score;
             matched_points.push_back(mp);
         }
     }
@@ -359,6 +527,13 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
     // Build constraints from matched points (reused across iterations)
     for (auto& mp : matched_points) {
         auto& sp = sample_points[mp.sample_idx];
+
+        // Score gate: a match scoring far below this point's coarse-error envelope
+        // floor landed on the wrong place (gross outlier) — drop it entirely.
+        if (config.reject_low_score && sp.score_floor > 0.0f &&
+            mp.score >= 0.0f && mp.score < sp.score_floor * config.reject_pct)
+            continue;
+
         float ex = cs * sp.pos.x - sn * sp.pos.y + cx;
         float ey = sn * sp.pos.x + cs * sp.pos.y + cy;
 
@@ -366,21 +541,27 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
         cv::Point2f normal(cs*mp.normal.x - sn*mp.normal.y,
                            sn*mp.normal.x + cs*mp.normal.y);
 
+        // Weight by self-match distinctiveness (lock_major along the constraint
+        // normal) when enabled — ambiguous points contribute less, without being
+        // removed (preserves point-count redundancy). Floor keeps every point active.
+        float w_normal = config.weight_by_lock ? std::max(0.05f, sp.lock_major) : 1.0f;
+
         Constraint c1;
         c1.src = cv::Point2f(ex, ey);
         c1.dst = mp.dst;
         c1.normal = normal;
-        c1.weight = 1.0f;
+        c1.weight = w_normal;
         constraints.push_back(c1);
 
         if (mp.is_corner) {
             cv::Point2f tangent(cs*mp.tangent.x - sn*mp.tangent.y,
                                 sn*mp.tangent.x + cs*mp.tangent.y);
+            float w_tangent = config.weight_by_lock ? std::max(0.05f, sp.lock_minor) : 1.0f;
             Constraint c2;
             c2.src = cv::Point2f(ex, ey);
             c2.dst = mp.dst;
             c2.normal = tangent;
-            c2.weight = 1.0f;
+            c2.weight = w_tangent;
             constraints.push_back(c2);
         }
     }
@@ -445,6 +626,28 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
                 iteration, pose[2], pose[0], pose[1], d_theta*180/(float)CV_PI, d_tx, d_ty);
 
     } // end iteration loop
+
+    // Per-result confidence: mean |point-to-line| residual of the matched points at
+    // the final pose. Consistent points -> ~0; disagreeing points (occlusion / gross
+    // mismatch / completely-off init) -> large.
+    if (out_residual) {
+        float fa = pose[2] * (float)CV_PI / 180.0f;
+        float fcs = std::cos(fa), fsn = std::sin(fa), fcx = pose[0], fcy = pose[1];
+        float sum = 0; int cnt = 0;
+        for (auto& mp : matched_points) {
+            auto& sp = sample_points[mp.sample_idx];
+            if (config.reject_low_score && sp.score_floor > 0.0f &&
+                mp.score >= 0.0f && mp.score < sp.score_floor * config.reject_pct)
+                continue;
+            float ex = fcs * sp.pos.x - fsn * sp.pos.y + fcx;
+            float ey = fsn * sp.pos.x + fcs * sp.pos.y + fcy;
+            cv::Point2f n(fcs * mp.normal.x - fsn * mp.normal.y,
+                          fsn * mp.normal.x + fcs * mp.normal.y);
+            float e = (ex - mp.dst.x) * n.x + (ey - mp.dst.y) * n.y;
+            sum += std::abs(e); cnt++;
+        }
+        *out_residual = (cnt > 0) ? sum / cnt : -1.0f;
+    }
 
     return pose;
 }

@@ -500,16 +500,71 @@ static float measureNoiseStability(const cv::Mat& roi_patch, const cv::Mat& temp
     return std::sqrt(var / n_trials);
 }
 
-std::vector<cv::Point2f> FeatureSet::selectOptimizedPoints(int max_points) const {
+std::vector<cv::Point2f> FeatureSet::selectOptimizedPoints(int max_points, float min_spacing, bool edge_only) const {
     // Return cached result if available and computed with same (or larger) max_points
     if (!cached_opt_points.empty() && cached_opt_max_points >= max_points)
         return cached_opt_points;
+
+    // Minimum pairwise spacing so selected ROI windows don't overlap heavily.
+    // 0 = off (legacy), <0 = auto (ROI half-size, ~<=50% overlap), >0 = explicit.
+    // The 5x5 grid alone caps per-cell count but not pairwise distance, so points
+    // could otherwise sit a few px apart.
+    float min_sp = (min_spacing < 0.0f) ? (float)kDefaultROIHalf : min_spacing;
+    float min_sp_sq = min_sp * min_sp;
 
     std::vector<cv::Point2f> result;
     if (refine_points.empty() || templ_image.empty())
         return result;
 
     float tcx = templ_width / 2.0f, tcy = templ_height / 2.0f;
+
+    // ================================================================
+    // edge_only: clean, self-contained selector — pure (unweighted) D-optimal over
+    // EDGE refine points with their stored normals + min spacing, no grid/leverage
+    // priority. Maximizes det(information) -> picks geometrically diverse, well-
+    // conditioned edges; spacing limits ROI overlap. The per-point 2D refine is
+    // unchanged. (Replicates the validated edge-Dopt experiment.)
+    // ================================================================
+    if (edge_only) {
+        float sp = (min_spacing < 0.0f) ? (float)kDefaultROIHalf : min_spacing;
+        float sp2 = sp * sp;
+        float hw = templ_width/2.0f - 5, hh = templ_height/2.0f - 5;
+        struct EC { float px, py, j0, j1, j2; };
+        std::vector<EC> cand;
+        for (auto& rp : refine_points) {
+            if (rp.type != FeatureSet::RefinePt::EDGE) continue;
+            if (std::abs(rp.px) > hw || std::abs(rp.py) > hh) continue;
+            float nn = std::sqrt(rp.nx*rp.nx + rp.ny*rp.ny);
+            if (nn < 1e-3f) continue;
+            float nx = rp.nx/nn, ny = rp.ny/nn;
+            cand.push_back({rp.px, rp.py, -rp.py*nx + rp.px*ny, nx, ny});
+        }
+        auto det3 = [](float A[3][3]) {
+            return A[0][0]*(A[1][1]*A[2][2]-A[1][2]*A[2][1])
+                 - A[0][1]*(A[1][0]*A[2][2]-A[1][2]*A[2][0])
+                 + A[0][2]*(A[1][0]*A[2][1]-A[1][1]*A[2][0]); };
+        float I[3][3] = {}; for (int i=0;i<3;i++) I[i][i]=1e-3f;
+        std::vector<int> used;
+        while ((int)result.size() < max_points) {
+            int best=-1; float bestd=-1e30f;
+            for (int i=0;i<(int)cand.size();i++) {
+                bool u=false; for (int s:used) if (s==i){u=true;break;} if (u) continue;
+                if (sp > 0) { bool c=false;
+                    for (auto& p:result){ float dx=cand[i].px-p.x, dy=cand[i].py-p.y; if (dx*dx+dy*dy<sp2){c=true;break;} }
+                    if (c) continue; }
+                float T[3][3]; for (int r=0;r<3;r++) for (int q=0;q<3;q++) T[r][q]=I[r][q];
+                float j0=cand[i].j0,j1=cand[i].j1,j2=cand[i].j2;
+                T[0][0]+=j0*j0;T[0][1]+=j0*j1;T[0][2]+=j0*j2;T[1][0]+=j1*j0;T[1][1]+=j1*j1;T[1][2]+=j1*j2;T[2][0]+=j2*j0;T[2][1]+=j2*j1;T[2][2]+=j2*j2;
+                float d=det3(T); if (d>bestd){bestd=d;best=i;}
+            }
+            if (best<0) break;
+            used.push_back(best); result.push_back(cv::Point2f(cand[best].px, cand[best].py));
+            float j0=cand[best].j0,j1=cand[best].j1,j2=cand[best].j2;
+            I[0][0]+=j0*j0;I[0][1]+=j0*j1;I[0][2]+=j0*j2;I[1][0]+=j1*j0;I[1][1]+=j1*j1;I[1][2]+=j1*j2;I[2][0]+=j2*j0;I[2][1]+=j2*j1;I[2][2]+=j2*j2;
+        }
+        if ((int)result.size() >= 3) { cached_opt_points = result; cached_opt_max_points = max_points; }
+        return result;
+    }
 
     // ================================================================
     // Grid-based spatial distribution (replaces fixed d_min)
@@ -615,6 +670,16 @@ std::vector<cv::Point2f> FeatureSet::selectOptimizedPoints(int max_points) const
 
     std::vector<int> selected;
 
+    // Reject a candidate that sits within min_sp of any already-selected point
+    // (prevents heavily-overlapping ROI windows).
+    auto tooClose = [&](float px, float py) -> bool {
+        for (int idx : selected) {
+            float dx = px - refine_points[idx].px, dy = py - refine_points[idx].py;
+            if (dx*dx + dy*dy < min_sp_sq) return true;
+        }
+        return false;
+    };
+
     // ================================================================
     // Phase 1: Corners by Shi-Tomasi score × leverage
     // Sort by R (leverage) since all corners have strong 2D constraint.
@@ -626,6 +691,7 @@ std::vector<cv::Point2f> FeatureSet::selectOptimizedPoints(int max_points) const
     for (auto& c : corners) {
         if ((int)selected.size() >= max_points) break;
         if (gridFull(c.px, c.py)) continue;
+        if (tooClose(c.px, c.py)) continue;
         selected.push_back(c.rp_idx);
         gridAdd(c.px, c.py);
     }
@@ -668,6 +734,7 @@ std::vector<cv::Point2f> FeatureSet::selectOptimizedPoints(int max_points) const
             for (int si : selected) if (si == e.rp_idx) { used = true; break; }
             if (used) continue;
             if (gridFull(e.px, e.py)) continue;
+            if (tooClose(e.px, e.py)) continue;
 
             // Precision-weighted trial: I_trial = I_current + g_i * J^T J
             float g = std::max(1.0f, e.grad_mag);  // clamp to avoid zero weight
@@ -1522,6 +1589,8 @@ FeatureSet::ConstraintAnalysis FeatureSet::analyzeConstraints(const std::vector<
 struct ModelInfo {
     std::string name;
     FeatureSet features;
+    FeatureSet features_flip;       // complete independent flipped template (built if config.flip)
+    bool has_flip = false;          // whether features_flip is populated
     ModelConfig config;
     std::string class_id;           // meiqua class_id (internal)
     std::string class_id_flip;      // flipped variant class_id
@@ -1586,6 +1655,129 @@ struct ShapeMatcher::Impl {
         }
         flipped.origin.y = fs.templ_height - fs.origin.y;
         return flipped;
+    }
+
+    // Build a COMPLETE, independent flipped template (mirror about the horizontal axis
+    // = cv::flip(.,0)): flipped features (via flipFeatures), flipped templ_image,
+    // flipped refine_points, mirrored origin, and CLEARED caches (recomputed from the
+    // flipped image/points by precomputeFeatureCaches — never copied from the base).
+    static FeatureSet buildFlippedTemplate(const FeatureSet& base) {
+        FeatureSet f = flipFeatures(base);     // features (Y, theta) + origin.y = H - origin.y
+        if (!base.templ_image.empty()) {
+            // Write into a FRESH Mat: f.templ_image is a shallow copy sharing base's
+            // buffer (from flipFeatures), so cv::flip(.,0) would flip it IN PLACE and
+            // corrupt the base template. (Same aliasing trap as the test harness.)
+            cv::Mat flipped_img;
+            cv::flip(base.templ_image, flipped_img, 0);   // mirror rows
+            f.templ_image = flipped_img;
+        }
+        // refine_points are centre-relative; match cv::flip(.,0): image_y' = (H-1) - image_y
+        float tcy = base.templ_height / 2.0f;
+        for (auto& rp : f.refine_points) {
+            float iy = rp.py + tcy;
+            rp.py = ((base.templ_height - 1) - iy) - tcy;
+            rp.ny = -rp.ny;                                  // mirror normal Y
+        }
+        // Caches MUST be recomputed from the flipped image/points, not inherited.
+        f.cached_opt_points.clear();
+        f.cached_opt_max_points = 0;
+        f.cached_lock_info.clear();
+        f.cached_templ_scene = icp_refine::EdgeScene();
+        f.templ_scene_valid = false;
+        return f;
+    }
+
+    // Pre-compute the ROI/ICP caches for a FeatureSet (optimized points, per-point
+    // lock info / score floors, template EdgeScene). Run once per template at addModel.
+    void precomputeFeatureCaches(FeatureSet& fs) {
+        fs.selectOptimizedPoints(kDefaultOptPoints, match_config.roi_min_spacing,
+                                 match_config.roi_edge_only_points);
+        if (!fs.templ_image.empty() && !fs.cached_opt_points.empty()) {
+            auto& pts = fs.cached_opt_points;
+            auto& img = fs.templ_image;
+            float tcx_l = fs.templ_width / 2.0f;
+            float tcy_l = fs.templ_height / 2.0f;
+            fs.cached_lock_info.resize(pts.size());
+            std::vector<float> distinct(pts.size(), -1.0f);
+            for (int pi = 0; pi < (int)pts.size(); pi++) {
+                int tx_l = (int)(pts[pi].x + tcx_l + 0.5f);
+                int ty_l = (int)(pts[pi].y + tcy_l + 0.5f);
+                int h_l = kDefaultROIHalf;
+                if (tx_l-h_l<0||ty_l-h_l<0||tx_l+h_l>=img.cols||ty_l+h_l>=img.rows) continue;
+                cv::Mat patch = img(cv::Rect(tx_l-h_l, ty_l-h_l, 2*h_l+1, 2*h_l+1));
+                int se = h_l;
+                int sx0=std::max(0,tx_l-h_l-se), sy0=std::max(0,ty_l-h_l-se);
+                int sx1=std::min(img.cols,tx_l+h_l+1+se), sy1=std::min(img.rows,ty_l+h_l+1+se);
+                if (sx1-sx0<patch.cols||sy1-sy0<patch.rows) continue;
+                cv::Mat search=img(cv::Rect(sx0,sy0,sx1-sx0,sy1-sy0));
+                cv::Mat resp; cv::matchTemplate(search,patch,resp,cv::TM_CCORR_NORMED);
+                cv::Point ml; cv::minMaxLoc(resp,nullptr,nullptr,nullptr,&ml);
+                cv::Mat rdx,rdy; cv::Sobel(resp,rdx,CV_32F,1,0,3); cv::Sobel(resp,rdy,CV_32F,0,1,3);
+                float sxx=0,sxy=0,syy=0,sw=std::max(3.f,se*0.5f),inv2s=1.f/(2*sw*sw);
+                for(int ry=0;ry<resp.rows;ry++){
+                    const float*gx=rdx.ptr<float>(ry),*gy=rdy.ptr<float>(ry);
+                    float dy2=(float)(ry-ml.y);
+                    for(int rx=0;rx<resp.cols;rx++){
+                        float dx2=(float)(rx-ml.x),w=std::exp(-(dx2*dx2+dy2*dy2)*inv2s);
+                        sxx+=w*gx[rx]*gx[rx]; sxy+=w*gx[rx]*gy[rx]; syy+=w*gy[rx]*gy[rx];
+                    }
+                }
+                float tr=sxx+syy,disc=std::sqrt(std::max(0.f,(sxx-syy)*(sxx-syy)/4+sxy*sxy));
+                fs.cached_lock_info[pi].major = std::max(0.f,tr/2+disc);
+                fs.cached_lock_info[pi].minor = std::max(0.f,tr/2-disc);
+                distinct[pi] = fs.cached_lock_info[pi].major;
+                float diag_diff = sxx - syy;
+                cv::Point2f ev_major, ev_minor;
+                if (std::abs(sxy) > 0.01f * (std::abs(diag_diff) + 1e-6f)) {
+                    float lam1 = tr/2 + disc;
+                    ev_major = cv::Point2f(sxy, lam1 - sxx);
+                    float len = std::sqrt(ev_major.x*ev_major.x + ev_major.y*ev_major.y);
+                    if (len > 1e-6f) ev_major *= (1.0f / len); else ev_major = cv::Point2f(1, 0);
+                    ev_minor = cv::Point2f(-ev_major.y, ev_major.x);
+                } else {
+                    if (sxx >= syy) { ev_major = cv::Point2f(1, 0); ev_minor = cv::Point2f(0, 1); }
+                    else            { ev_major = cv::Point2f(0, 1); ev_minor = cv::Point2f(1, 0); }
+                }
+                fs.cached_lock_info[pi].normal = ev_major;
+                fs.cached_lock_info[pi].tangent = ev_minor;
+                float ang_tol = match_config.roi_reject_angle_tol;
+                cv::Mat pf; patch.convertTo(pf, CV_32F);
+                double np = std::sqrt(std::max(1e-12, pf.dot(pf)));
+                float floor_score = 1.0f;
+                for (float a : {-ang_tol, ang_tol}) {
+                    cv::Mat M = cv::getRotationMatrix2D(cv::Point2f((float)h_l,(float)h_l), a, 1.0);
+                    cv::Mat rp; cv::warpAffine(pf, rp, M, pf.size(), cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+                    double nr = std::sqrt(std::max(1e-12, rp.dot(rp)));
+                    floor_score = std::min(floor_score, (float)(pf.dot(rp) / (np * nr)));
+                }
+                fs.cached_lock_info[pi].score_floor = floor_score;
+            }
+            float max_lock = 0;
+            for (auto& li : fs.cached_lock_info) max_lock = std::max(max_lock, li.major);
+            if (max_lock > 1e-6f) {
+                for (auto& li : fs.cached_lock_info) {
+                    li.major /= max_lock; li.minor /= max_lock;
+                    li.major = std::max(0.1f, li.major); li.minor = std::max(0.01f, li.minor);
+                    li.is_corner = (li.minor > 0.01f && li.major / li.minor < 12.0f);
+                }
+            }
+            float pct = match_config.roi_distinct_pct;
+            if (pct > 0.0f) {
+                float maxd = 0; for (float d : distinct) maxd = std::max(maxd, d);
+                if (maxd > 1e-6f) {
+                    float thr = pct * maxd;
+                    std::vector<cv::Point2f> kp; std::vector<FeatureSet::LockInfo> kl;
+                    for (int i = 0; i < (int)pts.size(); i++)
+                        if (distinct[i] < 0.0f || distinct[i] >= thr) { kp.push_back(pts[i]); kl.push_back(fs.cached_lock_info[i]); }
+                    if ((int)kp.size() >= 4 && kp.size() < pts.size()) { fs.cached_opt_points = kp; fs.cached_lock_info = kl; }
+                }
+            }
+        }
+        if (!fs.templ_image.empty()) {
+            bool use_subpixel = (match_config.refine == RefineMode::ICP_Subpixel);
+            fs.cached_templ_scene = icp_refine::buildTemplateScene(fs.templ_image, 20.0f, use_subpixel);
+            fs.templ_scene_valid = true;
+        }
     }
 
     // Add templates for one model at one scale to a given detector
@@ -1694,89 +1886,15 @@ int ShapeMatcher::addModel(const std::string& name,
     ModelInfo info;
     info.name = name;
     info.features = features;
-    // Pre-compute optimized sample points and cache them. These are read-only
-    // during match() (parallel region), so no synchronization is needed.
-    info.features.selectOptimizedPoints(kDefaultOptPoints);
-    // Pre-compute lock info for each sample point (matchTemplate response curvature)
-    if (!info.features.templ_image.empty() && !info.features.cached_opt_points.empty()) {
-        auto& pts = info.features.cached_opt_points;
-        auto& img = info.features.templ_image;
-        float tcx_l = info.features.templ_width / 2.0f;
-        float tcy_l = info.features.templ_height / 2.0f;
-        info.features.cached_lock_info.resize(pts.size());
-        for (int pi = 0; pi < (int)pts.size(); pi++) {
-            int tx_l = (int)(pts[pi].x + tcx_l + 0.5f);
-            int ty_l = (int)(pts[pi].y + tcy_l + 0.5f);
-            int h_l = kDefaultROIHalf;
-            if (tx_l-h_l<0||ty_l-h_l<0||tx_l+h_l>=img.cols||ty_l+h_l>=img.rows) continue;
-            cv::Mat patch = img(cv::Rect(tx_l-h_l, ty_l-h_l, 2*h_l+1, 2*h_l+1));
-            int se = h_l;
-            int sx0=std::max(0,tx_l-h_l-se), sy0=std::max(0,ty_l-h_l-se);
-            int sx1=std::min(img.cols,tx_l+h_l+1+se), sy1=std::min(img.rows,ty_l+h_l+1+se);
-            if (sx1-sx0<patch.cols||sy1-sy0<patch.rows) continue;
-            cv::Mat search=img(cv::Rect(sx0,sy0,sx1-sx0,sy1-sy0));
-            cv::Mat resp; cv::matchTemplate(search,patch,resp,cv::TM_CCORR_NORMED);
-            cv::Point ml; cv::minMaxLoc(resp,nullptr,nullptr,nullptr,&ml);
-            cv::Mat rdx,rdy; cv::Sobel(resp,rdx,CV_32F,1,0,3); cv::Sobel(resp,rdy,CV_32F,0,1,3);
-            float sxx=0,sxy=0,syy=0,sw=std::max(3.f,se*0.5f),inv2s=1.f/(2*sw*sw);
-            for(int ry=0;ry<resp.rows;ry++){
-                const float*gx=rdx.ptr<float>(ry),*gy=rdy.ptr<float>(ry);
-                float dy2=(float)(ry-ml.y);
-                for(int rx=0;rx<resp.cols;rx++){
-                    float dx2=(float)(rx-ml.x),w=std::exp(-(dx2*dx2+dy2*dy2)*inv2s);
-                    sxx+=w*gx[rx]*gx[rx]; sxy+=w*gx[rx]*gy[rx]; syy+=w*gy[rx]*gy[rx];
-                }
-            }
-            float tr=sxx+syy,disc=std::sqrt(std::max(0.f,(sxx-syy)*(sxx-syy)/4+sxy*sxy));
-            info.features.cached_lock_info[pi].major = std::max(0.f,tr/2+disc);
-            info.features.cached_lock_info[pi].minor = std::max(0.f,tr/2-disc);
-            // Compute eigenvectors of structure tensor
-            // Eigenvector for larger eigenvalue (major = tangent/slide direction)
-            float diag_diff = sxx - syy;
-            cv::Point2f ev_major, ev_minor;
-            if (std::abs(sxy) > 0.01f * (std::abs(diag_diff) + 1e-6f)) {
-                float lam1 = tr/2 + disc;
-                ev_major = cv::Point2f(sxy, lam1 - sxx);
-                float len = std::sqrt(ev_major.x*ev_major.x + ev_major.y*ev_major.y);
-                if (len > 1e-6f) ev_major *= (1.0f / len);
-                else ev_major = cv::Point2f(1, 0);
-                ev_minor = cv::Point2f(-ev_major.y, ev_major.x);
-            } else {
-                // Near axis-aligned: sxy ≈ 0
-                if (sxx >= syy) {
-                    ev_major = cv::Point2f(1, 0);
-                    ev_minor = cv::Point2f(0, 1);
-                } else {
-                    ev_major = cv::Point2f(0, 1);
-                    ev_minor = cv::Point2f(1, 0);
-                }
-            }
-            info.features.cached_lock_info[pi].normal = ev_major;   // strongest response gradient = constraint normal (across edge)
-            info.features.cached_lock_info[pi].tangent = ev_minor;  // weakest response gradient = along edge (slide)
-        }
-        // Normalize: max lock_major = 1.0, all others relative
-        float max_lock = 0;
-        for (auto& li : info.features.cached_lock_info)
-            max_lock = std::max(max_lock, li.major);
-        if (max_lock > 1e-6f) {
-            for (auto& li : info.features.cached_lock_info) {
-                li.major /= max_lock;
-                li.minor /= max_lock;
-                // Floor to prevent zero weight (every point contributes something)
-                li.major = std::max(0.1f, li.major);
-                li.minor = std::max(0.01f, li.minor);
-                // Corner = response surface locks in both directions
-                // Use ratio: PCA used eigenval ratio < 2.0 for corners
-                li.is_corner = (li.minor > 0.01f && li.major / li.minor < 12.0f);
-            }
-        }
-    }
-    // Pre-build template EdgeScene for inverse ICP refinement
-    if (!info.features.templ_image.empty()) {
-        bool use_subpixel = (impl_->match_config.refine == RefineMode::ICP_Subpixel);
-        info.features.cached_templ_scene =
-            icp_refine::buildTemplateScene(info.features.templ_image, 20.0f, use_subpixel);
-        info.features.templ_scene_valid = true;
+    // Pre-compute ROI/ICP caches (optimized points, lock info, template EdgeScene).
+    impl_->precomputeFeatureCaches(info.features);
+
+    // Build a COMPLETE independent flipped template + its own caches, so flipped
+    // matches refine against a correctly-mirrored template instead of the base.
+    if (config.flip) {
+        info.features_flip = Impl::buildFlippedTemplate(features);
+        impl_->precomputeFeatureCaches(info.features_flip);
+        info.has_flip = true;
     }
     info.config = config;
     info.class_id = "sbm_" + name;
@@ -1972,7 +2090,11 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         }
         if (!mi) continue;
 
-        auto& fs = mi->features;
+        // For a flipped match, refine against the COMPLETE independent flipped template
+        // (its own mirrored templ_image / refine_points / origin / caches) rather than
+        // the base template. Falls back to base only if no flipped template was built.
+        bool use_flip_templ = is_flip && mi->has_flip;
+        auto& fs = use_flip_templ ? mi->features_flip : mi->features;
         auto& tmpl = match_detector.getTemplates(m.class_id, m.template_id);
         float angle_step = mi->config.angle.step;
 
@@ -2000,7 +2122,9 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         // Transform user origin from template center to scene coords
         float ox = fs.origin.x - fs.templ_width / 2.0f;
         float oy = fs.origin.y - fs.templ_height / 2.0f;
-        if (is_flip) oy = -oy;
+        // The flipped template's origin.y is already mirrored (origin.y = H - origin.y),
+        // so no extra patch is needed. Only the base-fallback path mirrors oy here.
+        if (is_flip && !use_flip_templ) oy = -oy;
         float rad = -raw_angle * (float)CV_PI / 180.0f;
         float rot_ox = (std::cos(rad) * ox - std::sin(rad) * oy) * matched_scale;
         float rot_oy = (std::sin(rad) * ox + std::cos(rad) * oy) * matched_scale;
@@ -2045,10 +2169,12 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         }
 
         // ROI-based refinement
+        float roi_residual_out = -1.0f;
         if (cfg.refine == RefineMode::ROI && !fs.templ_image.empty() && !scene.empty()) {
             // Use sensitivity-optimized point selection
             // cached_opt_points was pre-computed in addModel(); read-only here (thread-safe)
-            auto opt_points = fs.selectOptimizedPoints(kDefaultOptPoints);
+            auto opt_points = fs.selectOptimizedPoints(kDefaultOptPoints, cfg.roi_min_spacing,
+                                                       cfg.roi_edge_only_points);
             std::vector<roi_refine::SamplePoint> sample_pts;
             for (int pi = 0; pi < (int)opt_points.size(); pi++) {
                 roi_refine::SamplePoint sp;
@@ -2060,6 +2186,7 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
                     sp.lock_normal = fs.cached_lock_info[pi].normal;
                     sp.lock_tangent = fs.cached_lock_info[pi].tangent;
                     sp.lock_is_corner = fs.cached_lock_info[pi].is_corner;
+                    sp.score_floor = fs.cached_lock_info[pi].score_floor;
                 }
                 sample_pts.push_back(sp);
             }
@@ -2068,11 +2195,19 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
                 roi_refine::ROIConfig roi_cfg;
                 roi_cfg.roi_half = kDefaultROIHalf;
                 roi_cfg.search_half = kDefaultROIHalf;
-                roi_cfg.max_iters = kDefaultROIMaxIters;
+                roi_cfg.max_iters = cfg.roi_max_iters > 0 ? cfg.roi_max_iters : kDefaultROIMaxIters;
+                roi_cfg.weight_by_lock = cfg.roi_weight_by_distinct;
+                roi_cfg.reject_low_score = cfg.roi_reject_low_score;
+                roi_cfg.reject_pct = cfg.roi_reject_pct;
+                roi_cfg.edge_1d_match = cfg.roi_edge_1d_match;
+                roi_cfg.edge_collapse = cfg.roi_edge_collapse;
+                roi_cfg.iterative_rematch = cfg.roi_iterative_rematch;
 
                 cv::Vec3f init_pose(scene_x, scene_y, raw_angle);
+                float roi_residual = -1.0f;
                 auto refined_pose = roi_refine::refineROI(
-                    fs.templ_image, scene, sample_pts, init_pose, roi_cfg);
+                    fs.templ_image, scene, sample_pts, init_pose, roi_cfg, &roi_residual);
+                roi_residual_out = roi_residual;
 
                 scene_x = refined_pose[0];
                 scene_y = refined_pose[1];
@@ -2098,6 +2233,7 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         r.scale = matched_scale;
         r.flipped = is_flip;
         r.score = m.similarity;
+        r.refine_residual = roi_residual_out;
         results[mi_idx] = r;
         valid[mi_idx] = 1;
     }

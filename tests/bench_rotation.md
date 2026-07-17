@@ -27,25 +27,31 @@ cmake --build build --target bench_rotation --target bench_multiobj -j
 
 ## Reference: aarch64 (Raspberry Pi 5 @ 2.4 GHz, 4 threads, gcc 14, `performance` governor, NEON)
 
-### bench_multiobj — 1800 templates, σ=10 noise (match avg, fps)
+### bench_multiobj — 1800 templates, σ=10 noise (match avg · fps · detected)
 | Scene | none s=1.0 | ROI s=1.0 | ROI s=0.7 | ROI s=0.5 |
 |------:|----------:|----------:|----------:|----------:|
-| 1.2 MP (1280×960) | 47 ms · 21.1 | 49 ms · 20.2 | **25 ms · 40.0** | 26 ms · 38.5 |
-| 5.0 MP (2592×1944) | 194 ms · 5.2 | 192 ms · 5.2 | 80 ms · 12.5 | **48 ms · 20.7** |
-| 20.2 MP (5184×3888) | 1206 ms · 0.83 | 1219 ms · 0.82 | 394 ms · 2.5 | **180 ms · 5.5** |
+| 1.2 MP (1280×960) | 51 ms · 20 · 5/5 | 52 ms · 19 · 5/5 | **25 ms · 40 · 4/5** | 23 ms · 43 · 4/5 |
+| 5.0 MP (2592×1944) | 199 ms · 5.0 · 5/5 | 203 ms · 4.9 · 5/5 | 83 ms · 12 · 4/5 | **53 ms · 19 · 4/5** |
+| 20.2 MP (5184×3888) | 1217 ms · 0.82 · 5/5 | 1218 ms · 0.82 · 5/5 | 400 ms · 2.5 · 5/5 | **174 ms · 5.7 · 4/5** |
 
 Notes:
+- **Full-res finds all 5 at high score** (≈95–99.7, zero-noise or σ=10). If your AVX2 run
+  shows 5/5 at s=1.0 with matching scores, the backends agree.
 - **ROI refine at full res adds ~nothing** (≈0.05 ms/object): at 1800 templates the coarse
   match dominates. Refine buys accuracy, not speed — *unless* paired with downscale:
 - **Downscale + ROI refine is the win at high resolution.** `match_scale` shrinks the
-  coarse-match cost ~scale²; ROI refine at full res recovers localization. 20 MP goes
-  0.83 → **5.5 fps (6.7×)** at s=0.5, detection maintained.
-- **Below ~0.7 stops helping at small scenes**: 1.2 MP floors at ~25 ms (s=0.7 ≈ s=0.5) —
-  there the 1800-template fixed/per-template cost, not scene pixels, is the bottleneck.
-  At 5/20 MP the scene still dominates, so 0.5 keeps paying (4× / 6.7×).
-- `nmatch` (4–5 of 5) is deterministic per (scale, backend) — one object hovers near
-  `min_score`=50 under noise. Use it as a cross-backend correctness check, not a quality
-  metric; it must match the reference on AVX2.
+  coarse-match cost ~scale²; ROI refine runs at full res to recover localization. 20 MP
+  goes 0.82 → **5.7 fps (≈7×)** at s=0.5.
+- **Downscale has a recall cost.** `min_score` is *also the coarse-pyramid prune threshold*
+  — a candidate below it at the coarse T=8 level is dropped before fine matching. On a
+  0.5-downscaled scene the coarse score of a marginal object dips under 50, so it's pruned
+  (4/5). Full res keeps all 5. Trade recall for speed with eyes open; lower `min_score` to
+  keep marginal objects (but that refines more candidates → slower).
+- **Below ~0.7 stops helping at small scenes**: 1.2 MP floors ~24 ms (s=0.7 ≈ s=0.5) —
+  there the 1800-template fixed cost, not scene pixels, dominates. At 5/20 MP the scene
+  still dominates, so 0.5 keeps paying (≈4× / 7×).
+- `nmatch` is deterministic per (scale, backend) — use it as a cross-backend correctness
+  check; it must match this reference on AVX2.
 
 ### bench_rotation — single object, coarse path @ 1280×960
 | Templates | NEON match avg |

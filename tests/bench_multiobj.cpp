@@ -64,14 +64,15 @@ static cv::Mat obj_tile(int which) {
             cv::rectangle(m, {35, 95}, {130, 130}, 220, cv::FILLED);
             cv::rectangle(m, {90, 40}, {120, 70}, 40, cv::FILLED);
             break;
-        case 4: { // 5-point star
+        case 4: { // filled 5-point star (solid so its coarse-level score is strong)
             std::vector<cv::Point> star;
             for (int i = 0; i < 10; ++i) {
                 double a = CV_PI / 2 + i * CV_PI / 5;
-                double r = (i & 1) ? 22 : 52;
+                double r = (i & 1) ? 24 : 54;
                 star.push_back({(int)(c + r * cos(a)), (int)(c - r * sin(a))});
             }
-            cv::polylines(m, star, true, 225, 3);
+            cv::fillPoly(m, std::vector<std::vector<cv::Point>>{star}, 215);
+            cv::circle(m, {c, c}, 14, 40, cv::FILLED);   // inner cutout for distinctness
             break;
         }
     }
@@ -101,6 +102,11 @@ static cv::Mat make_scene(int W, int H, double sigma, std::vector<cv::Point>& gt
 static std::unique_ptr<sbm::ShapeMatcher> build_matcher(sbm::RefineMode refine,
                                                         float match_scale) {
     sbm::MatchConfig cfg;
+    // NOTE: min_score is also the coarse-pyramid prune threshold — a candidate
+    // whose score at the coarse T=8 level is below it is dropped before fine
+    // matching. All 5 objects here are "coarse-strong" (solid/thick outlines)
+    // so they clear 50 at every scale; thin sparse shapes would need a lower
+    // min_score (which also slows matching by refining more candidates).
     cfg.min_score = 50.0f;
     cfg.refine = refine;
     cfg.match_scale = match_scale; // <1 downscales the scene for a faster coarse

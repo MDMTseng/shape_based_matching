@@ -80,6 +80,12 @@ target_link_libraries(bench_rotation ${OpenCV_LIBS})
 add_executable(bench_multiobj line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/bench_multiobj.cpp)
 target_link_libraries(bench_multiobj ${OpenCV_LIBS})
 
+# Parameter auto-sweep: generates altered-template test scenes with known pose,
+# sweeps extraction+matching params, ranks by robust detection, prints the best
+# config. Standalone prototype of an sbm::autoTune() API. See bench_rotation.md.
+add_executable(tune_sweep line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/tune_sweep.cpp)
+target_link_libraries(tune_sweep ${OpenCV_LIBS})
+
 # Visual matching test with image output
 add_executable(test_visual line2Dup.cpp icp_refine.cpp tests/test_visual.cpp)
 target_link_libraries(test_visual ${OpenCV_LIBS})

@@ -19,6 +19,14 @@ cmake --build build --target bench_rotation --target bench_multiobj -j
 - `bench_rotation` — one object, {1, 72, 360} rotation variants, 640×480 & 1280×960,
   plus a per-stage profile (GaussianBlur / Sobel+quantize / fused spread+LUT+linearize /
   coarse similarity). Isolates where the coarse pipeline spends time.
+- `tune_sweep` — **parameter auto-tuner**. Generates test scenes by *altering the
+  template* (rotate to known off-grid angles + Gaussian noise → known pose), sweeps
+  `num_features × match_scale × scaled_blur_ksize × min_score`, and ranks every combo by
+  **robust detection** (detection rate, then worst-case score, then speed). Prints the full
+  table and the best config. Prototype of an eventual `sbm::autoTune()`. Run:
+  `./tune_sweep [shape_index | template.png]`. Example finds: a solid shape's best is a
+  fast downscale (`match_scale 0.7 + blur`, 100% detect, ~8 ms), while a thin wireframe
+  shape's best is full res (downscale drops it) — the tuner picks per-shape automatically.
 - `bench_multiobj` — the realistic case: **5 distinct objects, each swept 0–360° at 1°
   (1800 template variants)**, matched against **1.2 / 5 / 20 MP** scenes with additive
   Gaussian noise (σ=10). Sweeps refine/scale: coarse-only at full res, then ROI refine

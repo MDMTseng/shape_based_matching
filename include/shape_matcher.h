@@ -397,6 +397,25 @@ public:
                  const FeatureSet& features,
                  const ModelConfig& config = ModelConfig());
 
+    /// Register a model directly from a template image (grayscale CV_8U).
+    /// Behaves like the FeatureSet overload, but when the matcher's
+    /// match_scale < 1 the down-scaled matcher's features are RE-EXTRACTED from
+    /// a template resized by match_scale, instead of merely coordinate-scaling
+    /// the full-res features. This keeps match score under downscale: features
+    /// are selected and oriented at the resolution the (resized) scene is
+    /// matched at. Full-res features are still extracted for the full-res
+    /// detector and ROI/ICP refine.
+    /// @param templ_gray  Template image (CV_8U grayscale).
+    /// @param mask        Optional mask (CV_8U); empty = whole image.
+    /// @param config      Rotation/scale/flip configuration.
+    /// @param num_features Max features to extract per scale.
+    /// @return Number of variants generated, or -1 on failure.
+    int addModel(const std::string& name,
+                 const cv::Mat& templ_gray,
+                 const cv::Mat& mask = cv::Mat(),
+                 const ModelConfig& config = ModelConfig(),
+                 int num_features = 128);
+
     /// Match all registered models against a scene image.
     /// @param scene  Grayscale scene image (CV_8U).
     /// @return Matches sorted by score descending, NMS applied.
@@ -409,6 +428,14 @@ public:
     int numTemplates() const;
 
 private:
+    /// Shared registration path. `rescaled` (when non-null) supplies features
+    /// re-extracted at match_scale for the down-scaled matcher; otherwise the
+    /// full-res feature coordinates are scaled.
+    int addModelInternal(const std::string& name,
+                         const FeatureSet& features,
+                         const ModelConfig& config,
+                         const FeatureSet* rescaled);
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

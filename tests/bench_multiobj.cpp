@@ -100,7 +100,8 @@ static cv::Mat make_scene(int W, int H, double sigma, std::vector<cv::Point>& gt
 }
 
 static std::unique_ptr<sbm::ShapeMatcher> build_matcher(sbm::RefineMode refine,
-                                                        float match_scale) {
+                                                        float match_scale,
+                                                        bool extract_at_scale) {
     sbm::MatchConfig cfg;
     // NOTE: min_score is also the coarse-pyramid prune threshold — a candidate
     // whose score at the coarse T=8 level is below it is dropped before fine
@@ -118,8 +119,14 @@ static std::unique_ptr<sbm::ShapeMatcher> build_matcher(sbm::RefineMode refine,
     mc.angle = {0, 360, 1};        // 1-deg sweep -> 360 variants / object
     mc.flip = false;
     const char* names[5] = {"square", "rings", "tri", "ell", "star"};
-    for (int i = 0; i < 5; ++i)
-        matcher->addModel(names[i], sbm::extractFeatures(obj_tile(i)), mc);
+    for (int i = 0; i < 5; ++i) {
+        if (extract_at_scale)
+            // image overload: re-extracts features at match_scale (keeps score)
+            matcher->addModel(names[i], obj_tile(i), cv::Mat(), mc);
+        else
+            // FeatureSet overload: coordinate-scales full-res features (score drop)
+            matcher->addModel(names[i], sbm::extractFeatures(obj_tile(i)), mc);
+    }
     return matcher;
 }
 
@@ -167,12 +174,16 @@ int main(int argc, char** argv) {
     // Variants: baseline coarse-only at full res, then ROI refine at full res
     // and at 0.7 / 0.5 scene downscale. Downscale shrinks the coarse-match cost
     // (~scale^2); ROI refine runs at full res to recover accuracy.
-    struct Variant { const char* label; sbm::RefineMode refine; float scale; };
+    // "rex" = re-extract at match_scale (image addModel overload); "crd" =
+    // coordinate-scale full-res features (FeatureSet overload). Compare them at
+    // the same downscale to see the score/recall the re-extraction buys.
+    struct Variant { const char* label; sbm::RefineMode refine; float scale; bool rex; };
     const Variant variants[] = {
-        {"none   s=1.00", sbm::RefineMode::None, 1.00f},
-        {"ROI    s=1.00", sbm::RefineMode::ROI,  1.00f},
-        {"ROI    s=0.70", sbm::RefineMode::ROI,  0.70f},
-        {"ROI    s=0.50", sbm::RefineMode::ROI,  0.50f},
+        {"none  s=1.00    ", sbm::RefineMode::None, 1.00f, false},
+        {"ROI   s=0.70 crd", sbm::RefineMode::ROI,  0.70f, false},
+        {"ROI   s=0.70 rex", sbm::RefineMode::ROI,  0.70f, true },
+        {"ROI   s=0.50 crd", sbm::RefineMode::ROI,  0.50f, false},
+        {"ROI   s=0.50 rex", sbm::RefineMode::ROI,  0.50f, true },
     };
     const int nv = (int)(sizeof(variants) / sizeof(variants[0]));
 
@@ -181,7 +192,7 @@ int main(int argc, char** argv) {
     std::printf("building %d matchers (1800 templates each)...\n", nv);
     std::vector<std::unique_ptr<sbm::ShapeMatcher>> matchers;
     for (auto& v : variants)
-        matchers.push_back(build_matcher(v.refine, v.scale));
+        matchers.push_back(build_matcher(v.refine, v.scale, v.rex));
 
     for (int i = 0; i < nres; ++i) {
         for (int v = 0; v < nv; ++v)

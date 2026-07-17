@@ -1880,9 +1880,10 @@ ShapeMatcher::ShapeMatcher(const MatchConfig& config)
 
 ShapeMatcher::~ShapeMatcher() = default;
 
-int ShapeMatcher::addModel(const std::string& name,
-                           const FeatureSet& features,
-                           const ModelConfig& config) {
+int ShapeMatcher::addModelInternal(const std::string& name,
+                                   const FeatureSet& features,
+                                   const ModelConfig& config,
+                                   const FeatureSet* rescaled) {
     ModelInfo info;
     info.name = name;
     info.features = features;
@@ -1915,23 +1916,31 @@ int ShapeMatcher::addModel(const std::string& name,
         s += config.scale.step;
     } while (s <= config.scale.max + 0.001f && config.scale.max > config.scale.min);
 
-    // Build pre-scaled templates for match_scale (scale coordinates once at setup)
+    // Build the down-scaled matcher's templates. Prefer features RE-EXTRACTED at
+    // match_scale (rescaled != null, from the addModel image overload) — their
+    // positions/orientations are computed at the match resolution, so they keep
+    // score against the resized scene. Otherwise fall back to scaling the
+    // full-res feature coordinates (crowds features, mismatches orientations).
     if (impl_->scaled_detector) {
-        float ms = impl_->match_config.match_scale;
-        FeatureSet scaled_fs = features;
-        // Scale feature coordinates in all levels
-        for (auto& lv : scaled_fs.levels) {
-            lv.tl_x = (int)(lv.tl_x * ms + 0.5f);
-            lv.tl_y = (int)(lv.tl_y * ms + 0.5f);
-            lv.width = (int)(lv.width * ms + 0.5f);
-            lv.height = (int)(lv.height * ms + 0.5f);
-            for (auto& f : lv.features) {
-                f.x = (int)(f.x * ms + 0.5f);
-                f.y = (int)(f.y * ms + 0.5f);
+        FeatureSet scaled_fs;
+        if (rescaled) {
+            scaled_fs = *rescaled;
+        } else {
+            float ms = impl_->match_config.match_scale;
+            scaled_fs = features;
+            for (auto& lv : scaled_fs.levels) {
+                lv.tl_x = (int)(lv.tl_x * ms + 0.5f);
+                lv.tl_y = (int)(lv.tl_y * ms + 0.5f);
+                lv.width = (int)(lv.width * ms + 0.5f);
+                lv.height = (int)(lv.height * ms + 0.5f);
+                for (auto& f : lv.features) {
+                    f.x = (int)(f.x * ms + 0.5f);
+                    f.y = (int)(f.y * ms + 0.5f);
+                }
             }
+            scaled_fs.templ_width = (int)(features.templ_width * ms + 0.5f);
+            scaled_fs.templ_height = (int)(features.templ_height * ms + 0.5f);
         }
-        scaled_fs.templ_width = (int)(features.templ_width * ms + 0.5f);
-        scaled_fs.templ_height = (int)(features.templ_height * ms + 0.5f);
 
         float s2 = config.scale.min;
         do {
@@ -1950,6 +1959,39 @@ int ShapeMatcher::addModel(const std::string& name,
     impl_->models.push_back(info);
     impl_->total_templates += count;
     return count;
+}
+
+int ShapeMatcher::addModel(const std::string& name,
+                           const FeatureSet& features,
+                           const ModelConfig& config) {
+    // Pre-extracted features: the scaled matcher (if any) coordinate-scales them.
+    return addModelInternal(name, features, config, nullptr);
+}
+
+int ShapeMatcher::addModel(const std::string& name,
+                           const cv::Mat& templ_gray,
+                           const cv::Mat& mask,
+                           const ModelConfig& config,
+                           int num_features) {
+    if (templ_gray.empty()) return -1;
+    const auto& cfg = impl_->match_config;
+    FeatureSet full = extractFeatures(templ_gray, mask, num_features,
+                                      cfg.T_levels, cfg.weak_threshold, cfg.strong_threshold);
+    // Downscale matching: re-extract the model from a template resized by
+    // match_scale, so the scaled matcher's features are selected and oriented at
+    // the same resolution as the resized scene. Full-res `full` still feeds the
+    // full-res detector and refine caches.
+    if (impl_->scaled_detector && cfg.match_scale < 1.0f && cfg.match_scale > 0.1f) {
+        float ms = cfg.match_scale;
+        cv::Mat t_small, m_small;
+        cv::resize(templ_gray, t_small, cv::Size(), ms, ms, cv::INTER_AREA);
+        if (!mask.empty())
+            cv::resize(mask, m_small, t_small.size(), 0, 0, cv::INTER_NEAREST);
+        FeatureSet scaled = extractFeatures(t_small, m_small, num_features,
+                                            cfg.T_levels, cfg.weak_threshold, cfg.strong_threshold);
+        return addModelInternal(name, full, config, &scaled);
+    }
+    return addModelInternal(name, full, config, nullptr);
 }
 
 std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {

@@ -29,12 +29,16 @@ cmake --build build --target bench_rotation --target bench_multiobj -j
 
 ### bench_multiobj — 1800 templates, σ=10 noise (match avg · fps · detected · weakest score)
 `minscore` = score of the weakest **detected** object (headroom above `min_score`=50).
+`crd` = coordinate-scale full-res features (`addModel(FeatureSet)`); `rex` = re-extract at
+match_scale (`addModel(image)`), which keeps score under downscale.
 
-| Scene | none s=1.0 | ROI s=1.0 | ROI s=0.7 | ROI s=0.5 |
-|------:|----------:|----------:|----------:|----------:|
-| 1.2 MP (1280×960) | 49 ms · 21 · 5/5 · 94.8 | 52 ms · 19 · 5/5 · 94.4 | **26 ms · 38 · 4/5 · 62.5** | 24 ms · 42 · 4/5 · 56.9 |
-| 5.0 MP (2592×1944) | 201 ms · 5.0 · 5/5 · 96.9 | 196 ms · 5.1 · 5/5 · 97.1 | 83 ms · 12 · 4/5 · 63.3 | **55 ms · 18 · 4/5 · 72.2** |
-| 20.2 MP (5184×3888) | 1197 ms · 0.84 · 5/5 · 94.8 | 1210 ms · 0.83 · 5/5 · 94.8 | 398 ms · 2.5 · 5/5 · 51.7 | **174 ms · 5.8 · 4/5 · 70.9** |
+| Scene | none s=1.0 | 0.7 crd | 0.7 **rex** | 0.5 crd | 0.5 **rex** |
+|------:|----------:|--------:|------------:|--------:|------------:|
+| 1.2 MP | 49 · 21 · 5/5 · **95** | 25 · 40 · 4/5 · 62 | 29 · 34 · 4/5 · **94** | 25 · 39 · 4/5 · 57 | 19 · 52 · 4/5 · **79** |
+| 5.0 MP | 198 · 5.0 · 5/5 · **97** | 82 · 12 · 4/5 · 62 | 80 · 12 · 4/5 · **93** | 48 · 21 · 4/5 · 72 | 37 · 27 · 4/5 · **78** |
+| 20.2 MP | 1234 · 0.8 · 5/5 · **95** | 403 · 2.5 · 5/5 · 52 | 316 · 3.2 · 5/5 · **54** | 202 · 5.0 · 4/5 · 52 | 115 · 8.7 · 4/5 · **79** |
+
+*(cells: match avg ms · fps · detected · minscore)*
 
 Notes:
 - **Full-res finds all 5 at high score** (≈95–99.7, zero-noise or σ=10); the `minscore`
@@ -51,9 +55,16 @@ Notes:
   goes 0.82 → **5.7 fps (≈7×)** at s=0.5.
 - **Downscale has a recall cost.** `min_score` is *also the coarse-pyramid prune threshold*
   — a candidate below it at the coarse T=8 level is dropped before fine matching. On a
-  0.5-downscaled scene the coarse score of a marginal object dips under 50, so it's pruned
-  (4/5). Full res keeps all 5. Trade recall for speed with eyes open; lower `min_score` to
-  keep marginal objects (but that refines more candidates → slower).
+  0.5-downscaled scene the coarse score of a marginal object dips under 50, so it's pruned.
+  Full res keeps all 5. Lower `min_score` to keep marginal objects (but that refines more
+  candidates → slower), or use `rex`:
+- **`rex` (re-extract at scale) fixes the downscale score drop.** The `addModel(image, …)`
+  overload re-extracts the model from a template resized by `match_scale`, so its features
+  are selected/oriented at the resolution the resized scene is matched at — instead of
+  crowding full-res features onto the coarse grid. It restores most of the lost `minscore`
+  (0.7: 62→94; 0.5: 57→79) **and is often faster** (fewer, cleaner features → less coarse
+  work; 20 MP s=0.5: 202→115 ms, 5.0→8.7 fps). Prefer `addModel(image)` whenever you use
+  `match_scale < 1`.
 - **Below ~0.7 stops helping at small scenes**: 1.2 MP floors ~24 ms (s=0.7 ≈ s=0.5) —
   there the 1800-template fixed cost, not scene pixels, dominates. At 5/20 MP the scene
   still dominates, so 0.5 keeps paying (≈4× / 7×).

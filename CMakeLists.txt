@@ -86,6 +86,17 @@ target_link_libraries(bench_multiobj ${OpenCV_LIBS})
 add_executable(tune_sweep line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/tune_sweep.cpp)
 target_link_libraries(tune_sweep ${OpenCV_LIBS})
 
+# A/B: analytic feature-rotation vs real per-angle extraction. Answers whether
+# real extraction lets you use a coarser angle step (fewer templates). See
+# bench_rotation.md.
+add_executable(bench_realrot line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/bench_realrot.cpp)
+target_link_libraries(bench_realrot ${OpenCV_LIBS})
+
+# Repeatability-voted feature selection: rotate/extract/rotate-back, keep points
+# re-detected across rotations, scatter top-M. vs plain scatter. See bench_rotation.md.
+add_executable(bench_stablevote line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/bench_stablevote.cpp)
+target_link_libraries(bench_stablevote ${OpenCV_LIBS})
+
 # Visual matching test with image output
 add_executable(test_visual line2Dup.cpp icp_refine.cpp tests/test_visual.cpp)
 target_link_libraries(test_visual ${OpenCV_LIBS})

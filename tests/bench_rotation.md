@@ -27,6 +27,11 @@ cmake --build build --target bench_rotation --target bench_multiobj -j
   `./tune_sweep [shape_index | template.png]`. Example finds: a solid shape's best is a
   fast downscale (`match_scale 0.7 + blur`, 100% detect, ~8 ms), while a thin wireframe
   shape's best is full res (downscale drops it) — the tuner picks per-shape automatically.
+  It isn't blind brute force: `min_score` is a free post-filter (proven equivalent to
+  re-running under `refine=None`), so the whole threshold range is derived from ONE run per
+  extraction config — the sweep runs the matcher only per `num_features × match_scale ×
+  blur` (e.g. 10 runs → 80 combos, ~1.3 s). Next steps: predict the `match_scale` ceiling
+  from template stroke-width, and multi-fidelity screen→verify (see git history / notes).
 - `bench_multiobj` — the realistic case: **5 distinct objects, each swept 0–360° at 1°
   (1800 template variants)**, matched against **1.2 / 5 / 20 MP** scenes with additive
   Gaussian noise (σ=10). Sweeps refine/scale: coarse-only at full res, then ROI refine

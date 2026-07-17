@@ -98,47 +98,63 @@ int main(int argc, char** argv) {
     std::vector<TestCase> tests;
     for (float a : test_angles) tests.push_back(make_case(tmpl, a, sigma, W, H, px, py));
 
-    // Sweep grids (edit to taste).
+    // Sweep grids (edit to taste). min_score is a FREE post-filter — proven
+    // equivalent to re-running (refine=None): one low-threshold run per
+    // extraction config yields every threshold by filtering the recorded
+    // correct-match scores. So we run the matcher only per (nf, scale, blur),
+    // and evaluate the whole min_score range for free at fine resolution.
     const int   NF[]  = {63, 128};
     const float MS[]  = {1.0f, 0.7f, 0.5f};
     const int   BL[]  = {0, 3};
-    const float MIN[] = {40, 50};
+    const float MIN[] = {30, 35, 40, 45, 50, 55, 60, 65};
+    const float MIN_LOW = MIN[0];
+    const int   n = (int)tests.size();
 
-    std::printf("tune_sweep | %s | template %dx%d | %zu test cases @ %dx%d, sigma=%.0f\n",
-                SBM_SIMD, tmpl.cols, tmpl.rows, tests.size(), W, H, sigma);
-    std::printf("objective: robust detection (detect-rate, then worst-case score, then speed)\n\n");
+    std::printf("tune_sweep | %s | template %dx%d | %d test cases @ %dx%d, sigma=%.0f\n",
+                SBM_SIMD, tmpl.cols, tmpl.rows, n, W, H, sigma);
+    std::printf("objective: robust detection (detect-rate, then worst-case score, then speed)\n");
+    std::printf("min_score collapsed: swept %d thresholds from 1 run each (free)\n\n",
+                (int)(sizeof(MIN)/sizeof(MIN[0])));
 
     sbm::ModelConfig mc; mc.angle = {0, 360, 5};   // model coverage for the sweep
+    using Clk = std::chrono::high_resolution_clock;
 
     std::vector<Result> results;
+    int matcher_runs = 0;
     for (int nf : NF)
     for (float ms : MS)
     for (int bl : BL) {
         if (ms >= 0.999f && bl != 0) continue;     // blur only affects the scaled path
-        for (float mins : MIN) {
-            sbm::MatchConfig cfg;
-            cfg.min_score = mins; cfg.refine = sbm::RefineMode::None;
-            cfg.skip_voting = true; cfg.match_scale = ms;
-            auto matcher = std::make_unique<sbm::ShapeMatcher>(cfg);
-            matcher->addModel("m", tmpl, cv::Mat(), mc, nf, bl);
 
-            int det = 0; float worst = 1e9f, sum = 0; double tot = 0;
-            using Clk = std::chrono::high_resolution_clock;
-            for (auto& tc : tests) {
-                auto t0 = Clk::now();
-                auto rs = matcher->match(tc.scene);
-                tot += std::chrono::duration<double,std::milli>(Clk::now()-t0).count();
-                float best = -1;
-                for (auto& r : rs)
-                    if (std::abs(r.x-tc.cx)<pos_tol && std::abs(r.y-tc.cy)<pos_tol)
-                        best = std::max(best, r.score);
-                if (best >= 0) { det++; worst = std::min(worst, best); sum += best; }
-            }
-            int n = (int)tests.size();
+        // ONE run at the lowest threshold; record each case's best correct score.
+        sbm::MatchConfig cfg;
+        cfg.min_score = MIN_LOW; cfg.refine = sbm::RefineMode::None;
+        cfg.skip_voting = true; cfg.match_scale = ms;
+        auto matcher = std::make_unique<sbm::ShapeMatcher>(cfg);
+        matcher->addModel("m", tmpl, cv::Mat(), mc, nf, bl);
+        ++matcher_runs;
+
+        std::vector<float> raw(n, -1.f);           // best correct-position score / case
+        double tot = 0;
+        for (int i = 0; i < n; ++i) {
+            auto t0 = Clk::now();
+            auto rs = matcher->match(tests[i].scene);
+            tot += std::chrono::duration<double,std::milli>(Clk::now()-t0).count();
+            for (auto& r : rs)
+                if (std::abs(r.x-tests[i].cx)<pos_tol && std::abs(r.y-tests[i].cy)<pos_tol)
+                    raw[i] = std::max(raw[i], r.score);
+        }
+        double mspf = tot / n;   // measured at MIN_LOW = conservative (higher min_score is faster)
+
+        // Derive every min_score threshold by filtering — no extra matching.
+        for (float mins : MIN) {
+            int det = 0; float worst = 1e9f, sum = 0;
+            for (float s : raw) if (s >= mins) { det++; worst = std::min(worst, s); sum += s; }
             results.push_back({{nf,ms,bl,mins},
-                               (float)det/n, det?worst:0.f, det?sum/det:0.f, tot/n});
+                               (float)det/n, det?worst:0.f, det?sum/det:0.f, mspf});
         }
     }
+    std::printf("(%d matcher runs -> %zu evaluated combos)\n\n", matcher_runs, results.size());
 
     // Rank: robust detection.
     std::sort(results.begin(), results.end(), [](const Result&a, const Result&b){
@@ -155,9 +171,12 @@ int main(int argc, char** argv) {
                     r.c.num_features, r.c.match_scale, r.c.blur, r.c.min_score,
                     r.detect_rate*100, r.worst, r.mean, r.ms);
 
+    std::printf("(ms/frame measured at min_score=%.0f; higher min_score prunes more at the "
+                "coarse level, so it is only ever faster.)\n", MIN_LOW);
+
     auto& b = results.front();
     std::printf("\nBEST (robust): num_features=%d match_scale=%.2f scaled_blur=%d min_score=%.0f\n"
-                "               -> detect %.0f%%, worst-case score %.1f, %.2f ms/frame\n",
+                "               -> detect %.0f%%, worst-case score %.1f, <=%.2f ms/frame\n",
                 b.c.num_features, b.c.match_scale, b.c.blur, b.c.min_score,
                 b.detect_rate*100, b.worst, b.ms);
     return 0;

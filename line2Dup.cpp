@@ -1381,7 +1381,7 @@ static void similarity(const std::vector<Mat> &linear_memories, const Template &
     const int BATCH = 63;
 
     // Pre-allocate acc8 outside the batch loop — avoid repeated alloc/free per batch
-#ifdef __AVX2__
+#if defined(__AVX2__) || defined(__aarch64__)
     std::vector<uint8_t> acc8(template_positions);
 #endif
 
@@ -1412,6 +1412,35 @@ static void similarity(const std::vector<Mat> &linear_memories, const Template &
                 __m256i s16 = _mm256_cvtepu8_epi16(s8);
                 __m256i d16 = _mm256_loadu_si256((const __m256i*)(dst_ptr + j));
                 _mm256_storeu_si256((__m256i*)(dst_ptr + j), _mm256_add_epi16(d16, s16));
+            }
+            for (; j < template_positions; ++j)
+                dst_ptr[j] += (short)acc8[j];
+        }
+#elif defined(__aarch64__)
+        // NEON mirror of the AVX2 uint8 chunked-accumulation: accumulate the
+        // batch (<=63 features, max 252 < 255) in uint8 at 16-wide, then widen
+        // uint8 -> int16 once per batch. Bit-identical to the MIPP #else, but
+        // 16 lanes of uint8 vs 8 lanes of int16 + a per-feature widen.
+        std::memset(acc8.data(), 0, template_positions);
+        for (int fi = batch_start; fi < batch_end; ++fi) {
+            const uchar *lm_ptr = lm_ptrs[fi];
+            int j = 0;
+            for (; j <= template_positions - 16; j += 16)
+                vst1q_u8(acc8.data() + j,
+                         vaddq_u8(vld1q_u8(acc8.data() + j), vld1q_u8(lm_ptr + j)));
+            for (; j < template_positions; ++j)
+                acc8[j] += lm_ptr[j];
+        }
+        {
+            int j = 0;
+            for (; j <= template_positions - 16; j += 16) {
+                uint8x16_t a = vld1q_u8(acc8.data() + j);
+                int16x8_t d0 = vaddq_s16(vld1q_s16(dst_ptr + j),
+                    vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(a))));
+                int16x8_t d1 = vaddq_s16(vld1q_s16(dst_ptr + j + 8),
+                    vreinterpretq_s16_u16(vmovl_u8(vget_high_u8(a))));
+                vst1q_s16(dst_ptr + j, d0);
+                vst1q_s16(dst_ptr + j + 8, d1);
             }
             for (; j < template_positions; ++j)
                 dst_ptr[j] += (short)acc8[j];

@@ -27,16 +27,23 @@ cmake --build build --target bench_rotation --target bench_multiobj -j
 
 ## Reference: aarch64 (Raspberry Pi 5 @ 2.4 GHz, 4 threads, gcc 14, `performance` governor, NEON)
 
-### bench_multiobj — 1800 templates, σ=10 noise (match avg · fps · detected)
+### bench_multiobj — 1800 templates, σ=10 noise (match avg · fps · detected · weakest score)
+`minscore` = score of the weakest **detected** object (headroom above `min_score`=50).
+
 | Scene | none s=1.0 | ROI s=1.0 | ROI s=0.7 | ROI s=0.5 |
 |------:|----------:|----------:|----------:|----------:|
-| 1.2 MP (1280×960) | 51 ms · 20 · 5/5 | 52 ms · 19 · 5/5 | **25 ms · 40 · 4/5** | 23 ms · 43 · 4/5 |
-| 5.0 MP (2592×1944) | 199 ms · 5.0 · 5/5 | 203 ms · 4.9 · 5/5 | 83 ms · 12 · 4/5 | **53 ms · 19 · 4/5** |
-| 20.2 MP (5184×3888) | 1217 ms · 0.82 · 5/5 | 1218 ms · 0.82 · 5/5 | 400 ms · 2.5 · 5/5 | **174 ms · 5.7 · 4/5** |
+| 1.2 MP (1280×960) | 49 ms · 21 · 5/5 · 94.8 | 52 ms · 19 · 5/5 · 94.4 | **26 ms · 38 · 4/5 · 62.5** | 24 ms · 42 · 4/5 · 56.9 |
+| 5.0 MP (2592×1944) | 201 ms · 5.0 · 5/5 · 96.9 | 196 ms · 5.1 · 5/5 · 97.1 | 83 ms · 12 · 4/5 · 63.3 | **55 ms · 18 · 4/5 · 72.2** |
+| 20.2 MP (5184×3888) | 1197 ms · 0.84 · 5/5 · 94.8 | 1210 ms · 0.83 · 5/5 · 94.8 | 398 ms · 2.5 · 5/5 · 51.7 | **174 ms · 5.8 · 4/5 · 70.9** |
 
 Notes:
-- **Full-res finds all 5 at high score** (≈95–99.7, zero-noise or σ=10). If your AVX2 run
-  shows 5/5 at s=1.0 with matching scores, the backends agree.
+- **Full-res finds all 5 at high score** (≈95–99.7, zero-noise or σ=10); the `minscore`
+  column shows ~45 points of headroom over `min_score`=50. If your AVX2 run shows 5/5 at
+  s=1.0 with matching `minscore`, the backends agree.
+- **`minscore` quantifies the downscale recall margin.** Downscaling collapses headroom
+  toward the threshold: 20 MP s=0.7 = 51.7 (right on the edge, still 5/5); push further and
+  the weakest object drops under 50 and is pruned (4/5). It's the direct signal for how
+  much `match_scale` you can afford before losing a detection.
 - **ROI refine at full res adds ~nothing** (≈0.05 ms/object): at 1800 templates the coarse
   match dominates. Refine buys accuracy, not speed — *unless* paired with downscale:
 - **Downscale + ROI refine is the win at high resolution.** `match_scale` shrinks the

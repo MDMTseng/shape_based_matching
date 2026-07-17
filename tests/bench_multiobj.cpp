@@ -135,6 +135,10 @@ static void run(sbm::ShapeMatcher& matcher, const char* label,
     matcher.match(scene);                       // warmup + JIT of caches
     auto rs = matcher.match(scene);
 
+    // Score of the weakest detected object (headroom above min_score).
+    float lo_score = rs.empty() ? 0.0f : 1e9f;
+    for (auto& r : rs) lo_score = std::min(lo_score, r.score);
+
     using Clk = std::chrono::high_resolution_clock;
     double tot = 0, mn = 1e9, mx = 0;
     for (int i = 0; i < N; ++i) {
@@ -145,8 +149,8 @@ static void run(sbm::ShapeMatcher& matcher, const char* label,
     }
     double avg = tot / N;
     std::printf("  %5.1f MP (%4dx%-4d)  %-14s  match avg %8.2f ms"
-                "  (min %7.2f/max %7.2f)  %6.2f fps   nmatch=%zu/5\n",
-                mp, W, H, label, avg, mn, mx, 1000.0 / avg, rs.size());
+                "  (min %7.2f/max %7.2f)  %6.2f fps   nmatch=%zu/5  minscore=%.1f\n",
+                mp, W, H, label, avg, mn, mx, 1000.0 / avg, rs.size(), lo_score);
 }
 
 int main(int argc, char** argv) {

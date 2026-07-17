@@ -409,12 +409,19 @@ public:
     /// @param mask        Optional mask (CV_8U); empty = whole image.
     /// @param config      Rotation/scale/flip configuration.
     /// @param num_features Max features to extract per scale.
+    /// @param scaled_blur_ksize  Optional odd Gaussian kernel (>=3) applied to
+    ///        the template before the match_scale re-extraction only. Stabilises
+    ///        orientation quantization for THIN/sparse shapes under aggressive
+    ///        downscale (e.g. a wireframe star: +~3 score at s=0.5). Slightly
+    ///        hurts solid/chunky shapes, so it is off (0) by default and the
+    ///        full-res features (for refine) are never blurred.
     /// @return Number of variants generated, or -1 on failure.
     int addModel(const std::string& name,
                  const cv::Mat& templ_gray,
                  const cv::Mat& mask = cv::Mat(),
                  const ModelConfig& config = ModelConfig(),
-                 int num_features = 128);
+                 int num_features = 128,
+                 int scaled_blur_ksize = 0);
 
     /// Match all registered models against a scene image.
     /// @param scene  Grayscale scene image (CV_8U).

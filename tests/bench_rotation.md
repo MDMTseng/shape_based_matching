@@ -65,6 +65,10 @@ Notes:
   (0.7: 62→94; 0.5: 57→79) **and is often faster** (fewer, cleaner features → less coarse
   work; 20 MP s=0.5: 202→115 ms, 5.0→8.7 fps). Prefer `addModel(image)` whenever you use
   `match_scale < 1`.
+- **Thin shapes: add `scaled_blur_ksize`.** For wireframe/sparse templates the optional
+  pre-blur arg on `addModel(image, …, scaled_blur_ksize=3)` stabilises orientation
+  quantization before the downscale re-extraction (star s=0.5: 94→97). It slightly hurts
+  solid shapes, so it's off by default — enable per-model for thin ones only.
 - **Below ~0.7 stops helping at small scenes**: 1.2 MP floors ~24 ms (s=0.7 ≈ s=0.5) —
   there the 1800-template fixed cost, not scene pixels, dominates. At 5/20 MP the scene
   still dominates, so 0.5 keeps paying (≈4× / 7×).

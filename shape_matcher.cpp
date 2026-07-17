@@ -1972,7 +1972,8 @@ int ShapeMatcher::addModel(const std::string& name,
                            const cv::Mat& templ_gray,
                            const cv::Mat& mask,
                            const ModelConfig& config,
-                           int num_features) {
+                           int num_features,
+                           int scaled_blur_ksize) {
     if (templ_gray.empty()) return -1;
     const auto& cfg = impl_->match_config;
     FeatureSet full = extractFeatures(templ_gray, mask, num_features,
@@ -1983,8 +1984,15 @@ int ShapeMatcher::addModel(const std::string& name,
     // full-res detector and refine caches.
     if (impl_->scaled_detector && cfg.match_scale < 1.0f && cfg.match_scale > 0.1f) {
         float ms = cfg.match_scale;
+        // Optional pre-blur (thin shapes only) — applied before the downscale,
+        // never to the full-res features used for refine.
+        cv::Mat pre = templ_gray;
+        if (scaled_blur_ksize >= 3) {
+            int k = scaled_blur_ksize | 1;   // force odd
+            cv::GaussianBlur(templ_gray, pre, cv::Size(k, k), 0);
+        }
         cv::Mat t_small, m_small;
-        cv::resize(templ_gray, t_small, cv::Size(), ms, ms, cv::INTER_AREA);
+        cv::resize(pre, t_small, cv::Size(), ms, ms, cv::INTER_AREA);
         if (!mask.empty())
             cv::resize(mask, m_small, t_small.size(), 0, 0, cv::INTER_NEAREST);
         FeatureSet scaled = extractFeatures(t_small, m_small, num_features,

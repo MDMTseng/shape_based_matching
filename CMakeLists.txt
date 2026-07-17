@@ -13,6 +13,15 @@ IF(MSVC)
     SET(COMMON_COMPILE_FLAGS "/W3 /O2 /openmp")
     SET(CMAKE_CXX_FLAGS "${PLATFORM_COMPILE_FLAGS} ${COMMON_COMPILE_FLAGS}")
     SET(CMAKE_CXX_FLAGS_RELEASE "/O2")
+ELSEIF(${CMAKE_SYSTEM_PROCESSOR} MATCHES "aarch64|arm64")
+    # aarch64 (e.g. Raspberry Pi 5, Apple Silicon Linux): NEON is baseline, no
+    # -mfpu needed; -mavx2 would be an invalid option. line2Dup's __aarch64__
+    # NEON paths light up under -march=native.
+    SET(PLATFORM_COMPILE_FLAGS "-march=native")
+    SET(COMMON_COMPILE_FLAGS "-fopenmp -Wall -Wno-sign-compare")
+    SET(CMAKE_CXX_FLAGS "${PLATFORM_COMPILE_FLAGS} ${COMMON_COMPILE_FLAGS} $ENV{CXXFLAGS}")
+    SET(CMAKE_CXX_FLAGS_DEBUG "-O0 -g2 -ggdb")
+    SET(CMAKE_CXX_FLAGS_RELEASE "-O3")
 ELSEIF(${CMAKE_SYSTEM_PROCESSOR} MATCHES "arm")
     SET(PLATFORM_COMPILE_FLAGS "-mfpu=neon")
     SET(COMMON_COMPILE_FLAGS "-Wall -Wno-sign-compare")
@@ -27,9 +36,13 @@ ELSE()
     SET(CMAKE_CXX_FLAGS_RELEASE "-O3")
 ENDIF()
 
-# opencv -- manual linking for prebuilt Windows package
-set(OpenCV_INCLUDE_DIRS "C:/opencv/opencv/build/include")
-set(OpenCV_LIBS "C:/opencv/opencv/build/x64/vc16/lib/opencv_world4100.lib")
+# OpenCV: prefer a real find_package (Linux/macOS, or Windows with OpenCV_DIR
+# set); fall back to the prebuilt Windows package path for the original setup.
+find_package(OpenCV QUIET)
+if(NOT OpenCV_FOUND)
+    set(OpenCV_INCLUDE_DIRS "C:/opencv/opencv/build/include")
+    set(OpenCV_LIBS "C:/opencv/opencv/build/x64/vc16/lib/opencv_world4100.lib")
+endif()
 include_directories(${OpenCV_INCLUDE_DIRS})
 
 # include MIPP headers
@@ -54,6 +67,18 @@ target_link_libraries(bench_preprocess ${OpenCV_LIBS})
 # Per-stage profiler (clean vs noisy)
 add_executable(bench_profile line2Dup.cpp tests/bench_profile.cpp)
 target_link_libraries(bench_profile ${OpenCV_LIBS})
+
+# Rotation-sweep match-throughput bench. Self-labels its SIMD backend
+# (AVX2 / NEON / scalar) and prints a per-stage profile. Cross-platform;
+# used to compare x86 AVX2 vs ARM NEON. See tests/bench_rotation.md.
+add_executable(bench_rotation line2Dup.cpp tests/bench_rotation.cpp)
+target_link_libraries(bench_rotation ${OpenCV_LIBS})
+
+# Realistic multi-object bench: 5 objects x 360deg = 1800 templates, matched
+# against 1.2/5/20 MP noisy scenes, with and without ROI refine (high-level
+# ShapeMatcher API). Self-labels SIMD backend. See tests/bench_rotation.md.
+add_executable(bench_multiobj line2Dup.cpp icp_refine.cpp roi_refine.cpp shape_matcher.cpp tests/bench_multiobj.cpp)
+target_link_libraries(bench_multiobj ${OpenCV_LIBS})
 
 # Visual matching test with image output
 add_executable(test_visual line2Dup.cpp icp_refine.cpp tests/test_visual.cpp)

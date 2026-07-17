@@ -127,6 +127,18 @@ Measured (aarch64, σ=10, off-grid angles): 0.7-extracted base, keep 50% @ **9°
 (avg/worst) vs the full base at **1° step → 89.8/84.0** — **~9× fewer templates, better
 robustness**. Orthogonal to downscale (`match_scale`/rex) and `num_features`; they stack.
 
+**A/B perf (5 objects, off-grid angles, σ=10) — original(full,1°,1800T) vs new(rotstable,9°,200T):**
+| Scene | original | new (keep 1.0) | speedup |
+|------:|---------:|---------------:|--------:|
+| 1.2 MP | 81 ms · 5/5 · min 98 | **35 ms · 5/5 · min 96** | 2.3× |
+| 5.0 MP | 274 ms · 5/5 · min 98 | **90 ms · 5/5 · min 94** | 3.0× |
+
+**Discriminability caveat (perf test surfaced it):** the 9× template cut / speedup comes from
+the **coarse angle step + quality base**, NOT from dropping features. Aggressive `keep_frac`
+(0.5) *over-detects* in cluttered / high-res scenes (19 hits for 5 objects at 5 MP) — fewer
+features = less distinctive. Keep `keep_frac` high (≥0.75, default 0.8) for multi-object use;
+small `keep_frac` only for isolated single-object matching.
+
 ## x86 team: please append your AVX2 numbers
 
 Run both benches on your x86 box (build picks up AVX2 via `-march=native -mavx2`, or

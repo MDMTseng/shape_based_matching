@@ -257,6 +257,15 @@ FeatureSet extractFeatures(const cv::Mat& templ_gray,
 /// Recipe: extractFeatures(downscaled / low num_features) -> selectRotationStable
 /// -> addModel with a coarse ModelConfig.angle step.
 ///
+/// DISCRIMINABILITY WARNING: dropping features (keep_frac < 1) raises the score
+/// at the correct location (less dilution) but LOWERS discriminability — in
+/// cluttered / high-resolution multi-object scenes an aggressive keep_frac (0.5)
+/// produces FALSE POSITIVES (e.g. 19 detections for 5 objects at 5 MP). The
+/// template-count / speed win comes from the COARSE ANGLE STEP + quality base,
+/// not from dropping features. So in real multi-object use keep keep_frac high
+/// (>=0.75, or 1.0 to only re-rank without dropping); reserve small keep_frac
+/// for isolated single-object matching where precision is not at risk.
+///
 /// @param fs           Features from extractFeatures (or a curated subset).
 /// @param templ_gray   The template image the features were extracted from.
 /// @param angle_range  Half-range of the rotation probe in degrees (e.g. 9).
@@ -267,7 +276,7 @@ FeatureSet selectRotationStable(const FeatureSet& fs,
                                 const cv::Mat& templ_gray,
                                 float angle_range = 9.0f,
                                 float angle_step = 3.0f,
-                                float keep_frac = 0.6f);
+                                float keep_frac = 0.8f);
 
 // ============================================================
 // ModelConfig: how to generate rotation/scale/flip variants

@@ -15,6 +15,8 @@
 #include <immintrin.h>
 #elif defined(_MSC_VER) && defined(__AVX2__)
 #include <immintrin.h>
+#elif defined(__ARM_NEON)
+#include <arm_neon.h>
 #endif
 
 using namespace std;
@@ -1943,6 +1945,9 @@ std::vector<Match> Detector::match(Mat source, float threshold,
                             _mm256_storeu_si256((__m256i*)(v_or_buf.data() + x),
                                 _mm256_loadu_si256((const __m256i*)(first + x)));
                         }
+#elif defined(__aarch64__)
+                        for (; x <= src_cols - 16; x += 16)
+                            vst1q_u8(v_or_buf.data() + x, vld1q_u8(first + x));
 #endif
                         for (; x < src_cols; ++x) v_or_buf[x] = first[x];
                     }
@@ -1957,6 +1962,10 @@ std::vector<Match> Detector::match(Mat source, float threshold,
                             _mm256_storeu_si256((__m256i*)(v_or_buf.data() + x),
                                 _mm256_or_si256(acc, v));
                         }
+#elif defined(__aarch64__)
+                        for (; x <= src_cols - 16; x += 16)
+                            vst1q_u8(v_or_buf.data() + x,
+                                vorrq_u8(vld1q_u8(v_or_buf.data() + x), vld1q_u8(row + x)));
 #endif
                         for (; x < src_cols; ++x) v_or_buf[x] |= row[x];
                     }
@@ -1980,6 +1989,18 @@ std::vector<Match> Detector::match(Mat source, float threshold,
                                         _mm256_loadu_si256((const __m256i*)(src + x + d)));
                             }
                             _mm256_storeu_si256((__m256i*)(dst + x), acc);
+                        }
+#elif defined(__aarch64__)
+                        // NEON interior where all offsets are in bounds (16-wide)
+                        for (; x <= src_cols - 16 - half; x += 16) {
+                            uint8x16_t acc = vld1q_u8(src + x);
+                            for (int d = 1; d <= half; ++d) {
+                                if (x - d >= 0)
+                                    acc = vorrq_u8(acc, vld1q_u8(src + x - d));
+                                if (x + d <= src_cols - 16)
+                                    acc = vorrq_u8(acc, vld1q_u8(src + x + d));
+                            }
+                            vst1q_u8(dst + x, acc);
                         }
 #endif
                         // Scalar for remaining / borders
@@ -2029,6 +2050,19 @@ std::vector<Match> Detector::match(Mat source, float threshold,
                                 _mm256_shuffle_epi8(pop4_lut, hi));
                             __m256i dv = _mm256_shuffle_epi8(disc_lut, pcnt);
                             _mm256_storeu_si256((__m256i*)(disc + x), dv);
+                        }
+#elif defined(__aarch64__)
+                        // NEON: hardware per-byte popcount (vcntq_u8) → discount LUT.
+                        // popcount(byte) == pop4[lo] + pop4[hi], always < 9, so the
+                        // 16-entry table indexed by the count reproduces the scalar
+                        // (nbits < 9) ? discount_table[nbits] : 0 exactly.
+                        alignas(16) static const uchar disc_tbl[16] = {
+                            0, 4, 4, 4, 3, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+                        uint8x16_t disc_lut = vld1q_u8(disc_tbl);
+                        for (; x <= src_cols - 16; x += 16) {
+                            uint8x16_t sb = vld1q_u8(sp + x);
+                            uint8x16_t pcnt = vcntq_u8(sb);
+                            vst1q_u8(disc + x, vqtbl1q_u8(disc_lut, pcnt));
                         }
 #endif
                         for (; x < src_cols; ++x) {
@@ -2197,6 +2231,75 @@ std::vector<Match> Detector::match(Mat source, float threshold,
                                 for (int c = c_start; c < src_cols; c += T) {
                                     *mem_ptr++ = resp_row[c];
                                 }
+                            }
+                        }
+#elif defined(__aarch64__)
+                        // NEON mirror of the AVX2 path: LUT + popcount discount over
+                        // the full spread row into response_buf, then strided decimate
+                        // into the linear memories. Bit-identical to the scalar #else.
+                        uint8x16_t lut_lo_v = vld1q_u8(lut_ptr);
+                        uint8x16_t lut_hi_v = vld1q_u8(lut_ptr + 16);
+                        uint8x16_t nibble_mask = vdupq_n_u8(0x0F);
+
+                        uchar *resp_row = response_buf.data();
+                        int x = 0;
+                        for (; x <= src_cols - 16; x += 16) {
+                            uint8x16_t sb = vld1q_u8(spread_row + x);
+                            uint8x16_t lo_nib = vandq_u8(sb, nibble_mask);
+                            uint8x16_t hi_nib = vandq_u8(vshrq_n_u8(sb, 4), nibble_mask);
+                            uint8x16_t raw = vmaxq_u8(vqtbl1q_u8(lut_lo_v, lo_nib),
+                                                      vqtbl1q_u8(lut_hi_v, hi_nib));
+                            // result = raw * disc / 4, widening to u16 to avoid overflow.
+                            uint8x16_t dv = vld1q_u8(disc_row + x);
+                            uint16x8_t prod_lo = vshrq_n_u16(
+                                vmull_u8(vget_low_u8(raw),  vget_low_u8(dv)),  2);
+                            uint16x8_t prod_hi = vshrq_n_u16(
+                                vmull_u8(vget_high_u8(raw), vget_high_u8(dv)), 2);
+                            vst1q_u8(resp_row + x,
+                                     vcombine_u8(vqmovn_u16(prod_lo), vqmovn_u16(prod_hi)));
+                        }
+                        for (; x < src_cols; ++x) {
+                            uchar sb = spread_row[x];
+                            uchar raw = std::max(lut_ptr[sb & 0x0F], lut_ptr[(sb >> 4) + 16]);
+                            resp_row[x] = (uchar)(raw * disc_row[x] / 4);
+                        }
+
+                        // Strided decimate response_buf → linear memories.
+                        // vld4q/vld2q deinterleave the T offsets in one pass.
+                        if (T == 4) {
+                            uchar *mp[4];
+                            for (int k = 0; k < 4; ++k)
+                                mp[k] = memories[ori].ptr(grid_row * 4 + k) + dec_r * mem_w;
+                            int c = 0;
+                            for (; c + 64 <= src_cols; c += 64) {
+                                uint8x16x4_t q = vld4q_u8(resp_row + c);
+                                vst1q_u8(mp[0], q.val[0]); mp[0] += 16;
+                                vst1q_u8(mp[1], q.val[1]); mp[1] += 16;
+                                vst1q_u8(mp[2], q.val[2]); mp[2] += 16;
+                                vst1q_u8(mp[3], q.val[3]); mp[3] += 16;
+                            }
+                            for (int k = 0; k < 4; ++k)
+                                for (int cc = c + k; cc < src_cols; cc += 4)
+                                    *mp[k]++ = resp_row[cc];
+                        } else if (T == 2) {
+                            uchar *mp[2];
+                            for (int k = 0; k < 2; ++k)
+                                mp[k] = memories[ori].ptr(grid_row * 2 + k) + dec_r * mem_w;
+                            int c = 0;
+                            for (; c + 32 <= src_cols; c += 32) {
+                                uint8x16x2_t q = vld2q_u8(resp_row + c);
+                                vst1q_u8(mp[0], q.val[0]); mp[0] += 16;
+                                vst1q_u8(mp[1], q.val[1]); mp[1] += 16;
+                            }
+                            for (int k = 0; k < 2; ++k)
+                                for (int cc = c + k; cc < src_cols; cc += 2)
+                                    *mp[k]++ = resp_row[cc];
+                        } else {
+                            for (int c_start = 0; c_start < T; ++c_start) {
+                                int grid_index = grid_row * T + c_start;
+                                uchar *mem_ptr = memories[ori].ptr(grid_index) + dec_r * mem_w;
+                                for (int c = c_start; c < src_cols; c += T)
+                                    *mem_ptr++ = resp_row[c];
                             }
                         }
 #else

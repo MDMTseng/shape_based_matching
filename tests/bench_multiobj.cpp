@@ -98,10 +98,13 @@ static cv::Mat make_scene(int W, int H, double sigma, std::vector<cv::Point>& gt
     return scene;
 }
 
-static std::unique_ptr<sbm::ShapeMatcher> build_matcher(sbm::RefineMode refine) {
+static std::unique_ptr<sbm::ShapeMatcher> build_matcher(sbm::RefineMode refine,
+                                                        float match_scale) {
     sbm::MatchConfig cfg;
     cfg.min_score = 50.0f;
     cfg.refine = refine;
+    cfg.match_scale = match_scale; // <1 downscales the scene for a faster coarse
+                                   // match; ROI refine recovers full-res accuracy.
     cfg.blur_kernel_size = 7;      // handles ~30 sigma noise
     cfg.skip_voting = true;        // higher thresholds -> safe, saves time at 20MP
     auto matcher = std::make_unique<sbm::ShapeMatcher>(cfg);
@@ -135,32 +138,44 @@ static void run(sbm::ShapeMatcher& matcher, const char* label,
         tot += t; mn = std::min(mn, t); mx = std::max(mx, t);
     }
     double avg = tot / N;
-    std::printf("  %5.1f MP (%4dx%-4d)  refine=%-4s  templ=%d  match avg %8.2f ms"
+    std::printf("  %5.1f MP (%4dx%-4d)  %-14s  match avg %8.2f ms"
                 "  (min %7.2f/max %7.2f)  %6.2f fps   nmatch=%zu/5\n",
-                mp, W, H, label, matcher.numTemplates(),
-                avg, mn, mx, 1000.0 / avg, rs.size());
+                mp, W, H, label, avg, mn, mx, 1000.0 / avg, rs.size());
 }
 
 int main(int argc, char** argv) {
     sbm::setLogLevel(sbm::LogLevel::Warning);   // quiet the per-add feature logs
     std::printf("bench_multiobj | SIMD backend: %s | 5 objects x 360deg (1-deg) = 1800 templates\n",
                 SBM_SIMD);
-    std::printf("scene: 5 objects on a grid + Gaussian noise (sigma=20)\n");
+    std::printf("scene: 5 objects on a grid + Gaussian noise (sigma=10)\n");
 
-    const double sigma = 20.0;
+    const double sigma = 10.0;
     struct { int w, h; } res[] = {{1280, 960}, {2592, 1944}, {5184, 3888}};  // 1.2 / 5 / 20 MP
     int only = (argc > 1) ? std::atoi(argv[1]) : 0;   // 1=1.2MP, 2=+5MP, else all
     int nres = only == 1 ? 1 : only == 2 ? 2 : 3;
 
+    // Variants: baseline coarse-only at full res, then ROI refine at full res
+    // and at 0.7 / 0.5 scene downscale. Downscale shrinks the coarse-match cost
+    // (~scale^2); ROI refine runs at full res to recover accuracy.
+    struct Variant { const char* label; sbm::RefineMode refine; float scale; };
+    const Variant variants[] = {
+        {"none   s=1.00", sbm::RefineMode::None, 1.00f},
+        {"ROI    s=1.00", sbm::RefineMode::ROI,  1.00f},
+        {"ROI    s=0.70", sbm::RefineMode::ROI,  0.70f},
+        {"ROI    s=0.50", sbm::RefineMode::ROI,  0.50f},
+    };
+    const int nv = (int)(sizeof(variants) / sizeof(variants[0]));
+
     // Templates are scene-independent — build each matcher once, reuse across
     // resolutions (registering 1800 rotated variants is the expensive setup).
-    std::printf("building matchers (1800 templates each)...\n");
-    auto m_none = build_matcher(sbm::RefineMode::None);
-    auto m_roi  = build_matcher(sbm::RefineMode::ROI);
+    std::printf("building %d matchers (1800 templates each)...\n", nv);
+    std::vector<std::unique_ptr<sbm::ShapeMatcher>> matchers;
+    for (auto& v : variants)
+        matchers.push_back(build_matcher(v.refine, v.scale));
 
     for (int i = 0; i < nres; ++i) {
-        run(*m_none, "none", res[i].w, res[i].h, sigma);
-        run(*m_roi,  "ROI",  res[i].w, res[i].h, sigma);
+        for (int v = 0; v < nv; ++v)
+            run(*matchers[v], variants[v].label, res[i].w, res[i].h, sigma);
     }
     return 0;
 }

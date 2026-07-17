@@ -108,6 +108,25 @@ Same aarch64 box, 360-template sweep @ 1280×960, `bench_rotation`:
 | + fused-loop NEON | 14.0 ms | 72 |
 | + similarity NEON  | 12.7 ms | 79 |
 
+## Fewer templates: `sbm::selectRotationStable()`
+
+Rotation-invariant configs store each angle as a separate template (1° sweep = 360/obj).
+`selectRotationStable(fs, templ, angle_range, angle_step, keep_frac)` trims a feature set
+to its rotation-robust core — features whose analytically-rotated orientation still matches
+the real rotated template (measured with the matcher's own quantizer). Keeping those lets
+you use a **coarser `ModelConfig.angle` step** (far fewer templates) at similar off-grid
+robustness. Curation-safe: it only subsets the given features, never adds.
+
+Recipe (biggest gain on a quality-filtered base — downscaled or low `num_features`):
+```cpp
+auto fs = sbm::extractFeatures(templ_downscaled, mask);   // fewer, stronger features
+fs = sbm::selectRotationStable(fs, templ_downscaled, /*range*/9, /*step*/3, /*keep*/0.5f);
+matcher.addModel(name, fs, {/*angle*/{0,360,9}});         // 9° step, not 1°
+```
+Measured (aarch64, σ=10, off-grid angles): 0.7-extracted base, keep 50% @ **9° step → 94.5/92.3**
+(avg/worst) vs the full base at **1° step → 89.8/84.0** — **~9× fewer templates, better
+robustness**. Orthogonal to downscale (`match_scale`/rex) and `num_features`; they stack.
+
 ## x86 team: please append your AVX2 numbers
 
 Run both benches on your x86 box (build picks up AVX2 via `-march=native -mavx2`, or

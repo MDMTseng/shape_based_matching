@@ -310,6 +310,97 @@ FeatureSet extractFeatures(const cv::Mat& templ_gray,
     return fs;
 }
 
+// --- rotation-stable feature selection ------------------------------------
+namespace {
+// The matcher's scene quantizer: fold gy>=0, bin by tan boundaries (== uniform
+// 22.5-deg bins) into 8 orientations. Must match line2Dup exactly.
+inline int rs_qbin(float gxf, float gyf) {
+    int gx = (int)std::lround(gxf), gy = (int)std::lround(gyf);
+    if (gy < 0) { gx = -gx; gy = -gy; }
+    if (gy == 0 && gx < 0) gx = -gx;
+    static const long TAN_B[4] = {1989, 6682, 14966, 50273};
+    long ty = (long)gy * 10000; int b;
+    if (gx >= 0) {
+        if (ty < (long)gx*TAN_B[0]) b=0; else if (ty < (long)gx*TAN_B[1]) b=1;
+        else if (ty < (long)gx*TAN_B[2]) b=2; else if (ty < (long)gx*TAN_B[3]) b=3; else b=4;
+    } else {
+        long a=-gx;
+        if (ty < a*TAN_B[0]) b=0; else if (ty < a*TAN_B[1]) b=7;
+        else if (ty < a*TAN_B[2]) b=6; else if (ty < a*TAN_B[3]) b=5; else b=4;
+    }
+    return b;
+}
+inline int rs_bindiff(int a, int b) { int d = std::abs(a-b); return std::min(d, 8-d); }
+inline cv::Point2f rs_apply(const cv::Mat& M, float x, float y) {
+    return { (float)(M.at<double>(0,0)*x + M.at<double>(0,1)*y + M.at<double>(0,2)),
+             (float)(M.at<double>(1,0)*x + M.at<double>(1,1)*y + M.at<double>(1,2)) };
+}
+}  // namespace
+
+FeatureSet selectRotationStable(const FeatureSet& fs, const cv::Mat& templ_gray,
+                                float angle_range, float angle_step, float keep_frac) {
+    if (fs.levels.empty() || templ_gray.empty() || angle_step <= 0) return fs;
+    keep_frac = std::min(1.0f, std::max(0.05f, keep_frac));
+
+    cv::Point2f center(templ_gray.cols / 2.0f, templ_gray.rows / 2.0f);
+    std::vector<float> angs;
+    for (float a = -angle_range; a <= angle_range + 1e-3f; a += angle_step)
+        if (std::abs(a) > 1e-3f) angs.push_back(a);
+    if (angs.empty()) return fs;
+
+    // Precompute rotated-template gradients + rotation matrices once.
+    std::vector<cv::Mat> GX(angs.size()), GY(angs.size()), M(angs.size());
+    for (size_t k = 0; k < angs.size(); ++k) {
+        M[k] = cv::getRotationMatrix2D(center, angs[k], 1.0);
+        cv::Mat r; cv::warpAffine(templ_gray, r, M[k], templ_gray.size(),
+                                  cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+        cv::Sobel(r, GX[k], CV_32F, 1, 0, 3);
+        cv::Sobel(r, GY[k], CV_32F, 0, 1, 3);
+    }
+    auto trueBin = [&](int k, cv::Point2f p) {
+        int x = std::min(std::max((int)(p.x + 0.5f), 0), templ_gray.cols - 1);
+        int y = std::min(std::max((int)(p.y + 0.5f), 0), templ_gray.rows - 1);
+        return rs_qbin(GX[k].at<float>(y, x), GY[k].at<float>(y, x));
+    };
+    // Analytic prediction: gradient direction rotates by sgn*angle; quantize the same way.
+    auto predBin = [&](float theta, float a, int sgn) {
+        float phi = (theta + sgn * a) * (float)CV_PI / 180.0f;
+        return rs_qbin(std::cos(phi) * 100.0f, std::sin(phi) * 100.0f);
+    };
+
+    FeatureSet out = fs;
+    for (auto& lv : out.levels) {
+        if (lv.features.size() < 2) continue;
+        auto absPt = [&](const FeatureSet::Feature& f) {
+            return cv::Point2f((float)(f.x + lv.tl_x), (float)(f.y + lv.tl_y));
+        };
+        // Auto-detect the rotation-sign convention (minimize total drift at angs[0]).
+        auto totalDrift = [&](int sgn) {
+            long acc = 0;
+            for (auto& f : lv.features) { cv::Point2f p = absPt(f);
+                acc += rs_bindiff(predBin(f.theta, angs[0], sgn), trueBin(0, rs_apply(M[0], p.x, p.y))); }
+            return acc;
+        };
+        int sgn = totalDrift(+1) <= totalDrift(-1) ? +1 : -1;
+
+        std::vector<std::pair<int,int>> drift;  // (instability, index)
+        drift.reserve(lv.features.size());
+        for (size_t i = 0; i < lv.features.size(); ++i) {
+            int acc = 0; cv::Point2f p0 = absPt(lv.features[i]);
+            for (size_t k = 0; k < angs.size(); ++k)
+                acc += rs_bindiff(predBin(lv.features[i].theta, angs[k], sgn),
+                                  trueBin((int)k, rs_apply(M[k], p0.x, p0.y)));
+            drift.push_back({acc, (int)i});
+        }
+        std::sort(drift.begin(), drift.end());  // most stable (lowest drift) first
+        int keep = std::max(1, (int)(lv.features.size() * keep_frac));
+        std::vector<FeatureSet::Feature> kept; kept.reserve(keep);
+        for (int i = 0; i < keep; ++i) kept.push_back(lv.features[drift[i].second]);
+        lv.features = std::move(kept);
+    }
+    return out;
+}
+
 
 // ============================================================
 // Sensitivity analysis

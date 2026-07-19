@@ -371,7 +371,9 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
                     const std::vector<SamplePoint>& sample_points,
                     const cv::Vec3f& initial_pose,
                     const ROIConfig& config,
-                    float* out_residual) {
+                    float* out_residual,
+                    float* out_inlier_frac,
+                    float* out_min_ratio) {
 
     cv::Vec3f pose = initial_pose;
 
@@ -630,23 +632,41 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
     // Per-result confidence: mean |point-to-line| residual of the matched points at
     // the final pose. Consistent points -> ~0; disagreeing points (occlusion / gross
     // mismatch / completely-off init) -> large.
-    if (out_residual) {
+    if (out_residual || out_inlier_frac || out_min_ratio) {
         float fa = pose[2] * (float)CV_PI / 180.0f;
         float fcs = std::cos(fa), fsn = std::sin(fa), fcx = pose[0], fcy = pose[1];
-        float sum = 0; int cnt = 0;
+        // Per score-matched point: its point-to-line error |e| and score/floor.
+        std::vector<float> errs; float min_ratio = 1e9f;
         for (auto& mp : matched_points) {
             auto& sp = sample_points[mp.sample_idx];
-            if (config.reject_low_score && sp.score_floor > 0.0f &&
-                mp.score >= 0.0f && mp.score < sp.score_floor * config.reject_pct)
-                continue;
+            bool matched = mp.score >= 0.0f;
+            bool passes = !(config.reject_low_score && sp.score_floor > 0.0f)
+                          || mp.score >= sp.score_floor * config.reject_pct;
+            if (!matched || !passes) continue;
+            if (sp.score_floor > 0.0f) min_ratio = std::min(min_ratio, mp.score / sp.score_floor);
             float ex = fcs * sp.pos.x - fsn * sp.pos.y + fcx;
             float ey = fsn * sp.pos.x + fcs * sp.pos.y + fcy;
             cv::Point2f n(fcs * mp.normal.x - fsn * mp.normal.y,
                           fsn * mp.normal.x + fcs * mp.normal.y);
-            float e = (ex - mp.dst.x) * n.x + (ey - mp.dst.y) * n.y;
-            sum += std::abs(e); cnt++;
+            errs.push_back(std::abs((ex - mp.dst.x) * n.x + (ey - mp.dst.y) * n.y));
         }
-        *out_residual = (cnt > 0) ? sum / cnt : -1.0f;
+        // residual = mean |e| over score-matched points — a GENERAL geometric-fault
+        // signal: rises with SKEW (all points off) AND with OCCLUSION (occluded
+        // points match the wrong place -> large |e|).
+        if (out_residual) { float s=0; for(float e:errs) s+=e;
+            *out_residual = errs.empty() ? -1.0f : s/(float)errs.size(); }
+        // inlier_frac = fraction of sample points that are GEOMETRICALLY consistent
+        // (|e| within a robust bound). Skew keeps everyone consistent (stays high);
+        // occlusion makes a few points GROSSLY off (drops) — the occlusion-specific
+        // signal, complementary to residual.
+        if (out_inlier_frac) {
+            if (errs.empty() || sample_points.empty()) *out_inlier_frac = -1.0f;
+            else { std::vector<float> s=errs; std::sort(s.begin(),s.end());
+                   float med=s[s.size()/2]; float th=std::max(2.0f, 2.0f*med);
+                   int in=0; for(float e:errs) if(e<=th) ++in;
+                   *out_inlier_frac = (float)in/(float)sample_points.size(); }
+        }
+        if (out_min_ratio) *out_min_ratio = (!errs.empty() && min_ratio < 1e8f) ? min_ratio : -1.0f;
     }
 
     return pose;

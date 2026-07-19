@@ -2576,6 +2576,22 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
 
                     if (score > threshold)
                     {
+                        // Local-max prefilter: emit only the peak of each score blob,
+                        // collapsing the above-threshold flood BEFORE cap/refine/NMS.
+                        if (candidate_local_max) {
+                            bool ismax = true;
+                            for (int dr = -1; dr <= 1 && ismax; ++dr) {
+                                int rr = r + dr;
+                                if (rr < 0 || rr >= similarities.rows) continue;
+                                const ushort* nrow = similarities.ptr<ushort>(rr);
+                                for (int dc = -1; dc <= 1; ++dc) {
+                                    int cc = c + dc;
+                                    if (cc < 0 || cc >= similarities.cols || (dr == 0 && dc == 0)) continue;
+                                    if (nrow[cc] > (ushort)raw_score) { ismax = false; break; }
+                                }
+                            }
+                            if (!ismax) continue;
+                        }
                         int offset = lowest_T / 2 + (lowest_T % 2 - 1);
                         int x = c * lowest_T + offset;
                         int y = r * lowest_T + offset;

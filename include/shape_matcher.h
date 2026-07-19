@@ -401,6 +401,11 @@ struct MatchConfig {
 
     bool skip_voting = false;        ///< Skip 3x3 neighborhood voting (saves ~7ms at 20MP).
                                      ///< Safe to enable with higher edge thresholds (50/80).
+
+    bool candidate_local_max = true; ///< Emit a coarse candidate only at a local maximum
+                                     ///< of the similarity map (3x3), collapsing the
+                                     ///< above-threshold flood before cap/refine/NMS.
+                                     ///< Biggest win under high noise. false = legacy.
 };
 
 // ============================================================
@@ -417,9 +422,16 @@ struct MatchResult {
     float refine_residual = -1.0f; ///< ROI refine fit quality: mean |point-to-line|
                                    ///< residual (px) of the matched sample points at
                                    ///< the final pose. Low (~<1px) = trustworthy; high
-                                   ///< = points disagree (occlusion / wrong / off match).
-                                   ///< -1 = not computed (refine != ROI). Use to detect
-                                   ///< completely-off matches at the result level.
+                                   ///< = points DISAGREE on a rigid pose (SKEW / warp /
+                                   ///< perspective) even when the shape is fully present.
+                                   ///< -1 = not computed (refine != ROI).
+    float refine_inlier_frac = -1.0f; ///< Fraction of ROI sample points that matched well
+                                   ///< (passed the score gate). Drops on OCCLUSION / points
+                                   ///< landing on background — a COVERAGE confidence,
+                                   ///< complementary to refine_residual (which flags skew).
+                                   ///< -1 = not computed.
+    float refine_min_ratio = -1.0f; ///< min over inliers of (peak_score / score_floor) —
+                                   ///< the weakest surviving point's relative match. -1 = n/a.
 };
 
 // ============================================================

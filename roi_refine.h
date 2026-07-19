@@ -90,11 +90,19 @@ std::vector<SamplePoint> selectCriticalPoints(
 ///   (px) of the matched points at the final pose. Low = the points agree on a
 ///   consistent pose (trustworthy); high = they disagree (occlusion / gross
 ///   mismatch / completely-off match) — use it as a per-result confidence signal.
+/// @param out_inlier_frac  If non-null, receives the fraction of sample points that
+///   MATCHED WELL (passed the score gate: peak correlation >= score_floor*reject_pct).
+///   Drops when points are occluded / land on background — a COVERAGE confidence,
+///   complementary to out_residual (which measures rigid-fit consistency / skew).
+/// @param out_min_ratio  If non-null, receives min over the inliers of
+///   (peak_score / score_floor) — the weakest surviving point's relative match.
 cv::Vec3f refineROI(const cv::Mat& templ_img,
                     const cv::Mat& scene_img,
                     const std::vector<SamplePoint>& sample_points,
                     const cv::Vec3f& initial_pose,
                     const ROIConfig& config = ROIConfig(),
-                    float* out_residual = nullptr);
+                    float* out_residual = nullptr,
+                    float* out_inlier_frac = nullptr,
+                    float* out_min_ratio = nullptr);
 
 } // namespace roi_refine

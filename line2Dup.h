@@ -242,6 +242,13 @@ public:
     /// When false (default), re-extract features independently at each level.
     bool scale_pyramid_features = false;
 
+    /// When true (default), a coarse candidate is emitted only if it is a local
+    /// maximum of the similarity map (3x3). Collapses each score blob to its peak
+    /// BEFORE the top-K cap / pyramid refine / NMS — cuts the candidate flood at
+    /// the source (biggest effect under high noise). false = legacy (every
+    /// above-threshold position becomes a candidate).
+    bool candidate_local_max = true;
+
 protected:
     cv::Ptr<ColorGradient> modality;
     int pyramid_levels;

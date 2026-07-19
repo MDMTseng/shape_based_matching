@@ -2155,6 +2155,7 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
     // Apply config to modality
     match_detector.getModalities()->blur_kernel_size = cfg.blur_kernel_size;
     match_detector.getModalities()->skip_voting = cfg.skip_voting;
+    match_detector.candidate_local_max = cfg.candidate_local_max;
 
     // Run meiqua matching
     auto raw_matches = match_detector.match(padded, cfg.min_score, class_ids);
@@ -2310,7 +2311,7 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         }
 
         // ROI-based refinement
-        float roi_residual_out = -1.0f;
+        float roi_residual_out = -1.0f, roi_inlier_out = -1.0f, roi_minratio_out = -1.0f;
         if (cfg.refine == RefineMode::ROI && !fs.templ_image.empty() && !scene.empty()) {
             // Use sensitivity-optimized point selection
             // cached_opt_points was pre-computed in addModel(); read-only here (thread-safe)
@@ -2345,10 +2346,13 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
                 roi_cfg.iterative_rematch = cfg.roi_iterative_rematch;
 
                 cv::Vec3f init_pose(scene_x, scene_y, raw_angle);
-                float roi_residual = -1.0f;
+                float roi_residual = -1.0f, roi_inlier = -1.0f, roi_minratio = -1.0f;
                 auto refined_pose = roi_refine::refineROI(
-                    fs.templ_image, scene, sample_pts, init_pose, roi_cfg, &roi_residual);
+                    fs.templ_image, scene, sample_pts, init_pose, roi_cfg,
+                    &roi_residual, &roi_inlier, &roi_minratio);
                 roi_residual_out = roi_residual;
+                roi_inlier_out = roi_inlier;
+                roi_minratio_out = roi_minratio;
 
                 scene_x = refined_pose[0];
                 scene_y = refined_pose[1];
@@ -2375,6 +2379,8 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         r.flipped = is_flip;
         r.score = m.similarity;
         r.refine_residual = roi_residual_out;
+        r.refine_inlier_frac = roi_inlier_out;
+        r.refine_min_ratio = roi_minratio_out;
         results[mi_idx] = r;
         valid[mi_idx] = 1;
     }

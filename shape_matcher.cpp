@@ -592,6 +592,16 @@ static float measureNoiseStability(const cv::Mat& roi_patch, const cv::Mat& temp
 }
 
 std::vector<cv::Point2f> FeatureSet::selectOptimizedPoints(int max_points, float min_spacing, bool edge_only) const {
+    // User override wins outright: exactly these points (empty => the caller's
+    // empty-guard skips ROI refine => coarse-only). Mirror them into the cache
+    // so precomputeFeatureCaches() builds lock info for them like any other
+    // selection.
+    if (user_opt_points_set) {
+        cached_opt_points = user_opt_points;
+        cached_opt_max_points = std::max(max_points, (int)user_opt_points.size());
+        return user_opt_points;
+    }
+
     // Return cached result if available and computed with same (or larger) max_points
     if (!cached_opt_points.empty() && cached_opt_max_points >= max_points)
         return cached_opt_points;
@@ -990,6 +1000,7 @@ std::vector<cv::Point2f> FeatureSet::selectOptimizedPointsV3(int max_points, flo
 // which features to swap in O(N) instead of brute-force.
 // ================================================================
 std::vector<cv::Point2f> FeatureSet::selectOptimizedPointsV2(int max_points, int num_restarts) const {
+    if (user_opt_points_set) return user_opt_points;
     if (refine_points.empty() || templ_image.empty())
         return {};
 
@@ -1769,6 +1780,12 @@ struct ShapeMatcher::Impl {
             rp.py = ((base.templ_height - 1) - iy) - tcy;
             rp.ny = -rp.ny;                                  // mirror normal Y
         }
+        // User refine points are centre-relative too; mirror their Y.
+        if (f.user_opt_points_set)
+            for (auto& up : f.user_opt_points) {
+                float iy = up.y + tcy;
+                up.y = ((base.templ_height - 1) - iy) - tcy;
+            }
         // Caches MUST be recomputed from the flipped image/points, not inherited.
         f.cached_opt_points.clear();
         f.cached_opt_max_points = 0;
@@ -2016,6 +2033,17 @@ int ShapeMatcher::addModelInternal(const std::string& name,
         FeatureSet scaled_fs;
         if (rescaled) {
             scaled_fs = *rescaled;
+            // The re-extracted set knows nothing of the caller's explicit
+            // refine points; carry them over at match scale.
+            if (features.user_opt_points_set) {
+                float ms = impl_->match_config.match_scale;
+                scaled_fs.user_opt_points.clear();
+                for (auto& up : features.user_opt_points)
+                    scaled_fs.user_opt_points.push_back(cv::Point2f(up.x*ms, up.y*ms));
+                scaled_fs.user_opt_points_set = true;
+                scaled_fs.cached_opt_points.clear();
+                scaled_fs.cached_opt_max_points = 0;
+            }
         } else {
             float ms = impl_->match_config.match_scale;
             scaled_fs = features;
@@ -2031,6 +2059,11 @@ int ShapeMatcher::addModelInternal(const std::string& name,
             }
             scaled_fs.templ_width = (int)(features.templ_width * ms + 0.5f);
             scaled_fs.templ_height = (int)(features.templ_height * ms + 0.5f);
+            if (scaled_fs.user_opt_points_set) {
+                for (auto& up : scaled_fs.user_opt_points) { up.x *= ms; up.y *= ms; }
+                scaled_fs.cached_opt_points.clear();
+                scaled_fs.cached_opt_max_points = 0;
+            }
         }
 
         float s2 = config.scale.min;

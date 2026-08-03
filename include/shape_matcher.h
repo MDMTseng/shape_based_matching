@@ -20,6 +20,8 @@ namespace sbm {
 
 /// Extracted edge features from a template image.
 /// Includes user-defined origin and angle offset for result mapping.
+#define SBM_HAS_USER_OPT_POINTS 1
+
 struct FeatureSet {
     /// Internal feature representation
     struct Feature {
@@ -61,6 +63,14 @@ struct FeatureSet {
     /// Match results report position of this point in the scene.
     /// Default: template center (templ_width/2, templ_height/2).
     cv::Point2f origin;
+
+    /// User-supplied ROI refine points (template px, relative to template
+    /// center). When user_opt_points_set, selectOptimizedPoints() returns
+    /// EXACTLY these -- an empty list means coarse-only (ROI refine is
+    /// skipped). Absent (set=false) keeps the automatic selection.
+    /// Reimplementation of an API lost with an unpushed commit (b987d179).
+    std::vector<cv::Point2f> user_opt_points;
+    bool user_opt_points_set = false;
 
     /// Cached optimized sample points (computed once, reused for matching).
     /// Populated by selectOptimizedPoints() or precomputeOptimizedPoints().

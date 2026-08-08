@@ -2206,6 +2206,25 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         }
     }
 
+    // Negative / exclusion points: precompute a scene edge-magnitude map once, if
+    // any model defines negative points and the penalty/veto is enabled. A negative
+    // point that lands where |grad| > threshold is a "violation" (forbidden edge).
+    cv::Mat neg_mag;
+    bool do_negative = (cfg.negative_penalty > 0.0f || cfg.negative_hard_veto);
+    if (do_negative) {
+        bool any = false;
+        for (auto& model : impl_->models) if (!model.features.negative_points.empty()) { any = true; break; }
+        do_negative = any;
+    }
+    if (do_negative) {
+        int ks = cfg.blur_kernel_size | 1; if (ks < 3) ks = 3;
+        cv::Mat sm, gx, gy;
+        cv::GaussianBlur(scene, sm, cv::Size(ks, ks), 0);
+        cv::Sobel(sm, gx, CV_32F, 1, 0, 3);
+        cv::Sobel(sm, gy, CV_32F, 0, 1, 3);
+        cv::magnitude(gx, gy, neg_mag);
+    }
+
     // Convert to MatchResult with user-defined transforms
     std::vector<MatchResult> results;
 
@@ -2277,6 +2296,29 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         if (is_flip) user_angle = -user_angle + 2 * fs.angle_offset;
         user_angle = std::fmod(user_angle, 360.0f);
         if (user_angle < 0) user_angle += 360.0f;
+
+        // Negative / exclusion check: transform each negative point (relative to
+        // template center) to this match's pose and test the scene edge map.
+        // (fs is the used feature set; a flipped template with its own features
+        // simply carries no negative points → no-op, which is the safe default.)
+        float neg_penalty = 0.0f;
+        if (do_negative && !neg_mag.empty() && !fs.negative_points.empty()) {
+            int violations = 0;
+            float cs = std::cos(rad), sn = std::sin(rad);
+            for (const auto& np : fs.negative_points) {
+                float sxp = scene_x + (cs * np.x - sn * np.y) * matched_scale;
+                float syp = scene_y + (sn * np.x + cs * np.y) * matched_scale;
+                int ix = (int)std::lround(sxp), iy = (int)std::lround(syp);
+                if (ix >= 0 && iy >= 0 && ix < neg_mag.cols && iy < neg_mag.rows &&
+                    neg_mag.at<float>(iy, ix) > cfg.negative_mag_thresh)
+                    ++violations;
+            }
+            if (cfg.negative_hard_veto && violations >= cfg.negative_min_violations) {
+                valid[mi_idx] = 0;   // strict "must be empty" → reject outright
+                continue;
+            }
+            neg_penalty = cfg.negative_penalty * violations;
+        }
 
         // ICP refinement at full resolution (inverse ICP)
         bool do_icp = (cfg.refine == RefineMode::ICP || cfg.refine == RefineMode::ICP_Sparse
@@ -2377,7 +2419,11 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         r.angle = user_angle;
         r.scale = matched_scale;
         r.flipped = is_flip;
-        r.score = m.similarity;
+        r.score = m.similarity - neg_penalty;   // soft negative penalty (0 if none)
+        if (r.score < 0.0f) r.score = 0.0f;
+        // A penalty that pushes the score under min_score removes the match — so a
+        // large negative_penalty (e.g. 100) acts as a near-hard reject.
+        if (neg_penalty > 0.0f && r.score < cfg.min_score) { valid[mi_idx] = 0; continue; }
         r.refine_residual = roi_residual_out;
         r.refine_inlier_frac = roi_inlier_out;
         r.refine_min_ratio = roi_minratio_out;

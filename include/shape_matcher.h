@@ -52,6 +52,14 @@ struct FeatureSet {
     /// All refinement points: dense Canny edges + Harris corners.
     std::vector<RefinePt> refine_points;
 
+    /// NEGATIVE / exclusion points: positions (relative to template CENTER, in
+    /// template pixels) that must be EDGE-FREE in the scene. At match time, if the
+    /// scene has a strong edge where a negative point lands, the match is penalised
+    /// (MatchConfig.negative_penalty per violating point) or rejected
+    /// (negative_hard_veto). Filters false matches that align the object's outline
+    /// but have extra structure where there should be none. Empty = off.
+    std::vector<cv::Point2f> negative_points;
+
     /// Template image (stored for ROI-based refinement).
     cv::Mat templ_image;
 
@@ -406,6 +414,20 @@ struct MatchConfig {
                                      ///< of the similarity map (3x3), collapsing the
                                      ///< above-threshold flood before cap/refine/NMS.
                                      ///< Biggest win under high noise. false = legacy.
+
+    // --- Negative / exclusion points (FeatureSet.negative_points) ---
+    /// Score points subtracted per negative point that lands on a scene edge.
+    /// 0 = off (default). Set high (e.g. 100) for a near-hard reject on one
+    /// violation, or low (e.g. 5) for a soft nudge.
+    float negative_penalty = 0.0f;
+    /// If true, >= negative_min_violations violating points reject the match
+    /// outright (score forced below min_score), regardless of penalty — the
+    /// strict "this region must be empty" mode.
+    bool  negative_hard_veto = false;
+    int   negative_min_violations = 1;   ///< Violations to trigger the hard veto.
+    /// Sobel-magnitude threshold (on the blurred scene) above which a negative
+    /// point counts as "edge present". Tune to expected edge strength.
+    float negative_mag_thresh = 60.0f;
 };
 
 // ============================================================

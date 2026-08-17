@@ -2,6 +2,11 @@
 #define CXXLINEMOD_H
 #include <opencv2/core/core.hpp>
 #include <opencv2/imgproc.hpp>
+#if CV_VERSION_MAJOR >= 5
+// OpenCV 5 moved DistanceTypes + the 2D transform helpers
+// (getRotationMatrix2D, warpAffine) out of imgproc into the geometry module.
+#include <opencv2/geometry/2d.hpp>
+#endif
 #include <map>
 
 #include "mipp.h"  // for SIMD in different platforms

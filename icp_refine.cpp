@@ -4,6 +4,9 @@
 #include "icp_refine.h"
 #include "rigid_solve.h"
 #include <opencv2/imgproc.hpp>
+#if CV_VERSION_MAJOR >= 5
+#include <opencv2/geometry/2d.hpp>   // DistanceTypes (DIST_L2) moved here in OpenCV 5
+#endif
 #include <algorithm>
 #include <cstring>
 

@@ -1,4 +1,9 @@
-build/
+# Out-of-source build trees. The trailing slash matters: it restricts the
+# pattern to DIRECTORIES, so the tracked build.bat is not swept up with them.
+# Widened from plain `build/` because comparing toolchains or OpenCV majors
+# needs parallel trees -- build-cv4/ and build-cv5/ sat untracked at 100 MB
+# while that comparison was running.
+build*/
 .idea/
 .vscode/
 CMakeLists.txt.user

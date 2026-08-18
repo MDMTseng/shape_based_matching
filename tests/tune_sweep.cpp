@@ -24,6 +24,9 @@
 #include "shape_matcher.h"
 #include "sbm_log.h"
 #include <opencv2/opencv.hpp>
+#if CV_VERSION_MAJOR >= 5
+#include <opencv2/geometry/2d.hpp>   // getRotationMatrix2D moved here in OpenCV 5
+#endif
 #include <algorithm>
 #include <chrono>
 #include <cstdio>

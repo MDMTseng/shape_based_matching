@@ -1360,6 +1360,19 @@ static void similarity(const std::vector<Mat> &linear_memories, const Template &
 
     int template_positions = span_y * W + span_x + 1;
 
+    // A template bigger than the scene has NOWHERE to sit: span goes negative and
+    // template_positions with it, which used to reach std::vector<uint8_t>(n) with
+    // a negative n -- converted to size_t that is a ~2^64 request, so the ctor
+    // throws length_error inside an OpenMP worker, where an uncaught exception is
+    // terminate() and the process dies with SIGABRT. Callers cropping a scene to a
+    // user-configured region hit this the moment the region is smaller than the
+    // part (visSele: inspection_region). Not finding anything is the correct
+    // answer here; aborting is not.
+    if (span_x < 0 || span_y < 0) {
+        dst = Mat::zeros(H > 0 ? H : 1, W > 0 ? W : 1, CV_16U);
+        return;
+    }
+
     dst = Mat::zeros(H, W, CV_16U);
     short *dst_ptr = dst.ptr<short>();
 
@@ -1554,6 +1567,19 @@ static void similarity_64(const std::vector<Mat> &linear_memories, const Templat
     // image. This allows template to wrap around left/right border incorrectly, so any
     // wrapped template matches must be filtered out!
     int template_positions = span_y * W + span_x + 1; // why add 1?
+
+    // A template bigger than the scene has NOWHERE to sit: span goes negative and
+    // template_positions with it, which used to reach std::vector<uint8_t>(n) with
+    // a negative n -- converted to size_t that is a ~2^64 request, so the ctor
+    // throws length_error inside an OpenMP worker, where an uncaught exception is
+    // terminate() and the process dies with SIGABRT. Callers cropping a scene to a
+    // user-configured region hit this the moment the region is smaller than the
+    // part (visSele: inspection_region). Not finding anything is the correct
+    // answer here; aborting is not.
+    if (span_x < 0 || span_y < 0) {
+        dst = Mat::zeros(H > 0 ? H : 1, W > 0 ? W : 1, CV_16U);
+        return;
+    }
     //int template_positions = (span_y - 1) * W + span_x; // More correct?
 
     /// @todo In old code, dst is buffer of size m_U. Could make it something like

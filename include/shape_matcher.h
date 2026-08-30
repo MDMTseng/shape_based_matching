@@ -15,6 +15,22 @@
 namespace sbm {
 
 // ============================================================
+// Defaults that are part of the API, not an implementation detail
+// ============================================================
+//
+// The matcher's own defaults, exposed so a caller can ask for EXACTLY what
+// match() asks for. That is not a convenience: selectOptimizedPoints() caches
+// by max_points and the first call wins, so a caller that previews a template
+// with its own idea of the count silently decides what the matcher runs with
+// afterwards. The only way for a caller to avoid that is to be able to name the
+// same number, so the number has to be reachable from outside this library.
+//
+// shape_matcher.cpp derives its file-local kDefaultROIHalf / kDefaultOptPoints
+// from these, so the public value and the one actually used cannot drift.
+static constexpr int kDefaultROIHalfPublic   = 15;  ///< half-size of the ROI search/template window
+static constexpr int kDefaultOptPointsPublic = 8;   ///< optimized sample points selected per template
+
+// ============================================================
 // FeatureSet: serializable template features
 // ============================================================
 

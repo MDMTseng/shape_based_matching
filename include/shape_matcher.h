@@ -14,6 +14,22 @@
 
 namespace sbm {
 
+// How many ROI refine points the matcher uses when the def names none.
+//
+// PUBLIC because the studio preview must ask for the SAME number. It used to
+// ask for 16 while matching asked for 8, and selectOptimizedPoints caches by
+// max_points with "the first call wins" (a cached 16 satisfies a later request
+// for 8) -- so merely OPENING the studio changed the point set the localizer
+// then ran with, and what the operator saw was never what the machine used.
+constexpr int kDefaultOptPointsPublic = 8;
+
+// The ROI search/template window half-size, mirrored from the file-static in
+// shape_matcher.cpp. PUBLIC for the same class of reason as the count above: a
+// debug dump that crops tiles with a different half-size than the matcher uses
+// is a picture of something the matcher never looked at.
+constexpr int kDefaultROIHalfPublic = 15;
+
+
 // ============================================================
 // FeatureSet: serializable template features
 // ============================================================

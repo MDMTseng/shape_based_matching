@@ -26,9 +26,10 @@ static constexpr float kCornerThreshold         = 0.3f;    // Cornerness above t
 static constexpr float kSensitivityBalanceRatio = 2.0f;    // Stop optimizing when worst/least sensitivity < this
 static constexpr float kMinImprovementFactor    = 0.99f;   // Swap must beat current worst by this factor
 static constexpr float kSolverRegularization    = 0.001f;  // Tikhonov regularization for 3x3 rigid solver
-static constexpr int   kDefaultROIHalf          = 15;      // Default half-size for ROI search/template window
+// Mirrored as sbm::kDefaultROIHalfPublic in the header; keep them equal.
+static constexpr int   kDefaultROIHalf          = sbm::kDefaultROIHalfPublic;   // ROI search/template window half-size
 static constexpr int   kDefaultROIMaxIters      = 3;       // Default max iterations for ROI refinement
-static constexpr int   kDefaultOptPoints        = 8;       // Default number of optimized sample points
+static constexpr int   kDefaultOptPoints        = sbm::kDefaultOptPointsPublic;  // see shape_matcher.h
 
 namespace sbm {
 

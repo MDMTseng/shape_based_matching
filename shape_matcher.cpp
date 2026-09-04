@@ -2303,7 +2303,17 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         // The flipped template's origin.y is already mirrored (origin.y = H - origin.y),
         // so no extra patch is needed. Only the base-fallback path mirrors oy here.
         if (is_flip && !use_flip_templ) oy = -oy;
-        float rad = -raw_angle * (float)CV_PI / 180.0f;
+        // THE ORIGIN OFFSET ROTATES WITH THE PART, IN THE PART'S DIRECTION.
+        //
+        // This was -raw_angle. Measured 2026-09-04 on two field recipes whose
+        // origin sits off the template centre: the reported origin drifted
+        // 2.30 px/deg (offset 66 px) and 0.53 px/deg (offset 15 px) against the
+        // sig360 locator on the same rotated images -- exactly 2*theta*|d|, the
+        // signature of rotating d by -theta instead of +theta -- and every
+        // recipe whose origin coincides with the centre showed nothing. With
+        // the origin off by tens of px the calipers half-miss their edges and
+        // a 5 mm distance read 0.15 mm short at +6 deg, NA at +10.
+        float rad = raw_angle * (float)CV_PI / 180.0f;
         float rot_ox = (std::cos(rad) * ox - std::sin(rad) * oy) * matched_scale;
         float rot_oy = (std::sin(rad) * ox + std::cos(rad) * oy) * matched_scale;
         float user_x = scene_x + rot_ox;
@@ -2335,7 +2345,7 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
             raw_angle = refined.angle;
 
             // Recompute user coordinates from refined pose
-            rad = -raw_angle * (float)CV_PI / 180.0f;
+            rad = raw_angle * (float)CV_PI / 180.0f;   // same sign as above
             rot_ox = (std::cos(rad) * ox - std::sin(rad) * oy) * matched_scale;
             rot_oy = (std::sin(rad) * ox + std::cos(rad) * oy) * matched_scale;
             user_x = scene_x + rot_ox;
@@ -2391,7 +2401,7 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
                 scene_y = refined_pose[1];
                 raw_angle = refined_pose[2];
 
-                rad = -raw_angle * (float)CV_PI / 180.0f;
+                rad = raw_angle * (float)CV_PI / 180.0f;   // same sign as above
                 rot_ox = (std::cos(rad) * ox - std::sin(rad) * oy) * matched_scale;
                 rot_oy = (std::sin(rad) * ox + std::cos(rad) * oy) * matched_scale;
                 user_x = scene_x + rot_ox;

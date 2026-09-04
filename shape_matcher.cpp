@@ -2248,6 +2248,25 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
                 (b == model.class_id && a == model.class_id_flip)) return true;
         return false;
     };
+    if (getenv("SHAPE_DBG")) {
+        // Raw candidates BEFORE any NMS, decoded to the angle they stand for,
+        // so "the matcher never offered that pose" and "NMS removed it" can be
+        // told apart from outside.
+        fprintf(stderr, "[SBM_RAW] %d raw candidates (threshold %.1f)\n", (int)raw_matches.size(), cfg.min_score);
+        for (size_t z = 0; z < raw_matches.size() && z < 12; z++) {
+            const auto& m = raw_matches[z];
+            int tps = 1; float a0 = 0, st = 1; bool fl = false;
+            for (auto& model : impl_->models) {
+                if (m.class_id == model.class_id || m.class_id == model.class_id_flip) {
+                    auto& ac = model.config.angle; st = ac.step; a0 = ac.start;
+                    tps = std::max(1, (int)((ac.end - ac.start) / ac.step));
+                    fl = (m.class_id == model.class_id_flip); break;
+                }
+            }
+            fprintf(stderr, "[SBM_RAW]   x=%d y=%d tid=%d ang=%.1f flip=%d score=%.1f\n",
+                    m.x, m.y, m.template_id, a0 + (m.template_id % tps) * st, (int)fl, m.similarity);
+        }
+    }
     std::vector<line2Dup::Match> nms_matches;
     for (auto& m : raw_matches) {
         bool suppressed = false;

@@ -1916,17 +1916,26 @@ struct ShapeMatcher::Impl {
             }
         }
 
-        // Add base (0-degree) template
+        // TEMPLATE k IS ANGLE start + k*step, WITHOUT EXCEPTION.
+        //
+        // The unrotated base used to be pushed as template 0 and the loop
+        // started at start+step. The decoder (matchImpl: "raw_angle = start +
+        // (template_id % n) * step") assumes template 0 is `start`, which is
+        // only true when start == 0 -- the default full circle. Any bounded
+        // window (SHAPE_ANG_RANGE, or the def's angle margin) had its template
+        // 0 decoded as `start` while it was really 0 deg, and ROI refine then
+        // set off from an angle up to a margin away from the truth: measured
+        // 2026-09-04 on 10333 CON with a +-10 deg window, the unperturbed image
+        // came back at +15.6 deg with every judge NA. Rotating by 0 is the
+        // identity, so the base is just the a == start case of the loop.
         auto& tps = det.getClassTemplates(class_id);
-        tps.push_back(base_tp);
-        int count = 1;
+        int count = 0;
 
-        // Rotate features for remaining angles
         cv::Point2f center(fs.templ_width * scale / 2.0f,
                            fs.templ_height * scale / 2.0f);
         int pyramid_levels = (int)base_tp.size();
 
-        for (float a = angle.start + angle.step; a < angle.end; a += angle.step) {
+        for (float a = angle.start; a < angle.end - 1e-4f; a += angle.step) {
             // Rotate feature coordinates + orientation
             std::vector<line2Dup::Template> rot_tp(pyramid_levels);
             float angRad = a * (float)CV_PI / 180.0f;

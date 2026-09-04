@@ -2228,10 +2228,31 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         templates_per_scale = std::max(1, (int)((ac.end - ac.start) / ac.step));
     }
 
+    // A FACE IS DECIDED AT FULL RESOLUTION, NOT BY THE COARSE SCORE.
+    //
+    // With both faces enabled, the flipped template competes in the same NMS
+    // as the unflipped one, and the coarse score cannot separate them on a part
+    // that is nearly its own mirror image: measured 2026-09-04 on an S-shaped
+    // wire spring at match_scale 0.3, every frame had the true pose (flip=0)
+    // and a mirrored one (flip=1, ~15 deg) within 0.4 points at the top, and
+    // pixel phase picked the winner -- 6 of 20 frames wrong, similarity 0.99.
+    // The 8 orientation bins and the 3 px wire explain the tie, not who should
+    // win. So the two faces are kept apart through NMS (each face keeps its own
+    // best at a location), both are ROI-refined, and the pair is settled below
+    // by the refine residual -- the fit of the sample points at full resolution,
+    // which the mirrored pose cannot fake.
+    auto face_pair = [&](const std::string& a, const std::string& b) {
+        if (a == b) return false;
+        for (auto& model : impl_->models)
+            if ((a == model.class_id && b == model.class_id_flip) ||
+                (b == model.class_id && a == model.class_id_flip)) return true;
+        return false;
+    };
     std::vector<line2Dup::Match> nms_matches;
     for (auto& m : raw_matches) {
         bool suppressed = false;
         for (auto& k : nms_matches) {
+            if (face_pair(m.class_id, k.class_id)) continue;   // other face: settled later
             float dx = (float)((int)(m.x * inv_scale) - (int)(k.x * inv_scale));
             float dy = (float)((int)(m.y * inv_scale) - (int)(k.y * inv_scale));
             if (dx*dx + dy*dy < nms_r * nms_r) {
@@ -2436,9 +2457,38 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
     }
 
     // Remove invalid entries
+    // FACE ARBITRATION. Two refined results at the same place with opposite
+    // `flipped` are one object seen two ways; keep the one whose sample points
+    // fit the picture better (lower refine_residual, px). Without residuals
+    // (refine != ROI) fall back to the coarse score, which is the old behaviour.
+    // nms_matches is in coarse-score order, so the survivor list stays sorted
+    // the way callers expect. The refined pose of the loser is not used.
+    std::vector<int> drop(n_matches, 0);
+    for (int i = 0; i < n_matches; i++) {
+        if (!valid[i] || drop[i]) continue;
+        for (int j = i + 1; j < n_matches; j++) {
+            if (!valid[j] || drop[j]) continue;
+            if (results[i].flipped == results[j].flipped) continue;
+            if (!face_pair(nms_matches[i].class_id, nms_matches[j].class_id)) continue;
+            float dx = results[i].x - results[j].x, dy = results[i].y - results[j].y;
+            if (dx*dx + dy*dy >= nms_r * nms_r) continue;
+            const float ri = results[i].refine_residual, rj = results[j].refine_residual;
+            int loser;
+            if (ri >= 0 && rj >= 0) loser = (rj < ri) ? i : j;          // better fit wins
+            else if (ri >= 0 || rj >= 0) loser = (ri >= 0) ? j : i;     // only one refined
+            else loser = (results[j].score > results[i].score) ? i : j; // coarse score
+            sbm::sbm_log(sbm::LogLevel::Debug, "face",
+                "[FACE] at (%.0f,%.0f): flip=%d score=%.1f res=%.2f  vs  flip=%d score=%.1f res=%.2f  -> keep flip=%d",
+                results[i].x, results[i].y, (int)results[i].flipped, results[i].score, ri,
+                (int)results[j].flipped, results[j].score, rj, (int)results[loser == i ? j : i].flipped);
+            drop[loser] = 1;
+            if (loser == i) break;
+        }
+    }
+
     std::vector<MatchResult> final_results;
     for (int i = 0; i < n_matches; i++)
-        if (valid[i]) final_results.push_back(results[i]);
+        if (valid[i] && !drop[i]) final_results.push_back(results[i]);
     return final_results;
 }
 

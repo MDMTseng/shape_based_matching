@@ -2539,18 +2539,28 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
     }
 
     // Remove invalid entries
-    // FACE ARBITRATION. Two refined results at the same place with opposite
-    // `flipped` are one object seen two ways; keep the one whose sample points
-    // fit the picture better (lower refine_residual, px). Without residuals
-    // (refine != ROI) fall back to the coarse score, which is the old behaviour.
-    // nms_matches is in coarse-score order, so the survivor list stays sorted
-    // the way callers expect. The refined pose of the loser is not used.
-    std::vector<int> drop(n_matches, 0);
+    // FACE ARBITRATION: THE BETTER-FITTING FACE GOES FIRST, THE OTHER STAYS.
+    //
+    // Two refined results at the same place with opposite `flipped` are one
+    // object seen two ways. The refine residual (mean point-to-line fit of the
+    // sample points at full resolution, which a mirrored pose cannot fake)
+    // says which face fits; without residuals (refine != ROI) the coarse score
+    // does, which is the old behaviour. The losing face used to be DROPPED
+    // here. It is now merged into the winner's group and ranked after it, so
+    // a caller with an orientation test can still fall through to it: the
+    // residual decides the order, the caller's own judges decide the answer.
+    // Ranks: 0 = preferred face, 1 = the other; within a rank, coarse score.
+    std::vector<int> rank(n_matches, 0);
+    auto merge_into = [&](int from_g, int to_g) {
+        for (int t = 0; t < n_matches; t++)
+            if (valid[t] && group_of[t] == from_g) { group_of[t] = to_g; rank[t] = 1; }
+    };
     for (int i = 0; i < n_matches; i++) {
-        if (!valid[i] || drop[i]) continue;
+        if (!valid[i]) continue;
         for (int j = i + 1; j < n_matches; j++) {
-            if (!valid[j] || drop[j]) continue;
+            if (!valid[j]) continue;
             if (results[i].flipped == results[j].flipped) continue;
+            if (group_of[i] == group_of[j]) continue;                 // already settled
             if (!face_pair(nms_matches[i].class_id, nms_matches[j].class_id)) continue;
             float dx = results[i].x - results[j].x, dy = results[i].y - results[j].y;
             if (dx*dx + dy*dy >= nms_r * nms_r) continue;
@@ -2559,18 +2569,29 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
             if (ri >= 0 && rj >= 0) loser = (rj < ri) ? i : j;          // better fit wins
             else if (ri >= 0 || rj >= 0) loser = (ri >= 0) ? j : i;     // only one refined
             else loser = (results[j].score > results[i].score) ? i : j; // coarse score
+            const int winner = (loser == i) ? j : i;
             sbm::sbm_log(sbm::LogLevel::Debug, "face",
-                "[FACE] at (%.0f,%.0f): flip=%d score=%.1f res=%.2f  vs  flip=%d score=%.1f res=%.2f  -> keep flip=%d",
+                "[FACE] at (%.0f,%.0f): flip=%d score=%.1f res=%.2f  vs  flip=%d score=%.1f res=%.2f  -> first flip=%d",
                 results[i].x, results[i].y, (int)results[i].flipped, results[i].score, ri,
-                (int)results[j].flipped, results[j].score, rj, (int)results[loser == i ? j : i].flipped);
-            drop[loser] = 1;
-            if (loser == i) break;
+                (int)results[j].flipped, results[j].score, rj, (int)results[winner].flipped);
+            merge_into(group_of[loser], group_of[winner]);
         }
     }
 
+    // Emit in the order a caller should try them: groups by first appearance
+    // (i.e. by their best coarse score), inside a group the preferred face
+    // first, inside a face by coarse score. nms_matches is already in coarse
+    // score order, so a stable sort on (group-first-index, rank) does it.
+    std::vector<int> order;
+    for (int i = 0; i < n_matches; i++) if (valid[i]) order.push_back(i);
+    std::vector<int> first_of(n_matches, n_matches);
+    for (int i : order) if (i < first_of[group_of[i]]) first_of[group_of[i]] = i;
+    std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
+        if (first_of[group_of[a]] != first_of[group_of[b]]) return first_of[group_of[a]] < first_of[group_of[b]];
+        return rank[a] < rank[b];
+    });
     std::vector<MatchResult> final_results;
-    for (int i = 0; i < n_matches; i++)
-        if (valid[i] && !drop[i]) final_results.push_back(results[i]);
+    for (int i : order) { results[i].group = group_of[i]; final_results.push_back(results[i]); }
     return final_results;
 }
 

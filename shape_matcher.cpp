@@ -2267,31 +2267,93 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
                     m.x, m.y, m.template_id, a0 + (m.template_id % tps) * st, (int)fl, m.similarity);
         }
     }
+    // ALTERNATE POSES SURVIVE NMS, TAGGED AS ONE OBJECT.
+    //
+    // Spatial NMS used to keep one pose per location (unless nms_angle asked
+    // for more, in which case the extras came back as separate objects). A
+    // caller with an orientation test then had nothing to fall back on: the
+    // sig360 path retries the next candidate when an orientation-essential
+    // judge fails; the shape path just dropped the object. So a location now
+    // keeps up to ALT_MAX further poses that differ from every kept member by
+    // at least ALT_MIN_DEG, all sharing the primary's `group`. Same-group
+    // members are alternates of ONE object, best coarse score first; the
+    // caller measures them in order and reports one. nms_angle keeps its old
+    // meaning: a pose further than that from the keeper is its own group.
+    const int   ALT_MAX       = 3;
+    const float ALT_MIN_DEG   = 10.0f;
+    const float ALT_SCORE_GAP = 10.0f;   // an alternate this far under the primary is noise, not a pose
+    // Positions are compared at the TEMPLATE CENTRE, not the bounding-box
+    // corner line2Dup reports. The corner moves with the angle -- a 90 deg
+    // rotation of a w x h template shifts it by |w-h|/2 -- and the user's
+    // origin is not involved at all (it is added after NMS), so grouping does
+    // not depend on where the operator put the origin.
+    auto centre_of = [&](const line2Dup::Match& m, float& cx, float& cy) {
+        cx = (float)m.x; cy = (float)m.y;
+        for (auto& model : impl_->models) {
+            if (m.class_id != model.class_id && m.class_id != model.class_id_flip) continue;
+            const auto& fs = (m.class_id == model.class_id_flip && model.has_flip) ? model.features_flip : model.features;
+            const auto& tmpl = match_detector.getTemplates(m.class_id, m.template_id);
+            const bool sc = (using_match_scale && impl_->scaled_detector != nullptr);
+            const float tw = fs.templ_width * (sc ? cfg.match_scale : 1.0f);
+            const float th = fs.templ_height * (sc ? cfg.match_scale : 1.0f);
+            if (!tmpl.empty()) { cx = m.x + (tw / 2.0f - tmpl[0].tl_x); cy = m.y + (th / 2.0f - tmpl[0].tl_y); }
+            break;
+        }
+    };
     std::vector<line2Dup::Match> nms_matches;
+    std::vector<int> group_of;       // per kept match
+    std::vector<int> group_size;     // per group, members incl. primary
+    auto angle_diff_of = [&](const line2Dup::Match& a, const line2Dup::Match& b) {
+        int aid_a = a.template_id % templates_per_scale;
+        int aid_b = b.template_id % templates_per_scale;
+        int adiff = std::abs(aid_a - aid_b);
+        adiff = std::min(adiff, templates_per_scale - adiff);
+        return adiff * nms_angle_step;
+    };
     for (auto& m : raw_matches) {
         bool suppressed = false;
-        for (auto& k : nms_matches) {
+        int  join = -1;                 // group to join as an alternate, if any
+        for (size_t ki = 0; ki < nms_matches.size(); ki++) {
+            auto& k = nms_matches[ki];
             if (face_pair(m.class_id, k.class_id)) continue;   // other face: settled later
-            float dx = (float)((int)(m.x * inv_scale) - (int)(k.x * inv_scale));
-            float dy = (float)((int)(m.y * inv_scale) - (int)(k.y * inv_scale));
-            if (dx*dx + dy*dy < nms_r * nms_r) {
-                // Also check angle similarity — only suppress if angles are close
-                int aid_m = m.template_id % templates_per_scale;
-                int aid_k = k.template_id % templates_per_scale;
-                int adiff = std::abs(aid_m - aid_k);
-                adiff = std::min(adiff, templates_per_scale - adiff);
-                float angle_diff = adiff * nms_angle_step;
-                if (angle_diff < cfg.nms_angle) { suppressed = true; break; }
+            float mcx, mcy, kcx, kcy; centre_of(m, mcx, mcy); centre_of(k, kcx, kcy);
+            float dx = (mcx - kcx) * inv_scale, dy = (mcy - kcy) * inv_scale;
+            if (dx*dx + dy*dy >= nms_r * nms_r) continue;
+            float angle_diff = angle_diff_of(m, k);
+            if (angle_diff >= cfg.nms_angle) continue;        // far enough: its own object
+            // Same object as k. Alternate if it is a genuinely different pose,
+            // scores like one, and the group has room; otherwise a duplicate.
+            int g = group_of[ki];
+            if (angle_diff >= ALT_MIN_DEG && group_size[g] < 1 + ALT_MAX
+                && m.similarity >= k.similarity - ALT_SCORE_GAP) {
+                bool distinct = true;
+                for (size_t kj = 0; kj < nms_matches.size(); kj++)
+                    if (group_of[kj] == g && angle_diff_of(m, nms_matches[kj]) < ALT_MIN_DEG) { distinct = false; break; }
+                if (distinct) { join = g; break; }
             }
+            suppressed = true; break;
         }
-        if (!suppressed) {
-            nms_matches.push_back(m);
-            if (cfg.max_results > 0 && (int)nms_matches.size() >= cfg.max_results)
-                break;
+        if (suppressed) continue;
+        if (join < 0) { join = (int)group_size.size(); group_size.push_back(0); }
+        group_size[join]++;
+        nms_matches.push_back(m);
+        group_of.push_back(join);
+        if (cfg.max_results > 0 && (int)nms_matches.size() >= cfg.max_results)
+            break;
+    }
+    if (getenv("SHAPE_DBG")) {
+        for (size_t ki = 0; ki < nms_matches.size(); ki++) {
+            const auto& k = nms_matches[ki];
+            int tps = 1; float a0 = 0, st = 1;
+            for (auto& model : impl_->models)
+                if (k.class_id == model.class_id || k.class_id == model.class_id_flip) {
+                    auto& ac = model.config.angle; st = ac.step; a0 = ac.start;
+                    tps = std::max(1, (int)((ac.end - ac.start) / ac.step)); break; }
+            fprintf(stderr, "[SBM_NMS]   kept x=%d y=%d tid=%d ang=%.1f class=%s score=%.1f group=%d\n",
+                    k.x, k.y, k.template_id, a0 + (k.template_id % tps) * st, k.class_id.c_str(), k.similarity, group_of[ki]);
         }
     }
 
-    // Convert to MatchResult with user-defined transforms
     std::vector<MatchResult> results;
 
     // Prepare ICP if needed
@@ -2470,6 +2532,7 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         r.scale = matched_scale;
         r.flipped = is_flip;
         r.score = m.similarity;
+        r.group = group_of[mi_idx];
         r.refine_residual = roi_residual_out;
         results[mi_idx] = r;
         valid[mi_idx] = 1;

@@ -440,6 +440,12 @@ struct MatchResult {
     float scale;               ///< Matched scale factor
     bool flipped;              ///< Whether this is a flipped match
     float score;               ///< Confidence (0-100)
+    int group = -1;            ///< Location group. Results sharing a group are ONE object seen at
+                               ///< different angles (alternates kept past spatial NMS, best score
+                               ///< first). A caller that measures should take the first member that
+                               ///< passes its orientation test and ignore the rest; a caller that
+                               ///< counts should count groups. Results with different groups are
+                               ///< different objects (or poses the caller's nms_angle asked to keep).
     float refine_residual = -1.0f; ///< ROI refine fit quality: mean |point-to-line|
                                    ///< residual (px) of the matched sample points at
                                    ///< the final pose. Low (~<1px) = trustworthy; high

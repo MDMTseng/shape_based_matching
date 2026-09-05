@@ -415,6 +415,22 @@ struct MatchConfig {
     /// edge matching). Costs extra matches per refine.
     bool roi_iterative_rematch = false;
 
+    /// Half-range (full-resolution px) of the 1-D search each ROI point runs along
+    /// its edge normal. 0 = library default (15). Together with the point's lever
+    /// arm this IS the coarse pose error the refine can absorb: a coarser
+    /// angle_step needs a wider search -- and a wider search can lock onto a
+    /// neighbouring edge, so this is a per-recipe choice to be verified, not a
+    /// default to raise.
+    int roi_search_half = 0;
+
+    /// Coarse-to-fine pre-pass: 0 = off; in (0,1) refine first on the scene and
+    /// template scaled by this factor (search range unchanged, so the capture
+    /// grows by 1/f in full-res px), then the normal full-resolution pass from
+    /// there. Widens capture like roi_search_half but keeps the full-res search
+    /// narrow. Same caveat: a symmetric part can have its mirror pose confirmed
+    /// by the coarse pass. Verify per recipe.
+    float roi_prescale = 0.0f;
+
     /// Gaussian blur kernel size before gradient computation.
     /// Larger = more noise-robust but blurs fine edges.
     /// Default 7 handles noise up to ~30 sigma.

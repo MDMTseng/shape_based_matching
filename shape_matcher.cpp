@@ -2367,6 +2367,19 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
 
 
 
+    // Refine capture knobs: def-driven (MatchConfig), env overrides for diagnosis.
+    //   roi_search_half / SHAPE_ROI_SEARCH=<px>   widen the 1-D search half-range
+    //   roi_prescale    / SHAPE_ROI_PRESCALE=<f>  coarse-to-fine pre-pass factor
+    // The pre-pass scene is resized ONCE per frame here, not per candidate.
+    int roi_search_half = cfg.roi_search_half;
+    float roi_pre = cfg.roi_prescale;
+    if (const char* e = getenv("SHAPE_ROI_SEARCH"))   { int v = atoi(e);          if (v > 0) roi_search_half = v; }
+    if (const char* e = getenv("SHAPE_ROI_PRESCALE")) { float v = (float)atof(e); if (v > 0.f && v < 1.f) roi_pre = v; }
+    if (!(roi_pre > 0.f && roi_pre < 1.f)) roi_pre = 0.f;
+    cv::Mat pre_scene;
+    if (roi_pre > 0.f && cfg.refine == RefineMode::ROI && !scene.empty())
+        cv::resize(scene, pre_scene, cv::Size(), roi_pre, roi_pre, cv::INTER_AREA);
+
     #pragma omp parallel for schedule(dynamic) if(n_matches >= 4)
     for (int mi_idx = 0; mi_idx < n_matches; ++mi_idx) {
         auto& m = nms_matches[mi_idx];
@@ -2502,23 +2515,19 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
                 roi_cfg.edge_collapse = cfg.roi_edge_collapse;
                 roi_cfg.iterative_rematch = cfg.roi_iterative_rematch;
 
-                // EXPERIMENT KNOBS (env, diagnostic): how much coarse error can the
-                // refine absorb, and at what cost in precision?
-                //   SHAPE_ROI_SEARCH=<px>     widen the 1-D search half-range (default 15)
-                //   SHAPE_ROI_PRESCALE=<f>    a coarse-to-fine pre-pass: refine first on the
-                //                             scene and template scaled by f (search half-range
-                //                             unchanged, so the capture grows by 1/f in full-res
-                //                             px), then the normal full-resolution pass from there.
-                //                             The scene resize is done per candidate here -- fine
-                //                             for measuring, not how production would do it.
+                // Refine capture knobs (see MatchConfig::roi_search_half / roi_prescale
+                // and the per-frame block above the candidate loop). Measured on
+                // 2026-09-05 (SBM_TUNING doc, section 4): either widens the capture
+                // from 2-3 deg to 4 deg on big parts and improves their precision
+                // (ok42 1 deg: 0.33 -> 0.008 deg), and either can lock a
+                // neighbouring coil turn or the mirror pose on a symmetric spring.
                 {
-                    static const int envSearch = getenv("SHAPE_ROI_SEARCH") ? atoi(getenv("SHAPE_ROI_SEARCH")) : 0;
-                    if (envSearch > 0) roi_cfg.search_half = envSearch;
-                    static const float pre = getenv("SHAPE_ROI_PRESCALE") ? (float)atof(getenv("SHAPE_ROI_PRESCALE")) : 0.f;
-                    if (pre > 0.f && pre < 1.f) {
-                        cv::Mat tS, sS;
+                    if (roi_search_half > 0) roi_cfg.search_half = roi_search_half;
+                    const float pre = roi_pre;
+                    if (pre > 0.f && !pre_scene.empty()) {
+                        cv::Mat tS;
                         cv::resize(fs.templ_image, tS, cv::Size(), pre, pre, cv::INTER_AREA);
-                        cv::resize(scene, sS, cv::Size(), pre, pre, cv::INTER_AREA);
+                        const cv::Mat& sS = pre_scene;
                         std::vector<roi_refine::SamplePoint> spS = sample_pts;
                         for (auto &p : spS) { p.pos *= pre; p.roi_half = std::max(5, (int)std::lround(p.roi_half * pre)); }
                         roi_refine::ROIConfig cS = roi_cfg;

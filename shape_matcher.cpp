@@ -2139,8 +2139,37 @@ int ShapeMatcher::addModel(const std::string& name,
     return addModelInternal(name, full, config, nullptr);
 }
 
+// SBM_PROFILE=<N>: every N match() calls print the stage split of the last N
+// frames to stderr -- prep (resize+pad), coarse (line2Dup detector incl. its
+// own pyramid/spread/similarity split, which line2Dup prints beneath), NMS, and
+// refine (the per-candidate ROI stage) -- then reset. Diagnostic only; costs a
+// few clock reads per frame when the env is absent.
+namespace {
+struct StageProf {
+    int every = 0, n = 0;
+    double prep = 0, coarse = 0, nms = 0, refine = 0, total = 0;
+    int cands = 0;
+    StageProf() { if (const char* e = getenv("SBM_PROFILE")) { every = atoi(e); if (every <= 0) every = 20; } }
+    static double now() { return (double)cv::getTickCount() * 1000.0 / cv::getTickFrequency(); }
+    void frame(double t0, double t1, double t2, double t3, double t4, int nc) {
+        if (!every) return;
+        prep += t1 - t0; coarse += t2 - t1; nms += t3 - t2; refine += t4 - t3; total += t4 - t0; cands += nc;
+        if (++n < every) return;
+        fprintf(stderr, "[SBM_PROFILE] %d frames avg: total %.2f ms = prep %.2f + coarse %.2f + nms %.2f + refine %.2f (%.1f candidates/frame)\n",
+                n, total / n, prep / n, coarse / n, nms / n, refine / n, (double)cands / n);
+        line2Dup::printProfiling();   // line2Dup's own accumulators over the same frames, per stage
+        line2Dup::resetProfiling();
+        fflush(stderr);
+        n = 0; prep = coarse = nms = refine = total = 0; cands = 0;
+    }
+};
+StageProf g_stage;
+struct StageProfInit { StageProfInit() { if (g_stage.every) { line2Dup::enableProfiling(true); sbm::setLogLevel(sbm::LogLevel::Debug); sbm::setLogFile(stderr); } } } g_stage_init;
+}
+
 std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
     auto& cfg = impl_->match_config;
+    const double _pt0 = StageProf::now();
 
     // Optional scene downscale for faster matching
     cv::Mat match_scene = scene;
@@ -2203,7 +2232,9 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
     match_detector.getModalities()->skip_voting = cfg.skip_voting;
 
     // Run meiqua matching
+    const double _pt1 = StageProf::now();
     auto raw_matches = match_detector.match(padded, cfg.min_score, class_ids);
+    const double _pt2 = StageProf::now();
 
     // Restore original templates if we scaled in-place
     if (scaling_in_place) {
@@ -2367,6 +2398,7 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
 
 
 
+    const double _pt3 = StageProf::now();
     // Refine capture knobs: def-driven (MatchConfig), env overrides for diagnosis.
     //   roi_search_half / SHAPE_ROI_SEARCH=<px>   widen the 1-D search half-range
     //   roi_prescale    / SHAPE_ROI_PRESCALE=<f>  coarse-to-fine pre-pass factor
@@ -2627,6 +2659,7 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
     });
     std::vector<MatchResult> final_results;
     for (int i : order) { results[i].group = group_of[i]; final_results.push_back(results[i]); }
+    { const double _pt4 = StageProf::now(); g_stage.frame(_pt0, _pt1, _pt2, _pt3, _pt4, n_matches); }
     return final_results;
 }
 

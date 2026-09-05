@@ -2502,6 +2502,32 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
                 roi_cfg.edge_collapse = cfg.roi_edge_collapse;
                 roi_cfg.iterative_rematch = cfg.roi_iterative_rematch;
 
+                // EXPERIMENT KNOBS (env, diagnostic): how much coarse error can the
+                // refine absorb, and at what cost in precision?
+                //   SHAPE_ROI_SEARCH=<px>     widen the 1-D search half-range (default 15)
+                //   SHAPE_ROI_PRESCALE=<f>    a coarse-to-fine pre-pass: refine first on the
+                //                             scene and template scaled by f (search half-range
+                //                             unchanged, so the capture grows by 1/f in full-res
+                //                             px), then the normal full-resolution pass from there.
+                //                             The scene resize is done per candidate here -- fine
+                //                             for measuring, not how production would do it.
+                {
+                    static const int envSearch = getenv("SHAPE_ROI_SEARCH") ? atoi(getenv("SHAPE_ROI_SEARCH")) : 0;
+                    if (envSearch > 0) roi_cfg.search_half = envSearch;
+                    static const float pre = getenv("SHAPE_ROI_PRESCALE") ? (float)atof(getenv("SHAPE_ROI_PRESCALE")) : 0.f;
+                    if (pre > 0.f && pre < 1.f) {
+                        cv::Mat tS, sS;
+                        cv::resize(fs.templ_image, tS, cv::Size(), pre, pre, cv::INTER_AREA);
+                        cv::resize(scene, sS, cv::Size(), pre, pre, cv::INTER_AREA);
+                        std::vector<roi_refine::SamplePoint> spS = sample_pts;
+                        for (auto &p : spS) { p.pos *= pre; p.roi_half = std::max(5, (int)std::lround(p.roi_half * pre)); }
+                        roi_refine::ROIConfig cS = roi_cfg;
+                        cS.roi_half = std::max(5, (int)std::lround(roi_cfg.roi_half * pre));
+                        cv::Vec3f p0(scene_x * pre, scene_y * pre, raw_angle); float rr = -1.f;
+                        cv::Vec3f p1 = roi_refine::refineROI(tS, sS, spS, p0, cS, &rr);
+                        scene_x = p1[0] / pre; scene_y = p1[1] / pre; raw_angle = p1[2];
+                    }
+                }
                 cv::Vec3f init_pose(scene_x, scene_y, raw_angle);
                 float roi_residual = -1.0f;
                 auto refined_pose = roi_refine::refineROI(

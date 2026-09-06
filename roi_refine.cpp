@@ -223,13 +223,23 @@ static cv::Point2f matchROI_subpixel(const cv::Mat& templ_roi,
     static const int kSobel = getenv("SBM_ROI_SOBEL") ? atoi(getenv("SBM_ROI_SOBEL")) : 0;
     cv::Mat t_use = templ_roi, s_use = search_roi;
     cv::Mat t_g, s_g;
+    // SBM_ROI_BLUR=<odd k>: low-pass both patch and window before the raw-intensity NCC.
+    // Unlike Sobel this is pure denoise (averages zero-mean noise), so it should HELP
+    // under noise at the cost of a slightly softer subpixel peak on clean signal.
+    static const int kBlur = getenv("SBM_ROI_BLUR") ? (atoi(getenv("SBM_ROI_BLUR")) | 1) : 0;
+    cv::Mat t_b, s_b;
+    if (kBlur >= 3) {
+        cv::GaussianBlur(templ_roi, t_b, cv::Size(kBlur,kBlur), 0);
+        cv::GaussianBlur(search_roi, s_b, cv::Size(kBlur,kBlur), 0);
+        t_use = t_b; s_use = s_b;   // function-scope buffers; outlive this block
+    }
     if (kSobel) {
         auto grad = [](const cv::Mat& in, cv::Mat& out, int mode){
             cv::Mat f = in; if (mode == 2) cv::GaussianBlur(in, f, cv::Size(3,3), 0);
             cv::Mat gx, gy; cv::Sobel(f, gx, CV_32F, 1, 0, 3); cv::Sobel(f, gy, CV_32F, 0, 1, 3);
             cv::magnitude(gx, gy, out);
         };
-        grad(templ_roi, t_g, kSobel); grad(search_roi, s_g, kSobel);
+        grad(t_use, t_g, kSobel); grad(s_use, s_g, kSobel);
         t_use = t_g; s_use = s_g;
     }
 

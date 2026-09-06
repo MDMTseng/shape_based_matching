@@ -2224,9 +2224,20 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
                             (int)(scene.rows * cfg.match_scale)));
     }
 
-    // Pad to 16
-    int pw = (match_scene.cols + 15) & ~15;
-    int ph = (match_scene.rows + 15) & ~15;
+    // Pad so every pyramid level is a whole number of T cells: level l is the scene
+    // halved l times and line2Dup asserts cols % T_l == 0 there, so level 0 must be a
+    // multiple of max_l(T_l << l). {4,8} gives 16 (the old hard-coded value); {4,8,16}
+    // needs 64 and {8,16} needs 32 -- without this those configs threw inside match()
+    // and the def silently located nothing.
+    // lcm, not max: {6,10} needs a multiple of both 6 and 20.
+    int pad_unit = 16;
+    for (size_t l = 0; l < cfg.T_levels.size(); ++l) {
+        int need = cfg.T_levels[l] << (int)l, a = pad_unit, b = need;
+        while (b) { int t = a % b; a = b; b = t; }
+        pad_unit = pad_unit / a * need;
+    }
+    int pw = (match_scene.cols + pad_unit - 1) / pad_unit * pad_unit;
+    int ph = (match_scene.rows + pad_unit - 1) / pad_unit * pad_unit;
     cv::Mat padded;
     if (pw != match_scene.cols || ph != match_scene.rows)
         cv::copyMakeBorder(match_scene, padded, 0, ph - match_scene.rows,

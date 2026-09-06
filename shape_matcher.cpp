@@ -2552,6 +2552,12 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
             icp_refine::ICPConfig icp_cfg;
             icp_cfg.max_iterations = cfg.icp_iterations;
             icp_cfg.max_dist = cfg.icp_max_dist;
+            icp_cfg.use_subpixel = (cfg.refine == RefineMode::ICP_Subpixel);
+            // Robust all-points refine (icp_ls): MAD residual gate + direction weighting.
+            // Env for evaluation; a def field once the fleet sweep says it is worth it.
+            if (getenv("SBM_ICP_ROBUST")) icp_cfg.robust_mad = atoi(getenv("SBM_ICP_ROBUST")) != 0;
+            if (getenv("SBM_ICP_ROBUST_K")) icp_cfg.robust_k = (float)atof(getenv("SBM_ICP_ROBUST_K"));
+            if (getenv("SBM_ICP_WEIGHT_DIR")) icp_cfg.weight_by_dir = atoi(getenv("SBM_ICP_WEIGHT_DIR")) != 0;
 
             icp_refine::Pose2D init(scene_x, scene_y, raw_angle);
             auto refined = icp_refine::refineInverse(

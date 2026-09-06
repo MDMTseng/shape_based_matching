@@ -8,6 +8,7 @@
 #include <opencv2/geometry/2d.hpp>   // DistanceTypes (DIST_L2) moved here in OpenCV 5
 #endif
 #include <algorithm>
+#include <vector>
 #include <cstring>
 
 #ifdef __AVX2__
@@ -666,6 +667,10 @@ static Pose2D refineInverseCore(
     Pose2D pose = initial_pose;
     float prev_fitness = 0, prev_rmse = kInitialRMSE;
 
+    // Reused across iterations when the robust gate is on: per-correspondence residual
+    // for the MAD threshold. Cleared each iteration.
+    static thread_local std::vector<float> res_abs;
+
     for (int iter = 0; iter < config.max_iterations; ++iter) {
         float rad = pose.angle * (float)CV_PI / 180.0f;
         float cs = std::cos(rad), sn = std::sin(rad);
@@ -674,6 +679,44 @@ static Pose2D refineInverseCore(
         float ATA[3][3] = {}, ATb[3] = {};
         float total_error = 0;
         int inlier_count = 0;
+
+        // Robust pass 1: collect |point-to-plane residual| of every candidate, so a
+        // MAD threshold can reject the noise-driven correspondences before the solve.
+        float res_thresh = 1e30f;
+        if (config.robust_mad) {
+            res_abs.clear();
+            for (int i = 0; i < NS; i++) {
+                float sx = se_x[i], sy = se_y[i];
+                float dx_s = sx - pose.x, dy_s = sy - pose.y;
+                float tx = inv_cs * dx_s - inv_sn * dy_s + tcx;
+                float ty = inv_sn * dx_s + inv_cs * dy_s + tcy;
+                int ix = (int)(tx + 0.5f), iy = (int)(ty + 0.5f);
+                if (ix < 0 || ix >= TW || iy < 0 || iy >= TH) continue;
+                float ctx = tcx_base[iy * tstride + ix];
+                float cty = tcy_base[iy * tstride + ix];
+                if (ctx < 0) continue;
+                float ddx = tx - ctx, ddy = ty - cty;
+                if (ddx*ddx + ddy*ddy > max_dist2) continue;
+                int ecx = std::max(0, std::min(TW - 1, (int)(ctx + 0.5f)));
+                int ecy = std::max(0, std::min(TH - 1, (int)(cty + 0.5f)));
+                float tnx = tnx_base[ecy * tstride + ecx];
+                float tny = tny_base[ecy * tstride + ecx];
+                if (tnx == 0 && tny == 0) continue;
+                float rot_snx = inv_cs * se_nx[i] - inv_sn * se_ny[i];
+                float rot_sny = inv_sn * se_nx[i] + inv_cs * se_ny[i];
+                if (std::abs(rot_snx * tnx + rot_sny * tny) < cos_thresh) continue;
+                res_abs.push_back(std::abs(ddx * tnx + ddy * tny));
+            }
+            if (!res_abs.empty()) {
+                size_t mid = res_abs.size() / 2;
+                std::nth_element(res_abs.begin(), res_abs.begin() + mid, res_abs.end());
+                float med = res_abs[mid];
+                for (float& v : res_abs) v = std::abs(v - med);
+                std::nth_element(res_abs.begin(), res_abs.begin() + mid, res_abs.end());
+                float mad = res_abs[mid];
+                res_thresh = med + config.robust_k * 1.4826f * mad + 1e-3f;  // +eps so a zero-MAD (all equal) keeps everyone
+            }
+        }
 
         for (int i = 0; i < NS; i++) {
             float sx = se_x[i], sy = se_y[i];
@@ -709,6 +752,9 @@ static Pose2D refineInverseCore(
 
             // Error in template space: point-to-plane
             float e_plane = ddx * tnx + ddy * tny;
+            if (config.robust_mad && std::abs(e_plane) > res_thresh) continue;   // reject noise-driven correspondence
+            // Weight by normal-direction agreement (a noise edge rarely aligns).
+            float wd = config.weight_by_dir ? ndot : 1.0f;
             total_error += e_plane * e_plane;
             ++inlier_count;
 
@@ -720,15 +766,15 @@ static Pose2D refineInverseCore(
             float jp1 = (-cs * tnx + sn * tny);
             float jp2 = (-sn * tnx - cs * tny);
 
-            ATA[0][0] += jp0*jp0; ATA[0][1] += jp0*jp1; ATA[0][2] += jp0*jp2;
-            ATA[1][1] += jp1*jp1; ATA[1][2] += jp1*jp2;
-            ATA[2][2] += jp2*jp2;
-            ATb[0] -= jp0 * e_plane;
-            ATb[1] -= jp1 * e_plane;
-            ATb[2] -= jp2 * e_plane;
+            ATA[0][0] += wd*jp0*jp0; ATA[0][1] += wd*jp0*jp1; ATA[0][2] += wd*jp0*jp2;
+            ATA[1][1] += wd*jp1*jp1; ATA[1][2] += wd*jp1*jp2;
+            ATA[2][2] += wd*jp2*jp2;
+            ATb[0] -= wd * jp0 * e_plane;
+            ATb[1] -= wd * jp1 * e_plane;
+            ATb[2] -= wd * jp2 * e_plane;
 
             // Point-to-point regularization
-            float w = config.point_to_point_weight;
+            float w = config.point_to_point_weight * wd;
             if (w > 0) {
                 float jx0 = dtx_da, jx1 = -cs, jx2 = -sn;
                 float jy0 = dty_da, jy1 = sn,  jy2 = -cs;

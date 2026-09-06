@@ -41,6 +41,14 @@ struct ICPConfig {
                                         ///< Corner features (cornerness~1) → add point-to-point.
     bool use_subpixel = false;     ///< Subpixel edge refinement via Hessian
     bool use_scale = false;        ///< Sim2 (with scale) vs SO2 (no scale)
+    // Robust all-points refine (HALCON/PatMax-style): reject correspondences whose
+    // point-to-plane residual exceeds robust_k * 1.4826 * MAD each iteration, and
+    // optionally weight each by normal-direction agreement. This is what makes the
+    // all-points solve stable under noise (a noisy scene grows spurious Canny edges
+    // whose residuals are large and whose normals are random). Off = legacy behaviour.
+    bool  robust_mad = false;      ///< enable the per-iteration MAD residual gate
+    float robust_k   = 2.5f;       ///< keep |residual| < robust_k * 1.4826 * MAD
+    bool  weight_by_dir = false;   ///< weight each correspondence by |n_scene . n_templ|
 };
 
 /// Build edge scene from Sobel derivatives.

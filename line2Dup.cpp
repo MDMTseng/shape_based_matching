@@ -2610,22 +2610,40 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
             }
 
             _t_sim = _ms_since(_tp0);
-            // Find initial matches
-            for (int r = 0; r < similarities.rows; ++r)
+            // Find initial matches. Promote ONLY 3x3 local maxima of the T8 response,
+            // not every cell above the threshold. A true pose lights a 2x2-3x3 plateau
+            // of T8 cells (spread half = T/2); the T4 refine window around a kept cell
+            // (16 T4 cells = +-32 px at level 0) already contains its suppressed
+            // neighbours, so the kept candidate's local refine reaches at least the
+            // score a suppressed cell would have -- the promoted set changes, the
+            // refined result does not. This is the LINE-MOD standard and cuts the
+            // ~6.5 candidates/template that drive the 78% T4-refine cost. Plateau tie
+            // rule: >= toward already-scanned neighbours (row r-1, and c-1 in row r),
+            // > toward not-yet-scanned (row r+1, and c+1 in row r), so a flat plateau
+            // keeps exactly one cell. SBM_NO_LOCALMAX=1 restores the old scan for A/B.
+            static const bool kNoLocalMax = getenv("SBM_NO_LOCALMAX") != nullptr;
+            const int _srows = similarities.rows, _scols = similarities.cols;
+            const int offset = lowest_T / 2 + (lowest_T % 2 - 1);
+            for (int r = 0; r < _srows; ++r)
             {
-                ushort *row = similarities.ptr<ushort>(r);
-                for (int c = 0; c < similarities.cols; ++c)
+                const ushort *row  = similarities.ptr<ushort>(r);
+                const ushort *rowU = (r > 0)          ? similarities.ptr<ushort>(r-1) : nullptr;  // scanned
+                const ushort *rowD = (r < _srows-1)   ? similarities.ptr<ushort>(r+1) : nullptr;  // not scanned
+                for (int c = 0; c < _scols; ++c)
                 {
-                    int raw_score = row[c];
-                    float score = (raw_score * 100.f) / (4 * num_features);
-
-                    if (score > threshold)
+                    const int raw_score = row[c];
+                    const float score = (raw_score * 100.f) / (4 * num_features);
+                    if (score <= threshold) continue;
+                    if (!kNoLocalMax)
                     {
-                        int offset = lowest_T / 2 + (lowest_T % 2 - 1);
-                        int x = c * lowest_T + offset;
-                        int y = r * lowest_T + offset;
-                        candidates.push_back(Match(x, y, score, class_id, static_cast<int>(template_id)));
+                        bool is_max = true;
+                        if (rowU) { if (c>0 && raw_score<rowU[c-1]) is_max=false; else if (raw_score<rowU[c]) is_max=false; else if (c<_scols-1 && raw_score<rowU[c+1]) is_max=false; }
+                        if (is_max && c>0 && raw_score<row[c-1]) is_max=false;              // scanned: >=
+                        if (is_max && c<_scols-1 && raw_score<=row[c+1]) is_max=false;      // unscanned: >
+                        if (is_max && rowD) { if (c>0 && raw_score<=rowD[c-1]) is_max=false; else if (raw_score<=rowD[c]) is_max=false; else if (c<_scols-1 && raw_score<=rowD[c+1]) is_max=false; }
+                        if (!is_max) continue;
                     }
+                    candidates.push_back(Match(c * lowest_T + offset, r * lowest_T + offset, score, class_id, static_cast<int>(template_id)));
                 }
             }
         }

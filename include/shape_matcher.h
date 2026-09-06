@@ -391,6 +391,11 @@ struct MatchConfig {
     /// window overlap. <0 = auto (ROI half-size). 0 = no spacing constraint (legacy).
     /// NOTE: large spacing can exclude clustered discriminative points and hurt
     /// conditioning on some shapes — tune per part.
+    // <0 = auto (ROI half, <=50% window overlap); 0 = off (default); >0 = px.
+    // DEFAULT OFF: de-overlapping the ROI points moves the refined pose and thus the
+    // measured values on real objects (ok11 judge38 went 2.3032 FAIL -> 2.2937 PASS),
+    // so it is a per-recipe change validated by sbm_sweep against ground truth, not a
+    // blanket default. SBM_ROI_SPACING=<px|-1> forces it on for evaluation.
     float roi_min_spacing = 0.0f;
 
     /// Select EDGE points only for ROI refine (skip corners), D-optimal. Keeps the

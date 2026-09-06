@@ -601,9 +601,35 @@ std::vector<cv::Point2f> FeatureSet::selectOptimizedPoints(int max_points, float
     // so precomputeFeatureCaches() builds lock info for them like any other
     // selection.
     if (user_opt_points_set) {
-        cached_opt_points = user_opt_points;
-        cached_opt_max_points = std::max(max_points, (int)user_opt_points.size());
-        return user_opt_points;
+        // Drop points whose ROI windows overlap heavily. The frozen fleet caches
+        // carry 8 points that were selected with spacing OFF -- ~6 distinct, the rest
+        // sit within a window of each other (fleet: 598 pairs < 30 px, 433 < 15 px),
+        // which is redundant refine work AND two near-parallel Jacobian rows that
+        // over-weight one edge and fake the outlier gate's point-count redundancy.
+        // Greedy keep-first by min spacing, in the stored order (studio put the most
+        // wanted first). min_spacing 0 keeps the legacy behaviour; <0 = auto (ROI
+        // half, <=50% overlap). Applied here so it reaches ALREADY-FROZEN defs at
+        // load, not only re-generated ones. SBM_NO_ROI_DEDUP=1 restores verbatim.
+        float sp_req = min_spacing;
+        if (const char* e = getenv("SBM_ROI_SPACING")) sp_req = (float)atof(e);   // evaluation override
+        float sp = (sp_req < 0.0f) ? (float)kDefaultROIHalf : sp_req;
+        if (sp <= 0.0f || getenv("SBM_NO_ROI_DEDUP")) {
+            cached_opt_points = user_opt_points;
+        } else {
+            const float sp2 = sp * sp;
+            std::vector<cv::Point2f> kept;
+            for (const auto& p : user_opt_points) {
+                bool clash = false;
+                for (const auto& q : kept) { float dx=p.x-q.x, dy=p.y-q.y; if (dx*dx+dy*dy < sp2) { clash = true; break; } }
+                if (!clash) kept.push_back(p);
+            }
+            // Never leave the solve underdetermined: if dedup drops below 4 points,
+            // keep the original set (a part that authored only ~3 close points needs
+            // them all; the rigid solve is 3-DoF).
+            cached_opt_points = (kept.size() >= 4) ? kept : user_opt_points;
+        }
+        cached_opt_max_points = std::max(max_points, (int)cached_opt_points.size());
+        return cached_opt_points;
     }
 
     // Return cached result if available and computed with same (or larger) max_points

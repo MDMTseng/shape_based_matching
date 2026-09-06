@@ -2630,11 +2630,21 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
                 roi_cfg.search_half = kDefaultROIHalf;
                 roi_cfg.max_iters = cfg.roi_max_iters > 0 ? cfg.roi_max_iters : kDefaultROIMaxIters;
                 roi_cfg.weight_by_lock = cfg.roi_weight_by_distinct;
+                // SBM_ROI_VERBOSE=1: per-point src/dst/residual + outlier + iteration log
+                // (sbm Debug channel "roi"; needs the Debug level, e.g. SBM_PROFILE set).
+                static const bool kRoiVerbose = getenv("SBM_ROI_VERBOSE") != nullptr;
+                roi_cfg.verbose = kRoiVerbose;
                 roi_cfg.reject_low_score = cfg.roi_reject_low_score;
                 roi_cfg.reject_pct = cfg.roi_reject_pct;
                 roi_cfg.edge_1d_match = cfg.roi_edge_1d_match;
                 roi_cfg.edge_collapse = cfg.roi_edge_collapse;
                 roi_cfg.iterative_rematch = cfg.roi_iterative_rematch;
+                // SBM_ROI_REMATCH=1: re-match the correspondences every iteration. With
+                // fixed correspondences a 3 deg coarse init error is unrecoverable (test1
+                // sheared, 120 deg: coarse 237 for true 240, refine stops at 237.8 and the
+                // 2x-median gate discards the points that disagree with the wrong angle).
+                static const int kRematchEnv = getenv("SBM_ROI_REMATCH") ? atoi(getenv("SBM_ROI_REMATCH")) : -1;
+                if (kRematchEnv >= 0) roi_cfg.iterative_rematch = kRematchEnv != 0;
 
                 // Refine capture knobs (see MatchConfig::roi_search_half / roi_prescale
                 // and the per-frame block above the candidate loop). Measured on

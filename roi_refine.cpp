@@ -14,10 +14,17 @@ namespace roi_refine {
 
 // Named constants (extracted from inline magic numbers)
 static constexpr float kPCAGradientThreshFactor = 0.3f;   // PCA gradient threshold multiplier
-static constexpr float kAngleRematchDeg         = 2.0f;   // angle change threshold for re-matching
+static const float kAngleRematchDeg = []{   // angle change threshold for re-matching
+    // SBM_ROI_REMATCH_DEG=<deg> overrides the 2.0 default for the A/B (a smaller value
+    // re-matches after the first solve when the coarse init was a few degrees off).
+    const char* e = getenv("SBM_ROI_REMATCH_DEG"); return (e && atof(e) > 0) ? (float)atof(e) : 2.0f; }();
 static constexpr float kAngleRewarpDeg          = 5.0f;   // angle change threshold for re-warping cached ROIs
 static constexpr int   kMinROIHalf              = 5;       // minimum ROI half-size
-static constexpr float kOutlierMultiplier       = 2.0f;   // outlier rejection: distance > N × median
+static const float kOutlierMultiplier = []{   // outlier gate: drop |normal residual| > K * median (min K px)
+    // SBM_ROI_OUTLIER_K=<k> overrides 2.0 for the deformation A/B: on a sheared part the
+    // residuals are broad but CONSISTENT (+-2 px), and 2x median cuts through the middle of
+    // that distribution, so which half survives depends on the pose -> 2 deg pose flips.
+    const char* e = getenv("SBM_ROI_OUTLIER_K"); return (e && atof(e) > 0) ? (float)atof(e) : 2.0f; }();
 static constexpr float kMaxThetaUpdate          = 0.2f;   // theta clamp (radians)
 static constexpr float kMaxTransUpdate          = 10.0f;  // translation clamp (pixels)
 static constexpr float kSolverRegularization    = 0.001f; // regularization for ATA diagonal

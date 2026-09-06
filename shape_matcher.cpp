@@ -2559,6 +2559,11 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         bool do_icp = (cfg.refine == RefineMode::ICP || cfg.refine == RefineMode::ICP_Sparse
                        || cfg.refine == RefineMode::ICP_Subpixel)
                       && !scene.empty() && fs.templ_scene_valid;
+        // Trust fields: filled by whichever refine ran (ROI: mean normal residual over
+        // the selected points; ICP: rmse of the inlier correspondences, inliers as a
+        // fraction of 100), so the trust gates and the deformation tools can compare
+        // the two refine families on the same report fields.
+        float roi_residual_out = -1.0f; int roi_npts_out = 0, roi_ninl_out = 0;
         if (do_icp) {
             icp_refine::ICPConfig icp_cfg;
             icp_cfg.max_iterations = cfg.icp_iterations;
@@ -2580,6 +2585,8 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
             scene_x = refined.x;
             scene_y = refined.y;
             raw_angle = refined.angle;
+            roi_residual_out = refined.rmse;
+            roi_npts_out = 100; roi_ninl_out = (int)std::lround(refined.fitness * 100.0f);
 
             // Recompute user coordinates from refined pose
             rad = raw_angle * (float)CV_PI / 180.0f;   // same sign as above
@@ -2594,7 +2601,6 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         }
 
         // ROI-based refinement
-        float roi_residual_out = -1.0f; int roi_npts_out = 0, roi_ninl_out = 0;
         if (cfg.refine == RefineMode::ROI && !fs.templ_image.empty() && !scene.empty()) {
             // Use sensitivity-optimized point selection
             // cached_opt_points was pre-computed in addModel(); read-only here (thread-safe)

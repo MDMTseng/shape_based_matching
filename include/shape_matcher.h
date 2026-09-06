@@ -472,6 +472,8 @@ struct MatchResult {
                                ///< passes its orientation test and ignore the rest; a caller that
                                ///< counts should count groups. Results with different groups are
                                ///< different objects (or poses the caller's nms_angle asked to keep).
+    int   refine_npts = 0;         ///< total matched refine points (trust)
+    int   refine_ninliers = 0;     ///< points agreeing within 2x median residual (trust)
     float refine_residual = -1.0f; ///< ROI refine fit quality: mean |point-to-line|
                                    ///< residual (px) of the matched sample points at
                                    ///< the final pose. Low (~<1px) = trustworthy; high

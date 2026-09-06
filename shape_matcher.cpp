@@ -2583,7 +2583,7 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         }
 
         // ROI-based refinement
-        float roi_residual_out = -1.0f;
+        float roi_residual_out = -1.0f; int roi_npts_out = 0, roi_ninl_out = 0;
         if (cfg.refine == RefineMode::ROI && !fs.templ_image.empty() && !scene.empty()) {
             // Use sensitivity-optimized point selection
             // cached_opt_points was pre-computed in addModel(); read-only here (thread-safe)
@@ -2642,10 +2642,11 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
                     }
                 }
                 cv::Vec3f init_pose(scene_x, scene_y, raw_angle);
-                float roi_residual = -1.0f;
+                float roi_residual = -1.0f; int roi_npts = 0, roi_ninl = 0;
                 auto refined_pose = roi_refine::refineROI(
-                    fs.templ_image, scene, sample_pts, init_pose, roi_cfg, &roi_residual);
+                    fs.templ_image, scene, sample_pts, init_pose, roi_cfg, &roi_residual, &roi_npts, &roi_ninl);
                 roi_residual_out = roi_residual;
+                roi_npts_out = roi_npts; roi_ninl_out = roi_ninl;
 
                 scene_x = refined_pose[0];
                 scene_y = refined_pose[1];
@@ -2673,6 +2674,7 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         r.score = m.similarity;
         r.group = group_of[mi_idx];
         r.refine_residual = roi_residual_out;
+        r.refine_npts = roi_npts_out; r.refine_ninliers = roi_ninl_out;
         results[mi_idx] = r;
         valid[mi_idx] = 1;
     }

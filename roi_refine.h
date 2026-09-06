@@ -109,6 +109,8 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
                     const std::vector<SamplePoint>& sample_points,
                     const cv::Vec3f& initial_pose,
                     const ROIConfig& config = ROIConfig(),
-                    float* out_residual = nullptr);
+                    float* out_residual = nullptr,
+                    int* out_npts = nullptr,        ///< total matched sample points
+                    int* out_ninliers = nullptr);   ///< points agreeing within 2x median residual (trust signal)
 
 } // namespace roi_refine

@@ -409,7 +409,9 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
                     const std::vector<SamplePoint>& sample_points,
                     const cv::Vec3f& initial_pose,
                     const ROIConfig& config,
-                    float* out_residual) {
+                    float* out_residual,
+                    int* out_npts,
+                    int* out_ninliers) {
 
     cv::Vec3f pose = initial_pose;
 
@@ -699,6 +701,34 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
             sum += std::abs(e); cnt++;
         }
         *out_residual = (cnt > 0) ? sum / cnt : -1.0f;
+    }
+
+    // Trust signal: how many matched points AGREE (residual within 2x the median), of
+    // how many there were. A clutter-stolen / wrong-edge point sits far out and drops
+    // the inlier count without being removed from the solve (measurements unchanged).
+    if (out_npts || out_ninliers) {
+        float fa = pose[2] * (float)CV_PI / 180.0f;
+        float fcs = std::cos(fa), fsn = std::sin(fa), fcx = pose[0], fcy = pose[1];
+        std::vector<float> e_abs; e_abs.reserve(matched_points.size());
+        for (auto& mp : matched_points) {
+            auto& sp = sample_points[mp.sample_idx];
+            float ex = fcs * sp.pos.x - fsn * sp.pos.y + fcx;
+            float ey = fsn * sp.pos.x + fcs * sp.pos.y + fcy;
+            cv::Point2f n(fcs * mp.normal.x - fsn * mp.normal.y,
+                          fsn * mp.normal.x + fcs * mp.normal.y);
+            e_abs.push_back(std::abs((ex - mp.dst.x) * n.x + (ey - mp.dst.y) * n.y));
+        }
+        if (out_npts) *out_npts = (int)e_abs.size();
+        if (out_ninliers) {
+            int ninl = 0;
+            if (!e_abs.empty()) {
+                std::vector<float> tmp = e_abs; size_t mid = tmp.size() / 2;
+                std::nth_element(tmp.begin(), tmp.begin() + mid, tmp.end());
+                float thr = std::max(1.0f, 2.0f * tmp[mid]);   // agree within 2x median, floor 1 px
+                for (float e : e_abs) if (e <= thr) ++ninl;
+            }
+            *out_ninliers = ninl;
+        }
     }
 
     return pose;

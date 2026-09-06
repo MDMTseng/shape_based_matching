@@ -2365,7 +2365,20 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
     // 10 objects on the same picture across runs. Sort by similarity (then
     // template_id, from Match::operator<) so the strongest pose claims the
     // location and the result is a function of the image alone.
-    std::stable_sort(raw_matches.begin(), raw_matches.end());
+    // TOTAL ORDER so NMS is a pure function of the match SET, not of the OpenMP
+    // completion order the refine loop pushed them in. Match::operator< breaks a
+    // similarity tie only by template_id, so two equal-score matches of the same
+    // template at different places kept push-order -- and the greedy NMS below keeps
+    // whichever it saw first, so the reported pose, and even the object COUNT after
+    // grouping, varied run to run on the same image (ok68: 5-10 objects; ok42: a
+    // judge value at 1e-5). The surviving matches are deterministic; only their order
+    // was not. Add (x, y) as final keys.
+    std::sort(raw_matches.begin(), raw_matches.end(), [](const line2Dup::Match& a, const line2Dup::Match& b){
+        if (a.similarity != b.similarity) return a.similarity > b.similarity;
+        if (a.template_id != b.template_id) return a.template_id < b.template_id;
+        if (a.x != b.x) return a.x < b.x;
+        return a.y < b.y;
+    });
     for (auto& m : raw_matches) {
         bool suppressed = false;
         int  join = -1;                 // group to join as an alternate, if any

@@ -490,6 +490,16 @@ public:
                  const FeatureSet& features,
                  const ModelConfig& config = ModelConfig());
 
+    /// Same, with a feature set RE-EXTRACTED at match_scale for the down-scaled
+    /// detector (levels only; refine caches come from `features`). Without it the
+    /// scaled detector gets the full-res features with halved coordinates, which
+    /// piles several features into one T8 cell and degrades the coarse score
+    /// (ok97: coarse 51 for a pose that refines to 99). `scaled` may be null.
+    int addModel(const std::string& name,
+                 const FeatureSet& features,
+                 const ModelConfig& config,
+                 const FeatureSet* scaled);
+
     /// Register a model directly from a template image (grayscale CV_8U).
     /// Behaves like the FeatureSet overload, but when the matcher's
     /// match_scale < 1 the down-scaled matcher's features are RE-EXTRACTED from

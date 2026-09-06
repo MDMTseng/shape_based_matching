@@ -2106,6 +2106,14 @@ int ShapeMatcher::addModel(const std::string& name,
 }
 
 int ShapeMatcher::addModel(const std::string& name,
+                           const FeatureSet& features,
+                           const ModelConfig& config,
+                           const FeatureSet* scaled) {
+    return addModelInternal(name, features, config,
+                            (scaled && !scaled->levels.empty()) ? scaled : nullptr);
+}
+
+int ShapeMatcher::addModel(const std::string& name,
                            const cv::Mat& templ_gray,
                            const cv::Mat& mask,
                            const ModelConfig& config,

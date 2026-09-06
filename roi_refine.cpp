@@ -634,13 +634,18 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
         }
     }
 
-    // Reject outliers: remove constraints with distance > 2× median
+    // Reject outliers: remove constraints whose NORMAL residual > 2x median. Use the
+    // point-to-line distance along the constraint normal, not the 2D displacement: an
+    // edge point is a 1-D constraint, so sliding ALONG the edge (aperture) is expected
+    // and must not count as an outlier, while a point stolen ACROSS the edge
+    // (clutter / wrong turn) shows up in the normal component. Corner rows carry their
+    // own axis as `normal`, so the same projection is correct for them.
     if (!constraints.empty()) {
         std::vector<float> dists;
         dists.reserve(constraints.size());
         for (auto& c : constraints) {
             float dx = c.dst.x - c.src.x, dy = c.dst.y - c.src.y;
-            dists.push_back(std::sqrt(dx*dx + dy*dy));
+            dists.push_back(std::fabs(dx * c.normal.x + dy * c.normal.y));
         }
         // Median from a SORTED COPY; the filter must use dists in CONSTRAINT order.
         // (Bug: dists was sorted in place, so dists[i] no longer matched constraints[i]

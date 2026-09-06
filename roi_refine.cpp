@@ -642,8 +642,13 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
             float dx = c.dst.x - c.src.x, dy = c.dst.y - c.src.y;
             dists.push_back(std::sqrt(dx*dx + dy*dy));
         }
-        std::sort(dists.begin(), dists.end());
-        float median = dists[dists.size() / 2];
+        // Median from a SORTED COPY; the filter must use dists in CONSTRAINT order.
+        // (Bug: dists was sorted in place, so dists[i] no longer matched constraints[i]
+        // and the filter kept the first-N by original order, not the N closest -- it
+        // could keep an outlier and drop a good point exactly when outliers exist.)
+        std::vector<float> dsorted = dists;
+        std::sort(dsorted.begin(), dsorted.end());
+        float median = dsorted[dsorted.size() / 2];
         float thresh = std::max(kOutlierMultiplier, median * kOutlierMultiplier);
 
         std::vector<Constraint> filtered;

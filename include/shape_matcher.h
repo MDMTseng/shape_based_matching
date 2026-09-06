@@ -103,6 +103,11 @@ struct FeatureSet {
         cv::Point2f tangent{0,1};  // eigenvector of stronger response
         bool is_corner = false;    // true if minor/major > threshold (2D lock)
         float score_floor = 0.0f;  // worst self-correlation under coarse-error angle envelope
+        // Gradient PCA of the unrotated template patch (roi_refine::templatePCA),
+        // computed once here instead of per candidate in refineROI.
+        bool pca_valid = false; int pca_h = 0;
+        float pca_eig[2] = {0, 0};
+        cv::Point2f pca_vec[2] = {cv::Point2f(1, 0), cv::Point2f(0, 1)};
     };
     mutable std::vector<LockInfo> cached_lock_info;
 

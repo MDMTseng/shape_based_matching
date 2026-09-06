@@ -369,6 +369,14 @@ static int safeROIHalf(int tx, int ty, int cols, int rows, int roi_half) {
 // -----------------------------------------------------------------------
 // Main ROI refinement
 // -----------------------------------------------------------------------
+int roiHalfAt(int tx, int ty, int cols, int rows, int roi_half) {
+    return safeROIHalf(tx, ty, cols, rows, roi_half);
+}
+void templatePCA(const cv::Mat& templ_img, int tx, int ty, int h, float eigvals[2], cv::Point2f eigvecs[2]) {
+    cv::Mat roi_unrot = templ_img(cv::Rect(tx-h, ty-h, 2*h, 2*h));
+    roiPCA(roi_unrot, eigvals, eigvecs);
+}
+
 cv::Vec3f refineROI(const cv::Mat& templ_img,
                     const cv::Mat& scene_img,
                     const std::vector<SamplePoint>& sample_points,
@@ -471,7 +479,21 @@ cv::Vec3f refineROI(const cv::Mat& templ_img,
             int h = safeROIHalf(tx, ty, templ_img.cols, templ_img.rows, config.roi_half);
             float eigvals[2];
             cv::Point2f eigvecs[2];
-            if (h >= kMinROIHalf) {
+            static const bool kNoPcaCache = getenv("SBM_NO_PCA_CACHE") != nullptr;
+            static const bool kPcaCheck   = getenv("SBM_PCA_CHECK") != nullptr;
+            if (h >= kMinROIHalf && sp.pca_valid && sp.pca_h == h && !kNoPcaCache) {
+                // Precomputed at addModel from the same patch (templatePCA).
+                eigvals[0] = sp.pca_eig[0]; eigvals[1] = sp.pca_eig[1];
+                eigvecs[0] = sp.pca_vec[0]; eigvecs[1] = sp.pca_vec[1];
+                if (kPcaCheck) {
+                    float e2[2]; cv::Point2f v2[2];
+                    cv::Mat roi_unrot = templ_img(cv::Rect(tx-h, ty-h, 2*h, 2*h));
+                    roiPCA(roi_unrot, e2, v2);
+                    if (e2[0] != eigvals[0] || e2[1] != eigvals[1] || v2[0] != eigvecs[0] || v2[1] != eigvecs[1])
+                        fprintf(stderr, "[SBM_PCA_CHECK] pt %d at (%d,%d) h %d: cached eig %.6g %.6g vec (%.6f,%.6f) vs fresh eig %.6g %.6g vec (%.6f,%.6f) templ %dx%d\n",
+                                cr.sample_idx, tx, ty, h, eigvals[0], eigvals[1], eigvecs[1].x, eigvecs[1].y, e2[0], e2[1], v2[1].x, v2[1].y, templ_img.cols, templ_img.rows);
+                }
+            } else if (h >= kMinROIHalf) {
                 cv::Mat roi_unrot = templ_img(cv::Rect(tx-h, ty-h, 2*h, 2*h));
                 roiPCA(roi_unrot, eigvals, eigvecs);
             } else {

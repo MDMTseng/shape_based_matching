@@ -1814,6 +1814,14 @@ struct ShapeMatcher::Impl {
             for (int pi = 0; pi < (int)pts.size(); pi++) {
                 int tx_l = (int)(pts[pi].x + tcx_l + 0.5f);
                 int ty_l = (int)(pts[pi].y + tcy_l + 0.5f);
+                // The template-side gradient PCA refineROI needs per point: the same
+                // patch (same rounding, same border shrink) it would cut itself, so
+                // the cached answer is the one it would have computed.
+                {
+                    auto& li = fs.cached_lock_info[pi];
+                    int hp = roi_refine::roiHalfAt(tx_l, ty_l, img.cols, img.rows, kDefaultROIHalf);
+                    if (hp >= 5) { roi_refine::templatePCA(img, tx_l, ty_l, hp, li.pca_eig, li.pca_vec); li.pca_h = hp; li.pca_valid = true; }
+                }
                 int h_l = kDefaultROIHalf;
                 if (tx_l-h_l<0||ty_l-h_l<0||tx_l+h_l>=img.cols||ty_l+h_l>=img.rows) continue;
                 cv::Mat patch = img(cv::Rect(tx_l-h_l, ty_l-h_l, 2*h_l+1, 2*h_l+1));
@@ -2548,6 +2556,8 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
                     sp.lock_tangent = fs.cached_lock_info[pi].tangent;
                     sp.lock_is_corner = fs.cached_lock_info[pi].is_corner;
                     sp.score_floor = fs.cached_lock_info[pi].score_floor;
+                    const auto& li = fs.cached_lock_info[pi];
+                    if (li.pca_valid) { sp.pca_valid = true; sp.pca_h = li.pca_h; sp.pca_eig[0] = li.pca_eig[0]; sp.pca_eig[1] = li.pca_eig[1]; sp.pca_vec[0] = li.pca_vec[0]; sp.pca_vec[1] = li.pca_vec[1]; }
                 }
                 sample_pts.push_back(sp);
             }

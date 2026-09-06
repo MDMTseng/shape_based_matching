@@ -25,7 +25,21 @@ struct SamplePoint {
     float score_floor = 0.0f;      ///< Worst self-correlation under the coarse-error
                                    ///< angle envelope (set at setup). A runtime match
                                    ///< scoring far below this matched the wrong place.
+    /// Gradient PCA of the UNROTATED template patch at this point, computed once
+    /// at addModel (templatePCA) instead of once per candidate per re-match. It is
+    /// a function of the template alone. pca_h is the patch half-size it was
+    /// computed with; refineROI uses the cache only when its own half matches.
+    bool pca_valid = false;
+    int pca_h = 0;
+    float pca_eig[2] = {0, 0};
+    cv::Point2f pca_vec[2] = {cv::Point2f(1, 0), cv::Point2f(0, 1)};
 };
+
+/// The patch half-size refineROI will use at (tx,ty): roi_half shrunk at the
+/// template border. Exposed so callers can precompute per-point data with it.
+int roiHalfAt(int tx, int ty, int cols, int rows, int roi_half);
+/// Gradient PCA of templ_img's (2h x 2h) patch centred at (tx,ty), as refineROI does it.
+void templatePCA(const cv::Mat& templ_img, int tx, int ty, int h, float eigvals[2], cv::Point2f eigvecs[2]);
 
 /// Result of ROI matching + PCA for one sample point.
 struct Constraint {

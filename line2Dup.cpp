@@ -1337,17 +1337,23 @@ static const unsigned char *accessLinearMemory(const std::vector<Mat> &linear_me
     CV_DbgAssert(memory_grid.rows == T * T);
     CV_DbgAssert(f.x >= 0);
     CV_DbgAssert(f.y >= 0);
-    // The LM we want is at (x%T, y%T) in the TxT grid (stored as the rows of memory_grid)
-    int grid_x = f.x % T;
-    int grid_y = f.y % T;
+    // T is 4 or 8 here, always a power of two, so the four divides/modulos the old
+    // code did per feature per candidate (~1.2 M idiv/frame) become mask+shift. f.x/f.y
+    // are non-negative (asserted above), so this is exact. Non-power-of-two T keeps the
+    // general form.
+    int grid_x, grid_y, lm_x, lm_y;
+    if ((T & (T - 1)) == 0) {
+        const int m = T - 1, sh = (T == 8) ? 3 : (T == 4) ? 2 : __builtin_ctz((unsigned)T);
+        grid_x = f.x & m; grid_y = f.y & m; lm_x = f.x >> sh; lm_y = f.y >> sh;
+    } else {
+        grid_x = f.x % T; grid_y = f.y % T; lm_x = f.x / T; lm_y = f.y / T;
+    }
     int grid_index = grid_y * T + grid_x;
     CV_DbgAssert(grid_index >= 0);
     CV_DbgAssert(grid_index < memory_grid.rows);
     const unsigned char *memory = memory_grid.ptr(grid_index);
     // Within the LM, the feature is at (x/T, y/T). W is the "width" of the LM, the
     // input image width decimated by T.
-    int lm_x = f.x / T;
-    int lm_y = f.y / T;
     int lm_index = lm_y * W + lm_x;
     CV_DbgAssert(lm_index >= 0);
     CV_DbgAssert(lm_index < memory_grid.cols);
@@ -2727,6 +2733,16 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
     }
 
     // ---- Local refinement up the pyramid, one candidate at a time ----
+    // Refine neighbours together: sort by template then scene location so consecutive
+    // candidates on a core reuse the same ~1 MB of linear-memory rows (L2 instead of
+    // L3/DRAM miss per candidate). Order-only; each candidate refines independently and
+    // the downstream NMS re-sorts by similarity, so the result is unchanged. Skipped in
+    // TOPK_DEBUG, which relies on the dropped candidates staying at the tail.
+    if (!getenv("SBM_TOPK_DEBUG") && !getenv("SBM_NO_CAND_SORT"))
+        std::sort(coarse.begin(), coarse.end(), [](const Match& a, const Match& b){
+            if (a.template_id != b.template_id) return a.template_id < b.template_id;
+            if (a.y != b.y) return a.y < b.y;
+            return a.x < b.x; });
     const int n_coarse = static_cast<int>(coarse.size());
     static const bool kDebugPrint = getenv("SBM_TOPK_DEBUG") != nullptr;
     const int n_kept_dbg = kDebugPrint ? (int)(coarse.size() - dbg_dropped_count) : n_coarse;

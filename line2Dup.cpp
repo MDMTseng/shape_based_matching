@@ -52,6 +52,10 @@ struct StageProfile {
     double coarse_match_ms = 0;
     double refine_ms = 0;
     double sort_nms_ms = 0;
+    // Inside matchClass, per template, summed over OpenMP threads (so they add up
+    // to thread-time, not wall time; their RATIO is what splits coarse_match_ms).
+    double tmpl_sim_ms = 0, tmpl_scan_ms = 0, tmpl_refine_ms = 0;
+    long   cand_total = 0, cand_capped = 0, templates = 0;
     bool enabled = false;
 
     void print() const {
@@ -63,6 +67,14 @@ struct StageProfile {
         sbm::sbm_log(sbm::LogLevel::Debug, "profile", "  %-28s %7.1fms", "Fused spread+LUT+linearize", fused_spread_lut_ms);
         sbm::sbm_log(sbm::LogLevel::Debug, "profile", "  %-28s %7.1fms", "Coarse similarity", coarse_match_ms);
         sbm::sbm_log(sbm::LogLevel::Debug, "profile", "  %-28s %7.1fms", "Pyramid refinement", refine_ms);
+        {
+            double tsum = tmpl_sim_ms + tmpl_scan_ms + tmpl_refine_ms;
+            if (tsum > 0)
+                sbm::sbm_log(sbm::LogLevel::Debug, "profile",
+                             "    coarse split (thread-time): similarity %.0f%%  threshold scan %.0f%%  T4 refine %.0f%%;  %ld templates, %.1f candidates/template (%ld hit the 256 cap)",
+                             100 * tmpl_sim_ms / tsum, 100 * tmpl_scan_ms / tsum, 100 * tmpl_refine_ms / tsum,
+                             templates, templates ? (double)cand_total / templates : 0.0, cand_capped);
+        }
         sbm::sbm_log(sbm::LogLevel::Debug, "profile", "  %-28s %7.1fms", "Sort + NMS", sort_nms_ms);
         double total = blur_ms + sobel_ms + quantize_ms + voting_ms +
                        fused_spread_lut_ms + coarse_match_ms + refine_ms + sort_nms_ms;
@@ -71,6 +83,7 @@ struct StageProfile {
     void reset() {
         blur_ms = sobel_ms = quantize_ms = voting_ms = 0;
         fused_spread_lut_ms = coarse_match_ms = refine_ms = sort_nms_ms = 0;
+        tmpl_sim_ms = tmpl_scan_ms = tmpl_refine_ms = 0; cand_total = cand_capped = templates = 0;
     }
 };
 // Note: not thread-safe for concurrent matching calls. Profile data may be
@@ -598,6 +611,7 @@ static void quantizedOrientations(const Mat &src, Mat &magnitude,
             if (g_profile.enabled) g_profile.voting_ms += pms(pt0);
         } else {
         // Voting path: need quantize → intermediate buffers → vote → bitmask
+        pt0 = pnow();   // quantize is timed from here; Sobel was stamped above
         Mat quantized_unfiltered = Mat::zeros(src.size(), CV_8U);
         Mat mag_mask = Mat::zeros(src.size(), CV_8U);
 
@@ -2560,6 +2574,7 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
     // MSVC OpenMP only supports 2.0 (no custom reductions, no unsigned loop var).
     // Use critical section for thread-safe match collection instead.
     int num_templates = static_cast<int>(template_pyramids.size());
+    std::vector<Match> coarse;   // every template's coarse candidates (per-template cap applied)
 #pragma omp parallel for schedule(dynamic)
     for (int template_id_i = 0; template_id_i < num_templates; ++template_id_i)
     {
@@ -2569,6 +2584,9 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
         /// @todo Factor this out into separate function
         const std::vector<LinearMemories> &lowest_lm = lm_pyramid.back();
 
+        const auto _tp0 = std::chrono::high_resolution_clock::now();
+        auto _ms_since = [](std::chrono::high_resolution_clock::time_point t) { return std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t).count(); };
+        double _t_sim = 0;
         std::vector<Match> candidates;
         {
             // Compute similarity maps for each ColorGradient at lowest pyramid level
@@ -2591,6 +2609,7 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
                 }
             }
 
+            _t_sim = _ms_since(_tp0);
             // Find initial matches
             for (int r = 0; r < similarities.rows; ++r)
             {
@@ -2612,6 +2631,8 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
         }
 
 
+        const double _t_scan = _ms_since(_tp0);
+        const long _n_cand = (long)candidates.size();
         // Cap coarse candidates to top-K by score to prevent noise flooding.
         // Maximum coarse candidates per template before pyramid refinement.
         // On noisy images, thousands of false candidates pass the threshold.
@@ -2627,8 +2648,81 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
             }
         }
 
+        if (g_profile.enabled) {
+            #pragma omp critical(sbm_profile)
+            {
+                g_profile.tmpl_sim_ms += _t_sim; g_profile.tmpl_scan_ms += _t_scan - _t_sim;
+                g_profile.cand_total += _n_cand; if (_n_cand > 256) g_profile.cand_capped++; g_profile.templates++;
+            }
+        }
+        #pragma omp critical(sbm_coarse)
+        coarse.insert(coarse.end(), candidates.begin(), candidates.end());
+    }
+
+    // ---- Global cap before the local refinement ----
+    // SBM_GLOBAL_TOPK=<K>: keep only the K best coarse candidates ACROSS all templates.
+    // Measured (test1, 2448x2048 at 0.5, step 1, 2 threads): 360 templates x 6.5
+    // candidates over min_score = 2340 local T4 refinements per frame for ~2 real
+    // objects -- 78% of the matcher's thread time. The true poses rank at the top
+    // of the coarse scores (0.9+ against noise at 0.5-0.6), so a global top-K
+    // refines the few that can win and skips the rest. 0 = off (refine every
+    // candidate, the previous behaviour). K should exceed (objects x neighbouring
+    // angle templates x neighbouring cells) by a margin; 64-128 is generous.
+    // Two keeps, either suffices: rank < K, or coarse score within SBM_GLOBAL_MARGIN
+    // (default 20 points) of the best. The margin is what protects a frame with
+    // many objects (5 parts x ~5 neighbouring angles x ~3 cells is already 75
+    // candidates that all deserve refining); K is what bounds the noise when the
+    // best is weak and everything sits within the margin.
+    std::vector<std::pair<Match, std::pair<int,int> > > dbg_dropped_ref;   // debug: (dropped candidate, (global rank, rank in template))
+    size_t dbg_dropped_count = 0;
+    static const int   kGlobalTopK   = getenv("SBM_GLOBAL_TOPK") ? atoi(getenv("SBM_GLOBAL_TOPK")) : 0;
+    static const float kGlobalMargin = getenv("SBM_GLOBAL_MARGIN") ? (float)atof(getenv("SBM_GLOBAL_MARGIN")) : 20.f;
+    static const int   kPerTemplate  = getenv("SBM_GLOBAL_PER_TEMPLATE") ? atoi(getenv("SBM_GLOBAL_PER_TEMPLATE")) : 1;   // best M per template always refined
+    // Third keep: every template's own best candidate. The coarse T8 score is not
+    // the refined score -- ok97/ok98 in the fleet have a true pose whose coarse
+    // score sits 20+ points under a 160-deg-off alias and only the T4 refinement
+    // lifts it to 0.99; a pure top-K dropped it. One candidate per template is at
+    // most 360 refinements (against 2340 for "all"), and it guarantees that any
+    // pose which wins at its own angle is still refined.
+    if (kGlobalTopK > 0 && (int)coarse.size() > kGlobalTopK) {
+        std::sort(coarse.begin(), coarse.end());   // Match::operator< : descending similarity, then template_id
+        const float keep_from = coarse.front().similarity - kGlobalMargin;
+        std::vector<int> seen(num_templates, 0);
+        std::vector<Match> kept; kept.reserve(kGlobalTopK + num_templates);
+        std::vector<std::pair<Match, std::pair<int,int> > > &dbg_dropped = dbg_dropped_ref;
+        // SBM_TOPK_DEBUG=1: refine everything anyway, but remember what the rule
+        // would have dropped; the refinement loop then prints every strong pose
+        // (refined >= 85) the rule would not have refined, with its coarse rank.
+        static const bool kDebug = getenv("SBM_TOPK_DEBUG") != nullptr;
+        for (int i = 0; i < (int)coarse.size(); ++i) {
+            Match &c = coarse[i];
+            const bool by_rank = i < kGlobalTopK, by_margin = c.similarity >= keep_from;
+            const int tid = c.template_id;
+            const int per_t_rank = (tid >= 0 && tid < num_templates) ? seen[tid] : 0;
+            const bool by_template = tid >= 0 && tid < num_templates && seen[tid] < kPerTemplate;
+            if (tid >= 0 && tid < num_templates) seen[tid]++;
+            if (by_rank || by_margin || by_template) kept.push_back(c);
+            else if (kDebug) { c.x = -c.x - 1; c.y = -c.y - 1; dbg_dropped.push_back(std::make_pair(c, std::make_pair(i, per_t_rank))); }
+        }
+        coarse.swap(kept);
+        if (kDebug) { for (auto &d : dbg_dropped) { Match m = d.first; m.x = -m.x - 1; m.y = -m.y - 1; coarse.push_back(m); } dbg_dropped_count = dbg_dropped.size(); }
+    }
+
+    // ---- Local refinement up the pyramid, one candidate at a time ----
+    const int n_coarse = static_cast<int>(coarse.size());
+    static const bool kDebugPrint = getenv("SBM_TOPK_DEBUG") != nullptr;
+    const int n_kept_dbg = kDebugPrint ? (int)(coarse.size() - dbg_dropped_count) : n_coarse;
+#pragma omp parallel for schedule(dynamic)
+    for (int ci = 0; ci < n_coarse; ++ci)
+    {
+        Match match2 = coarse[ci];
+        const float coarse_score_dbg = match2.similarity;
+        const TemplatePyramid &tp = template_pyramids[match2.template_id];
+        const auto _tr0 = std::chrono::high_resolution_clock::now();
+        bool alive = true;
+        Mat similarities2;
         // Locally refine each match by marching up the pyramid
-        for (int l = pyramid_levels - 2; l >= 0; --l)
+        for (int l = pyramid_levels - 2; l >= 0; --l)   // per candidate
         {
             const std::vector<LinearMemories> &lms = lm_pyramid[l];
             int T = T_at_level[l];
@@ -2639,10 +2733,7 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
             int max_x = size.width - tp[start].width - border;
             int max_y = size.height - tp[start].height - border;
 
-            Mat similarities2;
-            for (int m = 0; m < (int)candidates.size(); ++m)
             {
-                Match &match2 = candidates[m];
                 int x = match2.x * 2 + 1; /// @todo Support other pyramid distance
                 int y = match2.y * 2 + 1;
 
@@ -2727,14 +2818,25 @@ void Detector::matchClass(const LinearMemoryPyramid &lm_pyramid,
                 match2.y = (y / T - 8 + best_r) * T + offset;
             }
 
-            // Filter out any matches that drop below the similarity threshold
-            std::vector<Match>::iterator new_end = std::remove_if(candidates.begin(), candidates.end(),
-                                                                  MatchPredicate(threshold));
-            candidates.erase(new_end, candidates.end());
+            // Same filter as before: a candidate that drops below the threshold at this level
+            // is not carried to the next one.
+            if (MatchPredicate(threshold)(match2)) { alive = false; break; }
         }
-
-        #pragma omp critical
-        matches.insert(matches.end(), candidates.begin(), candidates.end());
+        if (g_profile.enabled) {
+            const double _t_ref = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - _tr0).count();
+            #pragma omp critical(sbm_profile)
+            g_profile.tmpl_refine_ms += _t_ref;
+        }
+        if (kDebugPrint && ci >= n_kept_dbg && alive && match2.similarity >= 85.f) {
+            #pragma omp critical(sbm_profile)
+            fprintf(stderr, "[SBM_TOPK_DEBUG] would have DROPPED a strong pose: refined %.1f coarse %.1f template %d at (%d,%d) -- global rank %d, rank within template %d\n",
+                    match2.similarity, coarse_score_dbg, match2.template_id, match2.x, match2.y,
+                    dbg_dropped_ref[ci - n_kept_dbg].second.first, dbg_dropped_ref[ci - n_kept_dbg].second.second);
+        }
+        if (alive) {
+            #pragma omp critical
+            matches.push_back(match2);
+        }
     }
 }
 

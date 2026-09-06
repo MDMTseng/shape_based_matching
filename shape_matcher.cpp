@@ -2341,6 +2341,15 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
         adiff = std::min(adiff, templates_per_scale - adiff);
         return adiff * nms_angle_step;
     };
+    // GREEDY NMS MUST SEE THE BEST FIRST. raw_matches come out of an OpenMP
+    // critical section in whatever order the threads finished, and the loop below
+    // keeps the first match it sees at a location and suppresses the rest -- so
+    // which pose survived depended on thread timing. Seen on the fleet: ok39
+    // reported 0.617 instead of the 0.991 at the same spot; ok68 returned 5, 9 or
+    // 10 objects on the same picture across runs. Sort by similarity (then
+    // template_id, from Match::operator<) so the strongest pose claims the
+    // location and the result is a function of the image alone.
+    std::stable_sort(raw_matches.begin(), raw_matches.end());
     for (auto& m : raw_matches) {
         bool suppressed = false;
         int  join = -1;                 // group to join as an alternate, if any

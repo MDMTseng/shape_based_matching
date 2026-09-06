@@ -1507,55 +1507,65 @@ static void similarityLocal(const std::vector<Mat> &linear_memories, const Templ
 
     int offset_x = (center.x / T - 8) * T;
     int offset_y = (center.y / T - 8) * T;
-    mipp::Reg<uint8_t> zero_v = uint8_t(0);
+    short *dst_ptr = dst.ptr<short>();
 
+#ifdef __AVX2__
+    // Batch the 63-feature uint8 trick (like similarity()): sum up to 63 features'
+    // 16x16 windows in a uint8 accumulator (63*4 = 252 < 256, no overflow -> exact),
+    // widen to the int16 dst once per batch instead of widening every feature. Each
+    // window row is 16 bytes at lm_ptr + row*W (strided), so it is a 128-bit add per
+    // row; the dst is 256 shorts (16 vpaddw on widen). SBM_NO_LOCALACC=1 falls back.
+    if (!getenv("SBM_NO_LOCALACC")) {
+        std::vector<const uchar*> lm; lm.reserve(templ.features.size());
+        for (int i = 0; i < (int)templ.features.size(); ++i) {
+            Feature f = templ.features[i]; f.x += offset_x; f.y += offset_y;
+            if (f.x < 0 || f.y < 0 || f.x >= size.width || f.y >= size.height) continue;
+            lm.push_back(accessLinearMemory(linear_memories, f, T, W));
+        }
+        const int BATCH = 63;
+        alignas(32) uint8_t acc8[256];
+        for (int bs = 0; bs < (int)lm.size(); bs += BATCH) {
+            int be = std::min(bs + BATCH, (int)lm.size());
+            std::memset(acc8, 0, sizeof(acc8));
+            for (int fi = bs; fi < be; ++fi) {
+                const uchar *p = lm[fi];
+                for (int row = 0; row < 16; ++row) {
+                    __m128i a = _mm_load_si128((const __m128i*)(acc8 + row*16));
+                    __m128i sv = _mm_loadu_si128((const __m128i*)(p + row*W));
+                    _mm_store_si128((__m128i*)(acc8 + row*16), _mm_add_epi8(a, sv));
+                }
+            }
+            for (int j = 0; j < 256; j += 16) {
+                __m128i s8 = _mm_load_si128((const __m128i*)(acc8 + j));
+                __m256i s16 = _mm256_cvtepu8_epi16(s8);
+                __m256i d16 = _mm256_loadu_si256((const __m256i*)(dst_ptr + j));
+                _mm256_storeu_si256((__m256i*)(dst_ptr + j), _mm256_add_epi16(d16, s16));
+            }
+        }
+        return;
+    }
+#endif
+    mipp::Reg<uint8_t> zero_v = uint8_t(0);
     for (int i = 0; i < (int)templ.features.size(); ++i)
     {
         Feature f = templ.features[i];
         f.x += offset_x;
         f.y += offset_y;
-        // Discard feature if out of bounds, possibly due to applying the offset
         if (f.x < 0 || f.y < 0 || f.x >= size.width || f.y >= size.height)
             continue;
-
         const uchar *lm_ptr = accessLinearMemory(linear_memories, f, T, W);
         {
-            short *dst_ptr = dst.ptr<short>();
-
-            if(mipp::N<uint8_t>() > 32){ //512 bits SIMD
-                for (int row = 0; row < 16; row += mipp::N<int16_t>()/16){
-                    mipp::Reg<int16_t> dst_v((int16_t*)dst_ptr + row*16);
-
-                    // load lm_ptr, 16 bytes once, for half
-                    uint8_t local_v[mipp::N<uint8_t>()] = {0};
-                    for(int slice=0; slice<mipp::N<uint8_t>()/16/2; slice++){
-                        std::copy_n(lm_ptr, 16, &local_v[16*slice]);
-                        lm_ptr += W;
-                    }
-                    mipp::Reg<uint8_t> src8_v(local_v);
-                    // uchar to short, once for N bytes
+            short *drow = dst_ptr;
+            for (int row = 0; row < 16; ++row){
+                for(int col=0; col<16; col+=mipp::N<int16_t>()){
+                    mipp::Reg<uint8_t> src8_v((uint8_t*)lm_ptr + col);
                     mipp::Reg<int16_t> src16_v(mipp::interleavelo(src8_v, zero_v).r);
-
+                    mipp::Reg<int16_t> dst_v((int16_t*)drow + col);
                     mipp::Reg<int16_t> res_v = src16_v + dst_v;
-                    res_v.store((int16_t*)dst_ptr);
-
-                    dst_ptr += mipp::N<int16_t>();
+                    res_v.store((int16_t*)drow + col);
                 }
-            }else{ // 256 128 or no SIMD
-                for (int row = 0; row < 16; ++row){
-                    for(int col=0; col<16; col+=mipp::N<int16_t>()){
-                        mipp::Reg<uint8_t> src8_v((uint8_t*)lm_ptr + col);
-
-                        // uchar to short, once for N bytes
-                        mipp::Reg<int16_t> src16_v(mipp::interleavelo(src8_v, zero_v).r);
-
-                        mipp::Reg<int16_t> dst_v((int16_t*)dst_ptr + col);
-                        mipp::Reg<int16_t> res_v = src16_v + dst_v;
-                        res_v.store((int16_t*)dst_ptr + col);
-                    }
-                    dst_ptr += 16;
-                    lm_ptr += W;
-                }
+                drow += 16;
+                lm_ptr += W;
             }
         }
     }

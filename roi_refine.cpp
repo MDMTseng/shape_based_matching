@@ -216,8 +216,25 @@ static cv::Point2f matchROI_subpixel(const cv::Mat& templ_roi,
     // At 5MP the COARSE matching dominates total time, not the refine.
     cv::Mat search_roi = scene_img(cv::Rect(x0, y0, x1 - x0, y1 - y0));
 
+    // EXPERIMENT: match on gradient magnitude instead of raw intensity.
+    // SBM_ROI_SOBEL=1 plain Sobel(3); =2 Gaussian(3)+Sobel (DoG, tames the noise a
+    // differentiator otherwise amplifies). Both template patch and scene window go
+    // through the same operator so TM_CCORR_NORMED still compares like with like.
+    static const int kSobel = getenv("SBM_ROI_SOBEL") ? atoi(getenv("SBM_ROI_SOBEL")) : 0;
+    cv::Mat t_use = templ_roi, s_use = search_roi;
+    cv::Mat t_g, s_g;
+    if (kSobel) {
+        auto grad = [](const cv::Mat& in, cv::Mat& out, int mode){
+            cv::Mat f = in; if (mode == 2) cv::GaussianBlur(in, f, cv::Size(3,3), 0);
+            cv::Mat gx, gy; cv::Sobel(f, gx, CV_32F, 1, 0, 3); cv::Sobel(f, gy, CV_32F, 0, 1, 3);
+            cv::magnitude(gx, gy, out);
+        };
+        grad(templ_roi, t_g, kSobel); grad(search_roi, s_g, kSobel);
+        t_use = t_g; s_use = s_g;
+    }
+
     cv::Mat result;
-    cv::matchTemplate(search_roi, templ_roi, result, cv::TM_CCORR_NORMED);
+    cv::matchTemplate(s_use, t_use, result, cv::TM_CCORR_NORMED);
 
     double max_val;
     cv::Point max_loc;

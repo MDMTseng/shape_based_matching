@@ -1,3 +1,4 @@
+#include <cstdarg>
 #include "line2Dup.h"
 #include "sbm_log.h"
 #include <iostream>
@@ -42,6 +43,11 @@ private:
     std::chrono::time_point<clock_> beg_;
 };
 
+// Profiler output goes straight to stderr: raising the sbm log level to Debug for it
+// cost ~19 ms/frame of per-template logging and made every SBM_PROFILE total a lie.
+static void sbm_prof_print(const char* fmt, ...) {
+    va_list ap; va_start(ap, fmt); fputs("[SBM_PROFILE] ", stderr); vfprintf(stderr, fmt, ap); fputc('\n', stderr); va_end(ap);
+}
 // Per-stage profiling accumulator (thread-safe for single match() call)
 struct StageProfile {
     double blur_ms = 0;
@@ -60,25 +66,25 @@ struct StageProfile {
 
     void print() const {
         if (!enabled) return;
-        sbm::sbm_log(sbm::LogLevel::Debug, "profile", "  %-28s %7.1fms", "GaussianBlur 7x7", blur_ms);
-        sbm::sbm_log(sbm::LogLevel::Debug, "profile", "  %-28s %7.1fms", "Sobel dx+dy (int16)", sobel_ms);
-        sbm::sbm_log(sbm::LogLevel::Debug, "profile", "  %-28s %7.1fms", "Quantize (comparison)", quantize_ms);
-        sbm::sbm_log(sbm::LogLevel::Debug, "profile", "  %-28s %7.1fms", "3x3 voting", voting_ms);
-        sbm::sbm_log(sbm::LogLevel::Debug, "profile", "  %-28s %7.1fms", "Fused spread+LUT+linearize", fused_spread_lut_ms);
-        sbm::sbm_log(sbm::LogLevel::Debug, "profile", "  %-28s %7.1fms", "Coarse similarity", coarse_match_ms);
-        sbm::sbm_log(sbm::LogLevel::Debug, "profile", "  %-28s %7.1fms", "Pyramid refinement", refine_ms);
+        sbm_prof_print( "  %-28s %7.1fms", "GaussianBlur 7x7", blur_ms);
+        sbm_prof_print( "  %-28s %7.1fms", "Sobel dx+dy (int16)", sobel_ms);
+        sbm_prof_print( "  %-28s %7.1fms", "Quantize (comparison)", quantize_ms);
+        sbm_prof_print( "  %-28s %7.1fms", "3x3 voting", voting_ms);
+        sbm_prof_print( "  %-28s %7.1fms", "Fused spread+LUT+linearize", fused_spread_lut_ms);
+        sbm_prof_print( "  %-28s %7.1fms", "Coarse similarity", coarse_match_ms);
+        sbm_prof_print( "  %-28s %7.1fms", "Pyramid refinement", refine_ms);
         {
             double tsum = tmpl_sim_ms + tmpl_scan_ms + tmpl_refine_ms;
             if (tsum > 0)
-                sbm::sbm_log(sbm::LogLevel::Debug, "profile",
+                sbm_prof_print(
                              "    coarse split (thread-time): similarity %.0f%%  threshold scan %.0f%%  T4 refine %.0f%%;  %ld templates, %.1f candidates/template (%ld hit the 256 cap)",
                              100 * tmpl_sim_ms / tsum, 100 * tmpl_scan_ms / tsum, 100 * tmpl_refine_ms / tsum,
                              templates, templates ? (double)cand_total / templates : 0.0, cand_capped);
         }
-        sbm::sbm_log(sbm::LogLevel::Debug, "profile", "  %-28s %7.1fms", "Sort + NMS", sort_nms_ms);
+        sbm_prof_print( "  %-28s %7.1fms", "Sort + NMS", sort_nms_ms);
         double total = blur_ms + sobel_ms + quantize_ms + voting_ms +
                        fused_spread_lut_ms + coarse_match_ms + refine_ms + sort_nms_ms;
-        sbm::sbm_log(sbm::LogLevel::Debug, "profile", "  %-28s %7.1fms", "TOTAL", total);
+        sbm_prof_print( "  %-28s %7.1fms", "TOTAL", total);
     }
     void reset() {
         blur_ms = sobel_ms = quantize_ms = voting_ms = 0;

@@ -2206,7 +2206,7 @@ struct StageProf {
     }
 };
 StageProf g_stage;
-struct StageProfInit { StageProfInit() { if (g_stage.every) { line2Dup::enableProfiling(true); sbm::setLogLevel(sbm::LogLevel::Debug); sbm::setLogFile(stderr); } } } g_stage_init;
+struct StageProfInit { StageProfInit() { if (g_stage.every) line2Dup::enableProfiling(true); } } g_stage_init;   // no log-level change: that cost 19 ms/frame
 }
 
 std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {

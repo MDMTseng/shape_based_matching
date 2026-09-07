@@ -21,10 +21,13 @@ static const float kAngleRematchDeg = []{   // angle change threshold for re-mat
 static constexpr float kAngleRewarpDeg          = 5.0f;   // angle change threshold for re-warping cached ROIs
 static constexpr int   kMinROIHalf              = 5;       // minimum ROI half-size
 static const float kOutlierMultiplier = []{   // outlier gate: drop |normal residual| > K * median (min K px)
-    // SBM_ROI_OUTLIER_K=<k> overrides 2.0 for the deformation A/B: on a sheared part the
-    // residuals are broad but CONSISTENT (+-2 px), and 2x median cuts through the middle of
-    // that distribution, so which half survives depends on the pose -> 2 deg pose flips.
-    const char* e = getenv("SBM_ROI_OUTLIER_K"); return (e && atof(e) > 0) ? (float)atof(e) : 2.0f; }();
+    // Default 4.0 (was 2.0, 2026-09-07). On a sheared/scaled part the residuals are broad
+    // but CONSISTENT (+-2 px); 2x median cut through the middle of that distribution, so
+    // which half survived depended on the pose and the rigid solve flipped by up to 2.2 deg
+    // between neighbouring angles (test1). 4x still rejects a wrong-edge lock (5-15 px vs a
+    // sub-px median) and is verdict-neutral on the undeformed fleet (fleet_eq 0 changes).
+    // SBM_ROI_OUTLIER_K=<k> overrides for A/B.
+    const char* e = getenv("SBM_ROI_OUTLIER_K"); return (e && atof(e) > 0) ? (float)atof(e) : 4.0f; }();
 static constexpr float kMaxThetaUpdate          = 0.2f;   // theta clamp (radians)
 static constexpr float kMaxTransUpdate          = 10.0f;  // translation clamp (pixels)
 static constexpr float kSolverRegularization    = 0.001f; // regularization for ATA diagonal

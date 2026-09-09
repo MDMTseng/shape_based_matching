@@ -2353,19 +2353,16 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
     }
     // ALTERNATE POSES SURVIVE NMS, TAGGED AS ONE OBJECT.
     //
-    // Spatial NMS used to keep one pose per location (unless nms_angle asked
-    // for more, in which case the extras came back as separate objects). A
-    // caller with an orientation test then had nothing to fall back on: the
-    // sig360 path retries the next candidate when an orientation-essential
-    // judge fails; the shape path just dropped the object. So a location now
-    // keeps up to ALT_MAX further poses that differ from every kept member by
-    // at least ALT_MIN_DEG, all sharing the primary's `group`. Same-group
-    // members are alternates of ONE object, best coarse score first; the
-    // caller measures them in order and reports one. nms_angle keeps its old
-    // meaning: a pose further than that from the keeper is its own group.
-    const int   ALT_MAX       = 3;
-    const float ALT_MIN_DEG   = 10.0f;
-    const float ALT_SCORE_GAP = 10.0f;   // an alternate this far under the primary is noise, not a pose
+    // ONE LOCATION IS ONE OBJECT; ITS POSES ARE ALTERNATES, BEST COARSE SCORE
+    // FIRST. A kept match within nms_r of an existing group joins it as an
+    // alternate when it differs from every member by at least cfg.nms_angle,
+    // and is a duplicate otherwise. The def's nms_angle is therefore the one
+    // knob that decides how many poses a location offers (360 = one pose,
+    // 10 = every pose 10 deg apart), the faces count as poses like any other,
+    // and nothing else caps the count or filters by score gap -- the caller
+    // measures the group in coarse-score order and keeps the first pose that
+    // passes its orientation test (owner's call, 2026-09-09; the earlier
+    // ALT_MAX=3 / ALT_SCORE_GAP=10 / face-arbitration rules are gone).
     // Positions are compared at the TEMPLATE CENTRE, not the bounding-box
     // corner line2Dup reports. The corner moves with the angle -- a 90 deg
     // rotation of a w x h template shifts it by |w-h|/2 -- and the user's
@@ -2425,18 +2422,14 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
             float mcx, mcy, kcx, kcy; centre_of(m, mcx, mcy); centre_of(k, kcx, kcy);
             float dx = (mcx - kcx) * inv_scale, dy = (mcy - kcy) * inv_scale;
             if (dx*dx + dy*dy >= nms_r * nms_r) continue;
-            float angle_diff = angle_diff_of(m, k);
-            if (angle_diff >= cfg.nms_angle) continue;        // far enough: its own object
-            // Same object as k. Alternate if it is a genuinely different pose,
-            // scores like one, and the group has room; otherwise a duplicate.
+            // Same place as k: the same object. An alternate pose if it sits
+            // at least nms_angle from every pose the group already holds,
+            // a duplicate otherwise.
             int g = group_of[ki];
-            if (angle_diff >= ALT_MIN_DEG && group_size[g] < 1 + ALT_MAX
-                && m.similarity >= k.similarity - ALT_SCORE_GAP) {
-                bool distinct = true;
-                for (size_t kj = 0; kj < nms_matches.size(); kj++)
-                    if (group_of[kj] == g && angle_diff_of(m, nms_matches[kj]) < ALT_MIN_DEG) { distinct = false; break; }
-                if (distinct) { join = g; break; }
-            }
+            bool distinct = true;
+            for (size_t kj = 0; kj < nms_matches.size(); kj++)
+                if (group_of[kj] == g && angle_diff_of(m, nms_matches[kj]) < cfg.nms_angle) { distinct = false; break; }
+            if (distinct) { join = g; break; }
             suppressed = true; break;
         }
         if (suppressed) continue;
@@ -2726,22 +2719,14 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
     }
 
     // Remove invalid entries
-    // FACE ARBITRATION: THE BETTER-FITTING FACE GOES FIRST, THE OTHER STAYS.
-    //
-    // Two refined results at the same place with opposite `flipped` are one
-    // object seen two ways. The refine residual (mean point-to-line fit of the
-    // sample points at full resolution, which a mirrored pose cannot fake)
-    // says which face fits; without residuals (refine != ROI) the coarse score
-    // does, which is the old behaviour. The losing face used to be DROPPED
-    // here. It is now merged into the winner's group and ranked after it, so
-    // a caller with an orientation test can still fall through to it: the
-    // residual decides the order, the caller's own judges decide the answer.
-    // Ranks: 0 = preferred face, 1 = the other; within a rank, coarse score.
-    const float FACE_SCORE_GAP = 10.0f;  // same margin ALT_SCORE_GAP uses for "noise, not a pose"
-    std::vector<int> rank(n_matches, 0);
+    // THE TWO FACES AT ONE PLACE ARE ONE OBJECT. Their groups are merged so a
+    // caller sees one object with both faces among its poses; the order is the
+    // coarse score, like every other alternate (nms_matches is sorted by it, so
+    // the earlier index is the better score and the later group folds into it).
+    // The refine residual no longer reorders anything.
     auto merge_into = [&](int from_g, int to_g) {
         for (int t = 0; t < n_matches; t++)
-            if (valid[t] && group_of[t] == from_g) { group_of[t] = to_g; rank[t] = 1; }
+            if (valid[t] && group_of[t] == from_g) group_of[t] = to_g;
     };
     for (int i = 0; i < n_matches; i++) {
         if (!valid[i]) continue;
@@ -2752,40 +2737,24 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
             if (!face_pair(nms_matches[i].class_id, nms_matches[j].class_id)) continue;
             float dx = results[i].x - results[j].x, dy = results[i].y - results[j].y;
             if (dx*dx + dy*dy >= nms_r * nms_r) continue;
-            const float ri = results[i].refine_residual, rj = results[j].refine_residual;
-            // The residual arbitrates only when the coarse scores cannot: a
-            // mirror-lock (both faces score alike) is what it was added for. A
-            // face that scores FACE_SCORE_GAP under the other is not a fit the
-            // residual should rescue -- on a 0.64x-rescaled model the residual
-            // of the true pose ran 3.5-4.6 px and the mirror at 74 vs 98 points
-            // won on residual alone, twice in five frames (92014, 2026-09-09).
-            const float ds = results[i].score - results[j].score;
-            int loser;
-            if (ds >= FACE_SCORE_GAP)        loser = j;                  // coarse says i, by a margin
-            else if (ds <= -FACE_SCORE_GAP)  loser = i;
-            else if (ri >= 0 && rj >= 0) loser = (rj < ri) ? i : j;     // close call: better fit wins
-            else if (ri >= 0 || rj >= 0) loser = (ri >= 0) ? j : i;     // only one refined
-            else loser = (results[j].score > results[i].score) ? i : j; // coarse score
-            const int winner = (loser == i) ? j : i;
             sbm::sbm_log(sbm::LogLevel::Debug, "face",
-                "[FACE] at (%.0f,%.0f): flip=%d score=%.1f res=%.2f  vs  flip=%d score=%.1f res=%.2f  -> first flip=%d",
-                results[i].x, results[i].y, (int)results[i].flipped, results[i].score, ri,
-                (int)results[j].flipped, results[j].score, rj, (int)results[winner].flipped);
-            merge_into(group_of[loser], group_of[winner]);
+                "[FACE] at (%.0f,%.0f): flip=%d score=%.1f and flip=%d score=%.1f are one object; coarse order kept",
+                results[i].x, results[i].y, (int)results[i].flipped, results[i].score,
+                (int)results[j].flipped, results[j].score);
+            merge_into(group_of[j], group_of[i]);
         }
     }
 
     // Emit in the order a caller should try them: groups by first appearance
-    // (i.e. by their best coarse score), inside a group the preferred face
-    // first, inside a face by coarse score. nms_matches is already in coarse
-    // score order, so a stable sort on (group-first-index, rank) does it.
+    // (i.e. by their best coarse score), inside a group by coarse score.
+    // nms_matches is already in coarse score order, so a stable sort on the
+    // group's first index does it.
     std::vector<int> order;
     for (int i = 0; i < n_matches; i++) if (valid[i]) order.push_back(i);
     std::vector<int> first_of(n_matches, n_matches);
     for (int i : order) if (i < first_of[group_of[i]]) first_of[group_of[i]] = i;
     std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
-        if (first_of[group_of[a]] != first_of[group_of[b]]) return first_of[group_of[a]] < first_of[group_of[b]];
-        return rank[a] < rank[b];
+        return first_of[group_of[a]] < first_of[group_of[b]];
     });
     std::vector<MatchResult> final_results;
     for (int i : order) { results[i].group = group_of[i]; final_results.push_back(results[i]); }

@@ -2624,10 +2624,29 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
                 sample_pts.push_back(sp);
             }
 
+            // THE REFINE TEMPLATE FOLLOWS THE MATCHED SCALE. refineROI knows
+            // nothing about scale: it cuts patches from templ_img around
+            // sample points measured from the template centre and looks for
+            // them in the scene around the pose. At matched_scale != 1 (a def
+            // taught at one magnification run at another) the points sat
+            // 1/scale too far from the centre and the patches were 1/scale too
+            // big for what the scene shows -- residual 3.5-5.9 px on every frame
+            // of a 0.64x part and the odd wrong face (92014, 2026-09-09). Same
+            // treatment the roi_prescale pass gives itself, applied first.
+            cv::Mat templ_use = fs.templ_image;
+            if (!sample_pts.empty() && std::fabs(matched_scale - 1.0f) > 1e-3f) {
+                cv::resize(fs.templ_image, templ_use, cv::Size(), matched_scale, matched_scale,
+                           matched_scale < 1.0f ? cv::INTER_AREA : cv::INTER_LINEAR);
+                for (auto &p : sample_pts) {
+                    p.pos *= matched_scale;
+                    p.roi_half = std::max(5, (int)std::lround(p.roi_half * matched_scale));
+                }
+            }
             if (!sample_pts.empty()) {
                 roi_refine::ROIConfig roi_cfg;
-                roi_cfg.roi_half = kDefaultROIHalf;
-                roi_cfg.search_half = kDefaultROIHalf;
+                roi_cfg.roi_half = std::fabs(matched_scale - 1.0f) > 1e-3f
+                    ? std::max(5, (int)std::lround(kDefaultROIHalf * matched_scale)) : kDefaultROIHalf;
+                roi_cfg.search_half = kDefaultROIHalf;   // scene px: the scene is not rescaled
                 roi_cfg.max_iters = cfg.roi_max_iters > 0 ? cfg.roi_max_iters : kDefaultROIMaxIters;
                 roi_cfg.weight_by_lock = cfg.roi_weight_by_distinct;
                 // SBM_ROI_VERBOSE=1: per-point src/dst/residual + outlier + iteration log
@@ -2657,7 +2676,7 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
                     const float pre = roi_pre;
                     if (pre > 0.f && !pre_scene.empty()) {
                         cv::Mat tS;
-                        cv::resize(fs.templ_image, tS, cv::Size(), pre, pre, cv::INTER_AREA);
+                        cv::resize(templ_use, tS, cv::Size(), pre, pre, cv::INTER_AREA);
                         const cv::Mat& sS = pre_scene;
                         std::vector<roi_refine::SamplePoint> spS = sample_pts;
                         for (auto &p : spS) { p.pos *= pre; p.roi_half = std::max(5, (int)std::lround(p.roi_half * pre)); }
@@ -2671,7 +2690,7 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
                 cv::Vec3f init_pose(scene_x, scene_y, raw_angle);
                 float roi_residual = -1.0f; int roi_npts = 0, roi_ninl = 0;
                 auto refined_pose = roi_refine::refineROI(
-                    fs.templ_image, scene, sample_pts, init_pose, roi_cfg, &roi_residual, &roi_npts, &roi_ninl);
+                    templ_use, scene, sample_pts, init_pose, roi_cfg, &roi_residual, &roi_npts, &roi_ninl);
                 roi_residual_out = roi_residual;
                 roi_npts_out = roi_npts; roi_ninl_out = roi_ninl;
 

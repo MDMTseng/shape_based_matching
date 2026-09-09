@@ -28,6 +28,11 @@ static constexpr float kMinImprovementFactor    = 0.99f;   // Swap must beat cur
 static constexpr float kSolverRegularization    = 0.001f;  // Tikhonov regularization for 3x3 rigid solver
 // Mirrored as sbm::kDefaultROIHalfPublic in the header; keep them equal.
 static constexpr int   kDefaultROIHalf          = sbm::kDefaultROIHalfPublic;   // ROI search/template window half-size
+// Auto ROI point spacing = one FULL window (2 x half): two auto-picked windows
+// never overlap. It was the half-window (<=50% overlap) until 2026-09-09; the
+// operator saw three windows stacked on one edge in the studio and asked for
+// no overlap at all.
+static constexpr int   kAutoROISpacing          = 2 * sbm::kDefaultROIHalfPublic;
 static constexpr int   kDefaultROIMaxIters      = 3;       // Default max iterations for ROI refinement
 static constexpr int   kDefaultOptPoints        = sbm::kDefaultOptPointsPublic;  // see shape_matcher.h
 
@@ -612,7 +617,7 @@ std::vector<cv::Point2f> FeatureSet::selectOptimizedPoints(int max_points, float
         // load, not only re-generated ones. SBM_NO_ROI_DEDUP=1 restores verbatim.
         float sp_req = min_spacing;
         if (const char* e = getenv("SBM_ROI_SPACING")) sp_req = (float)atof(e);   // evaluation override
-        float sp = (sp_req < 0.0f) ? (float)kDefaultROIHalf : sp_req;
+        float sp = (sp_req < 0.0f) ? (float)kAutoROISpacing : sp_req;
         if (sp <= 0.0f || getenv("SBM_NO_ROI_DEDUP")) {
             cached_opt_points = user_opt_points;
         } else {
@@ -637,10 +642,10 @@ std::vector<cv::Point2f> FeatureSet::selectOptimizedPoints(int max_points, float
         return cached_opt_points;
 
     // Minimum pairwise spacing so selected ROI windows don't overlap heavily.
-    // 0 = off (legacy), <0 = auto (ROI half-size, ~<=50% overlap), >0 = explicit.
+    // 0 = off (legacy), <0 = auto (one full ROI window, no overlap), >0 = explicit.
     // The 5x5 grid alone caps per-cell count but not pairwise distance, so points
     // could otherwise sit a few px apart.
-    float min_sp = (min_spacing < 0.0f) ? (float)kDefaultROIHalf : min_spacing;
+    float min_sp = (min_spacing < 0.0f) ? (float)kAutoROISpacing : min_spacing;
     float min_sp_sq = min_sp * min_sp;
 
     std::vector<cv::Point2f> result;
@@ -657,7 +662,7 @@ std::vector<cv::Point2f> FeatureSet::selectOptimizedPoints(int max_points, float
     // unchanged. (Replicates the validated edge-Dopt experiment.)
     // ================================================================
     if (edge_only) {
-        float sp = (min_spacing < 0.0f) ? (float)kDefaultROIHalf : min_spacing;
+        float sp = (min_spacing < 0.0f) ? (float)kAutoROISpacing : min_spacing;
         float sp2 = sp * sp;
         float hw = templ_width/2.0f - 5, hh = templ_height/2.0f - 5;
         struct EC { float px, py, j0, j1, j2; };

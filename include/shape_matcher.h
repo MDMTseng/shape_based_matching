@@ -180,7 +180,11 @@ struct FeatureSet {
     ///   Avoids corner-clustering degeneracy; fixes worst-case on shapes with clustered
     ///   corners while keeping the original 2D refine. Same per-point matching as before.
     /// @return Positions relative to template center.
-    std::vector<cv::Point2f> selectOptimizedPoints(int max_points = 8, float min_spacing = 0.0f,
+    // min_spacing default is AUTO (-1): every caller that does not say otherwise --
+    // the studio preview, the debug overlay, the freeze -- picks the same spaced
+    // set, so the cache (first call wins) cannot hand a spacing-off preview set
+    // to the freeze. The matcher passes its config value explicitly.
+    std::vector<cv::Point2f> selectOptimizedPoints(int max_points = 8, float min_spacing = -1.0f,
                                                    bool edge_only = false) const;
 
     /// V3: Match-confidence augmented D-optimal selection.

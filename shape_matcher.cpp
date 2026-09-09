@@ -1833,7 +1833,15 @@ struct ShapeMatcher::Impl {
     // Pre-compute the ROI/ICP caches for a FeatureSet (optimized points, per-point
     // lock info / score floors, template EdgeScene). Run once per template at addModel.
     void precomputeFeatureCaches(FeatureSet& fs) {
-        fs.selectOptimizedPoints(kDefaultOptPoints, match_config.roi_min_spacing,
+        // The FIRST selectOptimizedPoints call fills the cache and every later
+        // call returns it. With the config's spacing OFF (the default) this
+        // pre-compute cached an unspaced set, and the studio's 自動產生 (which
+        // asks for auto spacing) got that set back: three windows stacked on
+        // one edge (CT 2026-09-09). A fresh auto pick is always spaced; the
+        // config spacing keeps governing only the dedup of a def's STORED
+        // points (user_opt_points path), which is the measurement-changing one.
+        float pre_sp = (match_config.roi_min_spacing == 0.0f) ? -1.0f : match_config.roi_min_spacing;
+        fs.selectOptimizedPoints(kDefaultOptPoints, pre_sp,
                                  match_config.roi_edge_only_points);
         if (!fs.templ_image.empty() && !fs.cached_opt_points.empty()) {
             auto& pts = fs.cached_opt_points;

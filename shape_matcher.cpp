@@ -2718,6 +2718,7 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
     // a caller with an orientation test can still fall through to it: the
     // residual decides the order, the caller's own judges decide the answer.
     // Ranks: 0 = preferred face, 1 = the other; within a rank, coarse score.
+    const float FACE_SCORE_GAP = 10.0f;  // same margin ALT_SCORE_GAP uses for "noise, not a pose"
     std::vector<int> rank(n_matches, 0);
     auto merge_into = [&](int from_g, int to_g) {
         for (int t = 0; t < n_matches; t++)
@@ -2733,8 +2734,17 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
             float dx = results[i].x - results[j].x, dy = results[i].y - results[j].y;
             if (dx*dx + dy*dy >= nms_r * nms_r) continue;
             const float ri = results[i].refine_residual, rj = results[j].refine_residual;
+            // The residual arbitrates only when the coarse scores cannot: a
+            // mirror-lock (both faces score alike) is what it was added for. A
+            // face that scores FACE_SCORE_GAP under the other is not a fit the
+            // residual should rescue -- on a 0.64x-rescaled model the residual
+            // of the true pose ran 3.5-4.6 px and the mirror at 74 vs 98 points
+            // won on residual alone, twice in five frames (92014, 2026-09-09).
+            const float ds = results[i].score - results[j].score;
             int loser;
-            if (ri >= 0 && rj >= 0) loser = (rj < ri) ? i : j;          // better fit wins
+            if (ds >= FACE_SCORE_GAP)        loser = j;                  // coarse says i, by a margin
+            else if (ds <= -FACE_SCORE_GAP)  loser = i;
+            else if (ri >= 0 && rj >= 0) loser = (rj < ri) ? i : j;     // close call: better fit wins
             else if (ri >= 0 || rj >= 0) loser = (ri >= 0) ? j : i;     // only one refined
             else loser = (results[j].score > results[i].score) ? i : j; // coarse score
             const int winner = (loser == i) ? j : i;

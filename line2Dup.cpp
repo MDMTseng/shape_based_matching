@@ -129,6 +129,9 @@ static inline int getLabel(int quantized)
     }
 }
 
+// Feature/Template serialisation carries no SIMD, so exactly one of the two ISA
+// builds defines it; the other is compiled with LINE2DUP_NO_SHARED_DEFS.
+#ifndef LINE2DUP_NO_SHARED_DEFS
 void Feature::read(const FileNode &fn)
 {
     FileNodeIterator fni = fn.begin();
@@ -173,6 +176,14 @@ void Template::write(FileStorage &fs) const
     }
     fs << "]"; // features
 }
+#endif  // LINE2DUP_NO_SHARED_DEFS
+
+
+// Everything from here down is the SIMD half, compiled once per instruction-set
+// baseline. The plain-data read/write above are NOT: they would collide at link
+// time, so the second build is told to skip them.
+namespace LINE2DUP_ISA {
+
 
 static Rect cropTemplates(std::vector<Template> &templates)
 {
@@ -3187,4 +3198,6 @@ void Detector::writeClasses(const std::string &format) const
     }
 }
 
+
+} // namespace LINE2DUP_ISA
 } // namespace line2Dup

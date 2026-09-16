@@ -4,6 +4,7 @@
 #include "shape_matcher.h"
 #include "sbm_log.h"
 #include "line2Dup.h"
+#include "detector_iface.h"
 #include "icp_refine.h"
 #include "roi_refine.h"
 
@@ -187,7 +188,8 @@ FeatureSet extractFeatures(const cv::Mat& templ_gray,
         use_mask = cv::Mat(templ_gray.size(), CV_8U, cv::Scalar(255));
 
     // Use meiqua detector to extract features
-    line2Dup::Detector det(num_features, pyramid_T, weak_thresh, strong_thresh);
+    auto detp = line2Dup::makeDetector(num_features, pyramid_T, weak_thresh, strong_thresh);
+    auto& det = *detp;
     int id = det.addTemplate(templ_gray, "_extract_", use_mask);
     if (id < 0) return fs;
 
@@ -1736,21 +1738,21 @@ struct ModelInfo {
 
 struct ShapeMatcher::Impl {
     MatchConfig match_config;
-    line2Dup::Detector detector;
+    std::unique_ptr<line2Dup::IDetector> detector;
     std::vector<ModelInfo> models;
     int total_templates = 0;
 
     // Pre-built scaled detector for match_scale < 1.0.
     // Features are scaled once at addModel time — zero per-match overhead.
-    std::unique_ptr<line2Dup::Detector> scaled_detector;
+    std::unique_ptr<line2Dup::IDetector> scaled_detector;
 
     Impl(const MatchConfig& cfg)
         : match_config(cfg),
-          detector(128, cfg.T_levels,
-                   cfg.weak_threshold, cfg.strong_threshold) {
+          detector(line2Dup::makeDetector(128, cfg.T_levels,
+                                          cfg.weak_threshold, cfg.strong_threshold)) {
         if (cfg.match_scale < 1.0f && cfg.match_scale > 0.1f) {
-            scaled_detector.reset(new line2Dup::Detector(
-                128, cfg.T_levels, cfg.weak_threshold, cfg.strong_threshold));
+            scaled_detector = line2Dup::makeDetector(
+                128, cfg.T_levels, cfg.weak_threshold, cfg.strong_threshold);
         }
     }
 
@@ -1940,7 +1942,7 @@ struct ShapeMatcher::Impl {
     }
 
     // Add templates for one model at one scale to a given detector
-    int addModelAtScaleTo(line2Dup::Detector& det,
+    int addModelAtScaleTo(line2Dup::IDetector& det,
                           const std::string& class_id,
                           const FeatureSet& fs,
                           const AngleRange& angle,
@@ -2035,7 +2037,7 @@ struct ShapeMatcher::Impl {
                         const FeatureSet& fs,
                         const AngleRange& angle,
                         float scale) {
-        return addModelAtScaleTo(detector, class_id, fs, angle, scale);
+        return addModelAtScaleTo(*detector, class_id, fs, angle, scale);
     }
 };
 
@@ -2212,14 +2214,14 @@ struct StageProf {
         if (++n < every) return;
         fprintf(stderr, "[SBM_PROFILE] %d frames avg: total %.2f ms = prep %.2f + coarse %.2f + nms %.2f + refine %.2f (%.1f candidates/frame)\n",
                 n, total / n, prep / n, coarse / n, nms / n, refine / n, (double)cands / n);
-        line2Dup::printProfiling();   // line2Dup's own accumulators over the same frames, per stage
-        line2Dup::resetProfiling();
+        line2Dup::printProfilingDispatch();   // line2Dup's own accumulators over the same frames, per stage
+        line2Dup::resetProfilingDispatch();
         fflush(stderr);
         n = 0; prep = coarse = nms = refine = total = 0; cands = 0;
     }
 };
 StageProf g_stage;
-struct StageProfInit { StageProfInit() { if (g_stage.every) line2Dup::enableProfiling(true); } } g_stage_init;   // no log-level change: that cost 19 ms/frame
+struct StageProfInit { StageProfInit() { if (g_stage.every) line2Dup::enableProfilingDispatch(true); } } g_stage_init;   // no log-level change: that cost 19 ms/frame
 }
 
 std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
@@ -2268,8 +2270,8 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
 
     // Use scaled_detector if available (pre-built at addModel time),
     // otherwise fall back to scale-in-place on the main detector.
-    line2Dup::Detector& match_detector = (using_match_scale && impl_->scaled_detector)
-        ? *impl_->scaled_detector : impl_->detector;
+    line2Dup::IDetector& match_detector = (using_match_scale && impl_->scaled_detector)
+        ? *impl_->scaled_detector : *impl_->detector;
 
     // Fallback: scale features in-place (only when no pre-built scaled detector)
     std::map<std::string, std::vector<std::vector<line2Dup::Template>>> saved_templates;
@@ -2277,7 +2279,7 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
     if (scaling_in_place) {
         float s = cfg.match_scale;
         for (auto& cid : class_ids) {
-            auto& tps = impl_->detector.getClassTemplates(cid);
+            auto& tps = impl_->detector->getClassTemplates(cid);
             saved_templates[cid] = tps;  // deep copy
             for (auto& tp : tps)
                 for (auto& t : tp) {
@@ -2294,8 +2296,8 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
     }
 
     // Apply config to modality
-    match_detector.getModalities()->blur_kernel_size = cfg.blur_kernel_size;
-    match_detector.getModalities()->skip_voting = cfg.skip_voting;
+    match_detector.setBlurKernelSize(cfg.blur_kernel_size);
+    match_detector.setSkipVoting(cfg.skip_voting);
 
     // Run meiqua matching
     const double _pt1 = StageProf::now();
@@ -2305,7 +2307,7 @@ std::vector<MatchResult> ShapeMatcher::match(const cv::Mat& scene) const {
     // Restore original templates if we scaled in-place
     if (scaling_in_place) {
         for (auto& cid : class_ids)
-            impl_->detector.getClassTemplates(cid) = std::move(saved_templates[cid]);
+            impl_->detector->getClassTemplates(cid) = std::move(saved_templates[cid]);
     }
 
     // NMS — auto radius from template size if not set

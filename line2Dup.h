@@ -11,6 +11,13 @@
 
 #include "mipp.h"  // for SIMD in different platforms
 
+#ifndef LINE2DUP_ISA
+// Which instruction-set build of the SIMD half this translation unit is. The
+// build compiles line2Dup.cpp twice, once per value; a lone build (tests,
+// anyone including this header directly) gets the portable one.
+#define LINE2DUP_ISA base
+#endif
+
 namespace line2Dup
 {
 
@@ -43,6 +50,13 @@ struct Template
     void write(cv::FileStorage &fs) const;
 };
 
+// ISA-specialised half: everything below carries SIMD code, so it is compiled
+// once per instruction-set baseline into its own nested namespace
+// (line2Dup::avx2, line2Dup::base) and picked at RUNTIME -- see
+// detector_iface.h. The plain-data types (Feature, Template, Match) stay in
+// line2Dup itself: they are compiled once and cross the ISA boundary as-is,
+// which is what keeps the dispatch free of any struct conversion.
+namespace LINE2DUP_ISA {
 class ColorGradientPyramid
 {
 public:
@@ -132,6 +146,7 @@ public:
         return p;
     }
 };
+} // namespace LINE2DUP_ISA
 
 struct Match
 {
@@ -169,6 +184,13 @@ inline Match::Match(int _x, int _y, float _similarity, const std::string &_class
 {
 }
 
+// ISA-specialised half: everything below carries SIMD code, so it is compiled
+// once per instruction-set baseline into its own nested namespace
+// (line2Dup::avx2, line2Dup::base) and picked at RUNTIME -- see
+// detector_iface.h. The plain-data types (Feature, Template, Match) stay in
+// line2Dup itself: they are compiled once and cross the ISA boundary as-is,
+// which is what keeps the dispatch free of any struct conversion.
+namespace LINE2DUP_ISA {
 class Detector
 {
 public:
@@ -271,6 +293,7 @@ protected:
 void enableProfiling(bool enable);
 void resetProfiling();
 void printProfiling();
+} // namespace LINE2DUP_ISA
 
 } // namespace line2Dup
 
